@@ -37,7 +37,6 @@ LIMIT_PATTERNS = [
     r"claude (ai )?usage limit",
     r"\b5-?hour limit\b",
     r"limit will reset",
-    r"limit reached",
     r"rate[_ ]limit",
     r"rate limited",
     r"too many requests",
