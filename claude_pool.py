@@ -50,19 +50,27 @@ CLAUDE_BINS = (
 class AllAccountsExhausted(RuntimeError):
     """쓸 수 있는 계정이 하나도 안 남았을 때."""
 
-    def __init__(self, message, reset_at=None):
+    def __init__(self, message, reset_at=None, notify_message=None):
         super().__init__(message)
         self.reset_at = reset_at
+        self.notify_message = notify_message  # 알림을 보낼 차례면 그 문구, 아니면 None
 
 
 def log(msg: str) -> None:
+    """기록은 파일에만 남긴다.
+
+    오류 통로로 내보내면 봇이 출력을 합쳐 받을 때(2>&1) 이 줄이 claude 응답 앞에 섞여
+    JSON 해석이 깨진다. 하필 계정 교체 순간에만 깨져서 원인 찾기가 어렵다.
+    화면으로 보고 싶으면 CLAUDE_ROTATOR_VERBOSE=1 을 준다.
+    """
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
-    print(f"[pool] {msg}", file=sys.stderr)
+    if os.environ.get("CLAUDE_ROTATOR_VERBOSE"):
+        print(f"[pool] {msg}", file=sys.stderr)
 
 
 def claude_bin() -> str:
@@ -181,13 +189,15 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
 
         nxt = st.pick_next(state, exclude=used_label)
         if nxt is None:
-            st.save_state(state)
             reset_at = st.earliest_reset(state)
             when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
             msg = f"클로드 구독 계정이 전부 한도에 걸렸습니다. 가장 빨리 풀리는 시각: {when}"
             log(msg)
-            notify(msg)
-            raise AllAccountsExhausted(msg, reset_at=reset_at)
+            # 소진 구간마다 한 건만 알린다. 봇 55곳이 각자 부르면 알림이 쏟아진다.
+            should_notify = st.mark_notified(state, reset_at)
+            st.save_state(state)
+            # 실제 전송은 잠금 밖에서 한다. 통신이 잠금을 붙잡으면 뒤에 온 봇들이 대기하다 터진다.
+            raise AllAccountsExhausted(msg, reset_at=reset_at, notify_message=msg if should_notify else None)
 
         if not _switch(nxt):
             st.save_state(state)
