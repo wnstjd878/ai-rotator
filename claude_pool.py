@@ -38,7 +38,7 @@ import limit_detect  # noqa: E402
 import pool_state as st  # noqa: E402
 
 LOG_FILE = BASE / "rotator.log"
-UNKNOWN_COOLDOWN = 30 * 60  # 자격 문제로 막을 때 쉬게 할 시간(초)
+BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
 CLAUDE_BINS = (
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
@@ -181,11 +181,13 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 until = limit_detect.reset_epoch(out, err)
                 st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
                 left = int(until - time.time())
-                log(f"'{used_label}' 한도 도달 — {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
-            else:  # auth
-                st.mark_blocked(state, used_label, time.time() + UNKNOWN_COOLDOWN,
+                log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
+            else:  # auth: 갈아끼운 저장본이 상한 경우에만 여기로 온다
+                st.mark_blocked(state, used_label, time.time() + BROKEN_CRED_COOLDOWN,
                                 limit_detect.short_reason(out, err))
-                log(f"'{used_label}' 로그인 문제 — 30분 쉬게 하고 다음 계정으로 넘깁니다")
+                log(f"'{used_label}' 저장본이 상했습니다(로그인 거절). "
+                    f"{BROKEN_CRED_COOLDOWN // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
+                    f"그 계정으로 다시 로그인해 save_account.py 로 저장하세요.")
 
         nxt = st.pick_next(state, exclude=used_label)
         if nxt is None:
@@ -212,13 +214,17 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
 def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs):
     """claude CLI 를 순환 보호 아래서 실행한다. subprocess.run 과 같은 결과를 돌려준다.
 
-    한도/로그인 거절이면 계정을 바꿔 같은 요청을 다시 보낸다.
+    한도 거절이면 계정을 바꿔 같은 요청을 다시 보낸다.
+    로그인 거절은 두 가지로 갈린다. 처음부터 났으면 이 환경에서 로그인이 안 된 것이라
+    계정을 안 바꾸고 멈추고, 계정을 갈아끼운 뒤에 났으면 그 저장본이 상한 것이라
+    쉬게 하고 다음 계정으로 넘어간다.
     그 밖의 실패는 한 번만 그대로 재시도하고, 결과를 그대로 돌려준다.
     쓸 계정이 없으면 AllAccountsExhausted 를 올린다.
     """
     labels = st.saved_labels()
     if max_attempts is None:
         max_attempts = max(2, len(labels) + 1)
+    max_attempts = max(1, int(max_attempts))  # 0 이하가 들어와도 최소 한 번은 실행
 
     # 결과를 읽어야 한도 거절을 알아볼 수 있다. 호출부가 따로 정했으면 그 뜻을 따른다.
     # stdout/stderr 를 직접 지정한 호출에 capture_output 을 같이 넣으면 파이썬이 바로 거부한다.
@@ -233,35 +239,55 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
     want_check = bool(kwargs.pop("check", False))
 
     retried_plain = False
+    switched_here = False  # 이 호출 안에서 계정을 갈아끼웠는지
+    proc = None
     for attempt in range(max_attempts):
         state = st.prune_blocked(st.load_state())
         used_label = state.get("current")
 
-        proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)
+        try:
+            proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)
+        except Exception:
+            raise
         verdict = limit_detect.classify(proc.returncode, proc.stdout, proc.stderr)
 
         if verdict == "ok":
-            return proc
+            return _finish(proc, args, want_check)
 
-        if verdict == "auth":
+        if verdict == "auth" and not switched_here:
             # 계정을 바꿔도 안 풀린다. ssh 비대화형처럼 자격을 아예 못 읽는 환경에서 나오는데,
             # 이때 계정을 돌리면 멀쩡한 계정들이 줄줄이 막힌 것으로 잘못 기록된다.
-            log("로그인이 안 된 상태입니다 — 계정을 바꾸지 않습니다. "
+            log("로그인이 안 된 상태입니다. 계정을 바꾸지 않습니다. "
                 "화면 세션에서 claude /login 을 했는지 확인하세요.")
-            return proc
+            return _finish(proc, args, want_check)
 
         if verdict == "error":
             if retried_plain:
-                return proc  # 원인 모를 실패는 호출부가 판단하도록 그대로 넘김
+                return _finish(proc, args, want_check)  # 원인 모를 실패는 호출부가 판단하도록
             retried_plain = True
-            log(f"한도와 무관한 실패 — 한 번 더 시도합니다 (종료코드 {proc.returncode})")
+            log(f"한도와 무관한 실패. 한 번 더 시도합니다 (종료코드 {proc.returncode})")
             time.sleep(2)
             continue
 
-        # limit → 계정 교체 후 재시도
-        _rotate_after_failure(used_label, verdict, proc.stdout, proc.stderr)
+        # limit, 또는 갈아끼운 저장본이 상한 auth → 계정 교체 후 재시도
+        try:
+            nxt = _rotate_after_failure(used_label, verdict, proc.stdout, proc.stderr)
+        except AllAccountsExhausted as e:
+            if e.notify_message:  # 전송은 잠금 밖에서
+                notify(e.notify_message)
+            raise
+        switched_here = switched_here or (nxt != used_label)
 
     log("재시도 횟수를 다 썼습니다. 마지막 결과를 그대로 돌려줍니다.")
+    return _finish(proc, args, want_check)
+
+
+def _finish(proc, args, want_check):
+    """호출부가 check=True 를 원했다면 원래 뜻대로 실패에서 예외를 올린다."""
+    if want_check and proc is not None and proc.returncode != 0:
+        raise subprocess.CalledProcessError(
+            proc.returncode, args, output=proc.stdout, stderr=proc.stderr
+        )
     return proc
 
 

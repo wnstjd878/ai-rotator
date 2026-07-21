@@ -120,18 +120,40 @@ def saved_labels() -> list[str]:
     return sorted(f.stem for f in CREDS_DIR.glob("*.json") if f.stat().st_size > 0)
 
 
+def _blank_state() -> dict:
+    return {"current": None, "blocked": {}, "switched_at": None, "history": [],
+            "notified_for": None, "notified_at": None}
+
+
 def load_state() -> dict:
+    """상태 파일을 읽는다. 없거나 깨졌으면 기본값으로 시작한다(예외를 올리지 않는다)."""
     if not STATE_FILE.exists():
-        return {"current": None, "blocked": {}, "switched_at": None, "history": []}
+        return _blank_state()
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {"current": None, "blocked": {}, "switched_at": None, "history": []}
-    data.setdefault("current", None)
-    data.setdefault("blocked", {})
-    data.setdefault("switched_at", None)
-    data.setdefault("history", [])
-    return data
+        return _blank_state()
+    if not isinstance(data, dict):  # 목록이나 숫자가 들어 있어도 죽지 않게
+        return _blank_state()
+
+    out = _blank_state()
+    out.update({k: v for k, v in data.items()})
+    if not isinstance(out.get("blocked"), dict):
+        out["blocked"] = {}
+    else:
+        # 숫자가 아닌 해제 시각은 버린다. 그대로 두면 나중에 float 변환에서 터진다.
+        clean = {}
+        for k, v in out["blocked"].items():
+            try:
+                clean[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        out["blocked"] = clean
+    if not isinstance(out.get("history"), list):
+        out["history"] = []
+    if not isinstance(out.get("current"), (str, type(None))):
+        out["current"] = None
+    return out
 
 
 def save_state(state: dict) -> None:
@@ -144,9 +166,41 @@ def save_state(state: dict) -> None:
 def prune_blocked(state: dict, now: float | None = None) -> dict:
     """한도가 풀린 계정을 막힘 목록에서 뺀다."""
     now = time.time() if now is None else now
-    blocked = {k: v for k, v in (state.get("blocked") or {}).items() if float(v) > now}
+    blocked = {}
+    for k, v in (state.get("blocked") or {}).items():
+        try:
+            until = float(v)
+        except (TypeError, ValueError):
+            continue  # 숫자가 아닌 값은 버린다
+        if until > now:
+            blocked[k] = until
     state["blocked"] = blocked
+    if not blocked:
+        state["notified_for"] = None  # 하나라도 풀렸으면 다음 소진 때 다시 알린다
     return state
+
+
+def mark_notified(state: dict, reset_at: float | None, now: float | None = None) -> bool:
+    """전 계정 소진 알림을 지금 보내야 하는지. 보낼 차례면 True 를 주고 표시한다.
+
+    같은 소진 구간에서는 한 번만 보낸다. 봇 55곳이 각자 부르면 알림이 쏟아지기 때문.
+    """
+    now = time.time() if now is None else now
+    key = round(float(reset_at)) if reset_at else None
+    prev_key = state.get("notified_for")
+    prev_at = state.get("notified_at")
+
+    if key is not None and prev_key == key:
+        return False
+    if key is None and prev_at:
+        try:
+            if now - float(prev_at) < 3600:  # 해제 시각을 모를 땐 한 시간에 한 번
+                return False
+        except (TypeError, ValueError):
+            pass
+    state["notified_for"] = key
+    state["notified_at"] = now
+    return True
 
 
 def is_blocked(state: dict, label: str, now: float | None = None) -> bool:
