@@ -209,6 +209,25 @@ def case_reset_parsing(tmp):
                           "result": "Sonnet 5 uses your weekly limit much more slowly than Opus."})
     check("성공 응답의 한도 단어는 무시", limit_detect.classify(0, helpful, "") == "ok")
 
+    # 계정을 바꿔도 안 풀리는 한도들. 이걸 한도로 오판하면 멀쩡한 계정이 다 막힌다.
+    not_subscription = [
+        "Context limit reached",
+        "Subagent nesting limit reached (depth 3 of 3)",
+        "Concurrent export limit reached",
+        "recursion limit reached",
+        "spend limit reached",
+        "Prompt is too long",
+        "Request exceeds size limits",
+    ]
+    for w in not_subscription:
+        body = json.dumps({"is_error": True, "result": w}, ensure_ascii=False)
+        check(f"한도로 안 봄: {w[:30]}", limit_detect.classify(1, body, "") == "error")
+
+    # 한 응답에 둘 다 있으면 진짜 구독 한도 쪽을 따른다
+    mixed = json.dumps({"is_error": True,
+                        "result": "Context limit reached. usage limit reached"}, ensure_ascii=False)
+    check("섞여 있으면 구독 한도로 판정", limit_detect.classify(1, mixed, "") == "limit")
+
 
 def case_auth(tmp):
     print("\n[7] 로그인이 안 된 상태면 계정을 바꾸지 않는다")

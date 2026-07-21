@@ -57,8 +57,29 @@ AUTH_PATTERNS = [
     r"unauthorized",
 ]
 
+# 계정을 바꿔도 안 풀리는 "한도" 들. 이 문구는 판정 전에 본문에서 지운다.
+# claude 실행 파일 안에 실제로 들어 있는 표기들이며, 그냥 두면 프롬프트가 길거나
+# 예산 상한에 걸렸을 때 멀쩡한 계정을 줄줄이 막아버린다.
+IGNORE_PATTERNS = [
+    r"context (window )?limit( reached| exceeded)?",
+    r"subagent (nesting )?limit reached",
+    r"nesting limit reached",
+    r"recursion limit reached",
+    r"size limit reached",
+    r"concurrent export limit reached",
+    r"spend limit (reached|unavailable|exceeded)",
+    r"max[_ -]?budget",
+    r"budget (exceeded|limit)",
+    r"turn limit",
+    r"max[_ -]?turns",
+    r"(input|output|token)s? limit",
+    r"prompt is too long",
+    r"exceeds size limits",
+]
+
 _LIMIT_RE = [re.compile(p, re.I) for p in LIMIT_PATTERNS]
 _AUTH_RE = [re.compile(p, re.I) for p in AUTH_PATTERNS]
+_IGNORE_RE = re.compile("|".join(IGNORE_PATTERNS), re.I)
 
 
 def _looks_error(stdout: str) -> bool:
@@ -80,6 +101,11 @@ def haystack(stdout: str, stderr: str) -> str:
     return f"{stdout or ''}\n{stderr or ''}"
 
 
+def strip_ignored(text: str) -> str:
+    """계정을 바꿔도 안 풀리는 한도 문구를 지운 본문. 오판을 막는다."""
+    return _IGNORE_RE.sub(" ", text or "")
+
+
 def classify(returncode: int, stdout: str = "", stderr: str = "") -> str:
     """호출 결과를 ok / limit / auth / error 중 하나로 판정."""
     failed = returncode != 0 or _looks_error(stdout)
@@ -90,8 +116,9 @@ def classify(returncode: int, stdout: str = "", stderr: str = "") -> str:
     for rx in _AUTH_RE:
         if rx.search(text):
             return "auth"
+    cleaned = strip_ignored(text)
     for rx in _LIMIT_RE:
-        if rx.search(text):
+        if rx.search(cleaned):
             return "limit"
     return "error"
 
