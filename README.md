@@ -1,10 +1,10 @@
-# fable-rotator — 구독 계정 자동 순환
+# fable-rotator: 구독 계정 자동 순환
 
 클로드 구독 계정 여러 개를 번갈아 쓴다. 쓰는 길이 두 가지다.
 
-1. **봇 자동 순환 (핵심)** — 봇이 claude 를 부르다 한도 거절을 받으면, 그 계정을 해제 시각까지
+1. **봇 자동 순환 (핵심)**. 봇이 claude 를 부르다 한도 거절을 받으면, 그 계정을 해제 시각까지
    쉬게 표시하고 다음 계정 자격으로 갈아끼운 뒤 **같은 요청을 자동으로 다시 보낸다**. 사람이 안 봐도 된다.
-2. **사람이 쓰는 대화형** — 내 claude 창이 한도에 걸리면 `--next` 한 번으로 다음 계정으로 갈아끼운다.
+2. **사람이 쓰는 대화형**. 내 claude 창이 한도에 걸리면 `--next` 한 번으로 다음 계정으로 갈아끼운다.
    (대화형 창은 자동 감지가 안 된다. 이미 떠 있는 창은 껐다 켜야 새 계정이 붙는다.)
 
 옛 방식(크롬으로 사용량 화면을 미리 읽어 고르기, `rotate.py`)도 남겨뒀다. 지금은 보조 수단이다.
@@ -69,9 +69,13 @@ proc = pool_run(args, capture_output=True, text=True, timeout=240)
 ```
 
 - 한도 거절이면 계정을 바꿔 같은 요청을 다시 보낸다.
-- 로그인 문제면 그 계정을 30분 쉬게 하고 다음 계정으로 넘긴다.
+- 로그인 거절은 두 가지로 갈린다. **처음부터** 났으면 이 환경에서 로그인이 안 된 것이라(ssh 비대화형이 대표적)
+  계정을 안 바꾸고 그대로 돌려준다. 계정을 **갈아끼운 뒤에** 났으면 그 저장본이 상한 것이라
+  30분 쉬게 하고 다음 계정으로 넘어간다.
 - 원인 모를 실패는 계정을 안 바꾸고 한 번만 더 시도한 뒤 결과를 그대로 돌려준다.
 - 쓸 계정이 하나도 없으면 `AllAccountsExhausted`(RuntimeError 의 한 종류)를 올리고 텔레그램으로 알린다.
+  알림은 소진 구간마다 한 번만 나간다.
+- `check=True`, `stdout=...` 같은 인자도 `subprocess.run` 과 똑같이 받는다.
 
 여러 봇이 동시에 한도에 걸려도 교체는 잠금으로 한 번만 일어난다.
 다른 봇이 이미 계정을 바꿨으면 또 바꾸지 않고 바로 재시도한다.
@@ -79,27 +83,29 @@ proc = pool_run(args, capture_output=True, text=True, timeout=240)
 ## 파일
 
 핵심(자동 순환)
-- `claude_pool.py` — 실행 래퍼 + 명령줄 도구 (메인)
-- `limit_detect.py` — 한도 거절 판정과 해제 시각 읽기
-- `pool_state.py` — 현재 계정·막힌 계정 상태와 잠금
-- `notify.py` — 전 계정 소진 같은 일을 텔레그램으로 알림
-- `test_rotation.py` — 순환 로직 시험 (가짜 호출로 9가지 상황 재현)
-- `state.json` — 현재 상태 (자동 생성, git 제외)
-- `rotator.log` — 교체 기록
+- `claude_pool.py`: 실행 래퍼 + 명령줄 도구 (메인)
+- `limit_detect.py`: 한도 거절 판정과 해제 시각 읽기
+- `pool_state.py`: 현재 계정·막힌 계정 상태와 잠금
+- `notify.py`: 전 계정 소진 같은 일을 텔레그램으로 알림
+- `test_rotation.py`: 순환 로직 시험 (가짜 호출로 16가지 상황 재현, 검사 93개)
+- `claude_shim.py` / `install_shim.sh`: claude 실행 파일 자리에 앉는 가로채기와 설치·해제
+- `state.json`: 현재 상태 (자동 생성, git 제외)
+- `rotator.log`: 교체 기록
 
 자격
-- `save_account.py` / `switch_account.py` — 자격 저장·교체 (Win=파일, Mac=Keychain 자동 분기)
-- `accounts.json` — 계정↔프로필 매핑 / `creds/` — 자격 백업 (둘 다 git 제외)
+- `save_account.py` / `switch_account.py`: 자격 저장·교체 (Win=파일, Mac=Keychain 자동 분기)
+- `accounts.json`: 계정↔프로필 매핑 / `creds/`: 자격 백업 (둘 다 git 제외)
 
 보조(옛 방식, 사용량 화면 읽기)
-- `rotate.py` — 크롬을 계정마다 재시작하며 사용량을 읽어 여유 계정을 고름
-- `reader.py` — 한 계정 사용량만 읽어 판정
-- `launch_chrome_debug.ps1` / `.sh` — 크롬을 디버그 포트 9222 로 재시작
+- `rotate.py`: 크롬을 계정마다 재시작하며 사용량을 읽어 여유 계정을 고름
+- `reader.py`: 한 계정 사용량만 읽어 판정
+- `launch_chrome_debug.ps1` / `.sh`: 크롬을 디버그 포트 9222 로 재시작
 
 ## 주의
 
 - `creds/` 는 자격정보다. 화면 출력·git 커밋 금지(`.gitignore` 처리됨).
 - `creds/` 는 각 머신에서 각자 저장한다(Win 자격 파일 ≠ Mac Keychain 값). 머신 간 복사하지 말 것.
-- Mac 의 Keychain 교체는 자격 값이 로컬 프로세스에 잠깐 실린다. 원격(ssh)이 아니라 본체/launchd 에서만.
+- Mac 의 Keychain 교체는 자격 값을 표준입력으로 넘긴다(명령 인자에 안 실림). 다만 잠금 해제된
+  Keychain 이 필요하므로 원격(ssh)이 아니라 본체나 launchd 화면 세션에서만 된다.
 - 계정을 바꿔도 이미 떠 있는 claude 세션에는 반영 안 된다. 다음 실행부터 적용된다.
 - `rotate.py` 는 계정마다 크롬을 강제 종료하고 재시작한다. 그동안 크롬으로 다른 작업 하지 말 것.
