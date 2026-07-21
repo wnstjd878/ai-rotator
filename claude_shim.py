@@ -22,14 +22,45 @@ from __future__ import annotations
 import os
 import sys
 
-REAL_CLAUDE = os.environ.get(
-    "CLAUDE_REAL_BIN",
-    "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
-)
 GUARD_ENV = "CLAUDE_ROTATOR_ACTIVE"
 DISABLE_ENV = "CLAUDE_ROTATOR_DISABLED"
 ROTATOR_DIR = os.path.dirname(os.path.abspath(__file__))
 PRINT_FLAGS = {"-p", "--print"}
+
+# 진짜 claude 를 찾을 자리. 판이 올라가며 경로가 바뀔 수 있으므로 여러 곳을 본다.
+REAL_CANDIDATES = [
+    "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+    "/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    os.path.expanduser("~/.local/share/claude/claude"),
+]
+
+
+def find_real_claude() -> str | None:
+    """진짜 claude 실행 파일. 못 찾으면 None.
+
+    가로채기 자신을 다시 부르지 않도록, 찾은 경로가 이 파일을 가리키면 건너뛴다.
+    """
+    override = os.environ.get("CLAUDE_REAL_BIN")
+    if override and os.path.exists(override):
+        return override
+
+    here = os.path.realpath(__file__)
+    here_dir = os.path.dirname(here)
+    for cand in REAL_CANDIDATES:
+        if os.path.exists(cand) and os.path.dirname(os.path.realpath(cand)) != here_dir:
+            return cand
+
+    # 마지막 수단: PATH 에서 찾되 가로채기 자신은 뺀다
+    import shutil
+
+    found = shutil.which("claude")
+    if found and os.path.dirname(os.path.realpath(found)) != here_dir:
+        return found
+    return None
+
+
+REAL_CLAUDE = find_real_claude()
 
 
 def passthrough(argv):
@@ -46,11 +77,46 @@ def is_single_shot(argv) -> bool:
     return False
 
 
+# 값을 뒤에 하나 더 받는 것으로 아는 플래그. 여기 없는 플래그도 값을 받는 쪽으로
+# 보수적으로 처리한다(프롬프트를 값으로 잘못 보면 표준입력을 읽어 원래 동작이 되지만,
+# 반대로 값을 프롬프트로 잘못 보면 표준입력 프롬프트가 통째로 사라지기 때문).
+VALUE_FLAGS = {
+    "--model", "--system-prompt", "--append-system-prompt", "--output-format",
+    "--input-format", "--allowedTools", "--allowed-tools", "--disallowedTools",
+    "--disallowed-tools", "--tools", "--setting-sources", "--json-schema",
+    "--max-budget-usd", "--effort", "--permission-mode", "--max-turns",
+    "--mcp-config", "--add-dir", "--session-id", "--cwd", "--resume",
+}
+
+
+def has_prompt_argument(argv) -> bool:
+    """프롬프트가 인자로 이미 들어 있는지. 있으면 claude 는 표준입력을 안 쓴다."""
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            return i + 1 < len(argv)
+        if a.startswith("-"):
+            if "=" in a:
+                i += 1
+                continue
+            if a in PRINT_FLAGS or a in ("--verbose", "--safe-mode", "--no-chrome",
+                                         "--disable-slash-commands", "--no-session-persistence",
+                                         "--strict-mcp-config", "--version", "--help"):
+                i += 1
+                continue
+            i += 2  # 모르는 플래그는 값을 받는 것으로 본다
+            continue
+        return True  # 플래그가 아닌 토큰 = 프롬프트
+    return False
+
+
 def main():
     argv = sys.argv[1:]
 
-    if not os.path.exists(REAL_CLAUDE):
-        sys.stderr.write(f"[shim] 진짜 claude 를 못 찾았습니다: {REAL_CLAUDE}\n")
+    if not REAL_CLAUDE:
+        sys.stderr.write("[shim] 진짜 claude 를 못 찾았습니다. "
+                         "install_shim.sh --uninstall 로 되돌리세요.\n")
         return 127
 
     if os.environ.get(GUARD_ENV) or os.environ.get(DISABLE_ENV):
@@ -65,13 +131,20 @@ def main():
         import claude_pool
         import pool_state as st
 
-        if len(st.saved_labels()) < 2:
+        # 실제로 고를 수 있는 계정 기준으로 판단한다. 저장본 개수만 보면
+        # accounts.json 에 없는 라벨로 저장했을 때 가로채기는 켜지고 고를 계정은 없는
+        # 상태가 되어 첫 한도에서 곧바로 전 계정 소진이 된다.
+        usable = set(st.saved_labels()) & set(st.account_labels())
+        if len(usable) < 2:
             passthrough(argv)  # 순환할 계정이 없음
     except Exception:
         passthrough(argv)
 
+    # 프롬프트가 인자에 이미 있으면 표준입력을 건드리지 않는다. 봇이 입력 통로를 열어두고
+    # 닫지 않는 경우가 있는데, 그때 여기서 읽으면 진짜 claude 는 멀쩡히 끝나는 일에
+    # 가로채기만 영원히 기다린다.
     stdin_data = None
-    if not sys.stdin.isatty():
+    if not has_prompt_argument(argv) and not sys.stdin.isatty():
         try:
             stdin_data = sys.stdin.read()
         except Exception:
@@ -90,7 +163,7 @@ def main():
         return 1
     except Exception as e:
         # 순환기 문제로 봇을 멈추지 않는다. 원래 방식으로 한 번 더 실행한다.
-        sys.stderr.write(f"[shim] 순환기 오류({type(e).__name__}) — 원래 방식으로 실행합니다\n")
+        sys.stderr.write(f"[shim] 순환기 오류({type(e).__name__}). 원래 방식으로 실행합니다\n")
         import subprocess
 
         proc = subprocess.run([REAL_CLAUDE, *argv], input=stdin_data,

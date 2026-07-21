@@ -15,6 +15,7 @@ LINK="/opt/homebrew/bin/claude"
 REAL="/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHIM="$DIR/claude_shim.sh"
+ORIGINAL="$DIR/.original_claude_link"   # 설치 전 연결 대상을 적어둔다(되돌리기용)
 
 status() {
   if [ -L "$LINK" ]; then
@@ -33,7 +34,20 @@ status() {
 }
 
 uninstall() {
-  ln -sfn "../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" "$LINK"
+  # 설치할 때 적어둔 원래 연결 대상으로 돌린다. 기록이 없을 때만 알려진 기본 경로를 쓴다.
+  local target=""
+  if [ -f "$ORIGINAL" ]; then
+    target="$(cat "$ORIGINAL")"
+  fi
+  if [ -z "$target" ] || [ "$target" = "$SHIM" ]; then
+    target="../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+  fi
+  ln -sfn "$target" "$LINK"
+  if ! "$LINK" --version >/dev/null 2>&1; then
+    echo "되돌린 뒤 claude 가 실행되지 않습니다. 연결 대상을 확인하세요: $target" >&2
+    status
+    exit 1
+  fi
   echo "원래대로 되돌렸습니다."
   status
 }
@@ -56,7 +70,20 @@ EOF
     exit 1
   fi
 
+  # 되돌릴 자리를 먼저 적어둔다. 이미 가로채기가 걸려 있으면 덮어쓰지 않는다.
+  if [ -L "$LINK" ]; then
+    cur="$(readlink "$LINK")"
+    if [ "$cur" != "$SHIM" ]; then
+      printf '%s' "$cur" > "$ORIGINAL"
+    fi
+  fi
+
   ln -sfn "$SHIM" "$LINK"
+  if ! "$LINK" --version >/dev/null 2>&1; then
+    echo "설치 후 claude 실행에 실패해 되돌립니다." >&2
+    uninstall
+    exit 1
+  fi
   echo "설치했습니다. 봇들의 단발 호출이 이제 계정 순환 보호를 받습니다."
   status
 }

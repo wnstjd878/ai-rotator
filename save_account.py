@@ -64,6 +64,21 @@ def main():
     label = sys.argv[1].strip()
     dest = CREDS_DIR / f"{label}.json"
 
+    # accounts.json 에 없는 라벨로 저장하면 순환기가 그 계정을 못 고른다.
+    # 그대로 두면 첫 한도에서 곧바로 "전 계정 소진"이 되므로 여기서 먼저 막는다.
+    try:
+        sys.path.insert(0, str(BASE))
+        import pool_state as _st
+
+        known = _st.account_labels()
+        if known and label not in known:
+            print(f"[save] '{label}' 은 accounts.json 에 없는 라벨입니다. "
+                  f"쓸 수 있는 라벨: {', '.join(known)}")
+            print("[save] accounts.json 에 먼저 추가하거나 그 라벨 중 하나로 저장하세요.")
+            return 1
+    except Exception:
+        pass  # 확인을 못 해도 저장 자체는 막지 않는다
+
     ok = save_mac(dest) if IS_MAC else save_windows(dest)
     if not ok:
         return 1

@@ -278,6 +278,150 @@ def case_manual_next(tmp):
     check("교체 시도 안 함", fake.switches == ["B"], f"switches={fake.switches}")
 
 
+def case_answer_json_not_failure(tmp):
+    print("\n[10] 모델 답변 속 JSON 이 실패로 둔갑하지 않는다")
+    # 봇이 "이 로그를 JSON 으로 판정해줘" 같은 일을 시키면 답변에 is_error 가 들어온다.
+    # 이걸 실패로 보면 정상 응답 한 번으로 계정 네 개가 통째로 막힌다.
+    answer = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": '{"is_error": true, "cause": "429 rate limit", "action": "retry"}',
+    }, ensure_ascii=False)
+    check("성공으로 판정", limit_detect.classify(0, answer, "") == "ok")
+
+    # 껍데기 없이 답변만 그대로 나오는 경우(텍스트 모드)
+    raw = '{"is_error": true, "cause": "usage limit reached"}'
+    check("껍데기가 아니면 실패로 안 봄", limit_detect.classify(0, raw, "") == "ok")
+
+    setup(tmp, ["A", "B", "C", "D"], "A")
+    fake = Fake({"A": (0, answer, "")})
+    install(fake)
+    proc = claude_pool.run(["claude", "-p", "판정해줘"])
+    check("계정 교체 없음", fake.switches == [], f"switches={fake.switches}")
+    check("한 번만 실행", len(fake.calls) == 1, f"calls={fake.calls}")
+    check("계정을 막지 않음", st.load_state()["blocked"] == {})
+    check("알림 없음", fake.notices == [])
+
+
+def case_dirty_body_not_limit(tmp):
+    print("\n[11] 답변 본문·도구 출력에 한도 단어가 있어도 넘기지 않는다")
+    cases = [
+        ("답변에 rate limit 설명", json.dumps({
+            "type": "result", "is_error": False,
+            "result": "리뷰에 'rate limited' 라고 적힌 글이 많습니다"}, ensure_ascii=False), 0, "ok"),
+        ("실패인데 사유는 붙임 도구 쪽", json.dumps({
+            "type": "result", "is_error": True,
+            "result": "MCP server crashed"}, ensure_ascii=False), 1, "error"),
+    ]
+    for name, body, rc, want in cases:
+        check(f"{name} → {want}", limit_detect.classify(rc, body, "") == want,
+              f"실제={limit_detect.classify(rc, body, '')}")
+
+    # 진짜 한도는 여전히 잡아야 한다
+    real = json.dumps({"type": "result", "is_error": True,
+                       "result": "Claude AI usage limit reached"}, ensure_ascii=False)
+    check("진짜 한도는 그대로 잡음", limit_detect.classify(1, real, "") == "limit")
+
+
+def case_broken_cred_after_switch(tmp):
+    print("\n[12] 갈아끼운 저장본이 상했으면 그 계정도 넘긴다")
+    setup(tmp, ["A", "B", "C"], "A")
+    broken = json.dumps({"type": "result", "is_error": True,
+                         "result": "Invalid API key · Please run /login"}, ensure_ascii=False)
+    fake = Fake({"A": (1, LIMIT_OUT, ""), "B": (1, broken, ""), "C": (0, OK_OUT, "")})
+    install(fake)
+    proc = claude_pool.run(["claude", "-p", "안녕"])
+    check("최종 성공", proc.returncode == 0)
+    check("B 를 건너뛰고 C 까지 감", fake.switches == ["B", "C"], f"switches={fake.switches}")
+    state = st.load_state()
+    check("B 도 쉬게 기록", "B" in state["blocked"], f"blocked={list(state['blocked'])}")
+    left = float(state["blocked"]["B"]) - time.time()
+    check("B 는 30분", 25 * 60 < left < 35 * 60, f"{left / 60:.0f}분")
+
+
+def case_notice_once(tmp):
+    print("\n[13] 전 계정 소진 알림은 한 번만 나간다")
+    setup(tmp, ["A", "B"], "A")
+    fake = Fake({x: (1, LIMIT_OUT, "") for x in ["A", "B"]})
+    install(fake)
+    for _ in range(4):
+        try:
+            claude_pool.run(["claude", "-p", "안녕"])
+        except claude_pool.AllAccountsExhausted:
+            pass
+    check("네 번 불러도 알림 1건", len(fake.notices) == 1, f"notices={len(fake.notices)}")
+
+
+def case_broken_state_file(tmp):
+    print("\n[14] 상태 파일이 깨져도 죽지 않는다")
+    setup(tmp, ["A", "B"], "A")
+    for bad in ("[]", '{"blocked": {"A": "내일"}}', "not json at all", '"문자열"'):
+        st.STATE_FILE.write_text(bad, encoding="utf-8")
+        try:
+            state = st.prune_blocked(st.load_state())
+            ok = isinstance(state, dict) and isinstance(state.get("blocked"), dict)
+        except Exception as e:
+            ok = False
+            print(f"    ({type(e).__name__})")
+        check(f"깨진 파일 처리: {bad[:22]}", ok)
+
+
+def case_subprocess_compat(tmp):
+    print("\n[15] subprocess.run 처럼 쓸 수 있다 (check, stdout 지정)")
+    setup(tmp, ["A", "B"], "A")
+
+    # check=True 는 판정을 막지 않고, 최종 실패일 때만 예외로 재현된다
+    fake = Fake({"A": (1, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake)
+    proc = claude_pool.run(["claude", "-p", "안녕"], check=True)
+    check("한도는 교체로 풀리고 예외 없음", proc.returncode == 0)
+
+    setup(tmp, ["A", "B"], "A")
+    fake2 = Fake({"A": (1, "", "segfault")})
+    install(fake2)
+    raised = False
+    try:
+        claude_pool.run(["claude", "-p", "안녕"], check=True)
+    except subprocess.CalledProcessError:
+        raised = True
+    check("끝까지 실패면 CalledProcessError", raised)
+
+    # stdout 을 직접 지정해도 ValueError 가 안 난다
+    setup(tmp, ["A", "B"], "A")
+    fake3 = Fake({"A": (0, OK_OUT, "")})
+    install(fake3)
+    seen = {}
+
+    def spy(args, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(args, 0, OK_OUT, "")
+
+    claude_pool.subprocess.run = spy
+    claude_pool.run(["claude", "-p", "안녕"], stdout=subprocess.PIPE)
+    check("capture_output 을 같이 안 넣음", "capture_output" not in seen, f"{sorted(seen)}")
+
+
+def case_shim_prompt_argument():
+    print("\n[16] 가로채기가 표준입력을 언제 읽을지 가린다")
+    import claude_shim
+
+    yes = [
+        ["-p", "안녕"],
+        ["-p", "--model", "opus", "안녕하세요"],
+        ["--print", "--output-format", "json", "질문"],
+    ]
+    no = [
+        ["-p"],
+        ["-p", "--output-format", "json"],
+        ["--print", "--model", "claude-haiku-4-5-20251001"],
+    ]
+    for a in yes:
+        check(f"프롬프트 인자 있음: {' '.join(a)[:34]}", claude_shim.has_prompt_argument(a))
+    for a in no:
+        check(f"프롬프트 인자 없음: {' '.join(a)[:34]}", not claude_shim.has_prompt_argument(a))
+    check("단발 호출 판정", claude_shim.is_single_shot(["-p", "x"]))
+    check("대화형은 단발 아님", not claude_shim.is_single_shot(["--model", "opus"]))
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -285,9 +429,13 @@ def main():
     try:
         for case in (case_success_no_switch, case_false_positive, case_rotate_on_limit,
                      case_all_exhausted, case_already_switched, case_reset_parsing,
-                     case_auth, case_unknown_error, case_manual_next):
+                     case_auth, case_unknown_error, case_manual_next,
+                     case_answer_json_not_failure, case_dirty_body_not_limit,
+                     case_broken_cred_after_switch, case_notice_once,
+                     case_broken_state_file, case_subprocess_compat):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
+        case_shim_prompt_argument()
     finally:
         claude_pool.subprocess.run = real_run
         claude_pool._switch = real_switch

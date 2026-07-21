@@ -147,10 +147,22 @@ def apply_switch(label, dry, restart):
     if dry:
         print(f"[rotate] (판정만, 교체 생략) 선택된 계정 = {label}")
         return 0
-    ret = subprocess.run([sys.executable, str(BASE / "switch_account.py"), label], check=False)
-    if ret.returncode == 0 and restart:
+
+    # claude_pool.use() 를 거친다. 자격만 바꾸고 상태를 안 고치면 자동 순환이 다음번에
+    # 엉뚱한 계정을 실패한 것으로 기록한다.
+    try:
+        sys.path.insert(0, str(BASE))
+        import claude_pool
+
+        rc = claude_pool.use(label)
+    except Exception as e:
+        print(f"[rotate] 순환기 경로로 교체하지 못했습니다({type(e).__name__}). 교체기를 직접 부릅니다.")
+        rc = subprocess.run(
+            [sys.executable, str(BASE / "switch_account.py"), label], check=False
+        ).returncode
+    if rc == 0 and restart:
         restart_claude()
-    return ret.returncode
+    return rc
 
 
 def main():
