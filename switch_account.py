@@ -7,9 +7,9 @@
       Mac 은 반드시 본체 화면 세션에서 실행 (Keychain 쓰기에 GUI 잠금해제 필요, ssh 원격 불가).
 입력: creds/<라벨>.json
 주의: 교체는 다음 claude 실행부터 적용. 실행 중 세션에는 즉시 반영 안 됨.
-      creds/ 파일은 자격정보 — 화면 출력·git 커밋 금지.
-      Mac 의 Keychain 쓰기는 값이 로컬 프로세스 인자에 잠깐 실린다(본체 로컬 한정). 원격(ssh)에서 실행 금지.
-마지막 점검: 2026-07-18
+      creds/ 파일은 자격정보다. 화면 출력·git 커밋 금지.
+      Mac 의 Keychain 쓰기는 값을 표준입력으로 넘긴다(명령 인자에 안 실림).
+마지막 점검: 2026-07-22
 """
 
 import platform
@@ -40,15 +40,33 @@ def switch_windows(src):
 
 
 def switch_mac(src):
-    value = src.read_text(encoding="utf-8")
-    try:
-        subprocess.run(
-            ["security", "add-generic-password", "-U",
-             "-s", KC_SERVICE, "-a", KC_ACCOUNT, "-w", value],
-            check=True,
-        )
-    except subprocess.CalledProcessError:
-        print("[switch] Keychain 에 자격을 못 썼습니다. Mac 본체 화면에서 실행했는지 확인하세요.")
+    # 자격 값을 명령 인자에 싣지 않는다. -w 뒤를 비우면 security 가 표준입력에서 받는데,
+    # 확인용으로 같은 값을 두 번 넣어야 한다. 인자에 실으면 프로세스 목록에 평문이 남는다.
+    value = src.read_text(encoding="utf-8").strip()
+    if not value:
+        print(f"[switch] {src.name} 이 비어 있습니다.")
+        return False
+    if "\n" in value:
+        print(f"[switch] {src.name} 이 여러 줄이라 이 방식으로는 못 넣습니다. 다시 저장하세요.")
+        return False
+
+    proc = subprocess.run(
+        ["security", "add-generic-password", "-U", "-s", KC_SERVICE, "-a", KC_ACCOUNT, "-w"],
+        input=f"{value}\n{value}\n", text=True, capture_output=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
+        print(f"[switch] Keychain 에 자격을 못 썼습니다: {detail[0][:120]}")
+        print("[switch] Mac 본체 화면 세션에서 실행했는지 확인하세요 (ssh 로는 안 됩니다).")
+        return False
+
+    # 실제로 바뀌었는지 길이로만 확인한다. 값 자체는 절대 출력하지 않는다.
+    check = subprocess.run(
+        ["security", "find-generic-password", "-s", KC_SERVICE, "-a", KC_ACCOUNT, "-w"],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0 or len((check.stdout or "").strip()) != len(value):
+        print("[switch] 자격을 쓴 뒤 확인에 실패했습니다. 다시 시도하세요.")
         return False
     return True
 

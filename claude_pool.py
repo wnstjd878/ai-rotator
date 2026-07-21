@@ -211,10 +211,16 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         max_attempts = max(2, len(labels) + 1)
 
     # 결과를 읽어야 한도 거절을 알아볼 수 있다. 호출부가 따로 정했으면 그 뜻을 따른다.
-    kwargs.setdefault("capture_output", True)
+    # stdout/stderr 를 직접 지정한 호출에 capture_output 을 같이 넣으면 파이썬이 바로 거부한다.
+    if "stdout" not in kwargs and "stderr" not in kwargs:
+        kwargs.setdefault("capture_output", True)
     kwargs.setdefault("text", True)
-    if not kwargs["capture_output"]:
-        log("출력을 안 잡는 호출이라 한도 거절을 알아볼 수 없습니다 — 계정 교체가 안 됩니다.")
+    if not kwargs.get("capture_output") and "stdout" not in kwargs:
+        log("출력을 안 잡는 호출이라 한도 거절을 알아볼 수 없습니다. 계정 교체가 안 됩니다.")
+
+    # check=True 를 그대로 넘기면 한도를 판정하기 전에 예외가 터져 교체가 안 일어난다.
+    # 안에서는 꺼두고, 마지막에 실패로 끝났을 때만 원래 뜻대로 예외를 올린다.
+    want_check = bool(kwargs.pop("check", False))
 
     retried_plain = False
     for attempt in range(max_attempts):
