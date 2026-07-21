@@ -23,13 +23,19 @@ import time
 DEFAULT_COOLDOWN = 5 * 3600  # 해제 시각을 못 읽었을 때 쉬게 할 시간(초)
 MAX_COOLDOWN = 8 * 24 * 3600  # 문구에서 읽은 값이 이보다 멀면 잘못 읽은 것으로 보고 버림
 
-# 한도 거절로 보는 문구. 소문자로 바꾼 본문에서 찾는다.
+# 한도 거절로 보는 문구. 실패한 호출에서만 찾는다.
+# 앞의 다섯 줄은 claude 실행 파일 안에 실제로 박혀 있는 표기를 확인해 넣은 것이다
+# (usage limit reached / session limit / weekly limit / Opus limit / Sonnet limit,
+#  five_hour=session limit, seven_day=weekly limit, billing_error, rate_limit).
 LIMIT_PATTERNS = [
     r"usage limit reached",
+    r"\b(session|weekly|opus|sonnet) limit\b",
+    r"\b(five_hour|seven_day(_opus|_sonnet)?)\b",
+    r"billing_error",
+    r"credit balance (is )?too low",
     r"usage limit has been reached",
     r"claude (ai )?usage limit",
     r"\b5-?hour limit\b",
-    r"\bweekly limit\b",
     r"limit will reset",
     r"limit reached",
     r"rate[_ ]limit",

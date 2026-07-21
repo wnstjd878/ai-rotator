@@ -189,6 +189,26 @@ def case_reset_parsing(tmp):
     stale = limit_detect.reset_epoch("error code 1699999999 something", "", now=now)
     check("지난 시각 숫자는 무시", abs(stale - (now + 5 * 3600)) < 5, f"{stale - now:.0f}초")
 
+    # claude 실행 파일 안에 실제로 박혀 있던 표기들이 한도로 잡히는지
+    real_wordings = [
+        "usage limit reached",
+        "session limit",
+        "weekly limit",
+        "Opus limit",
+        "credit balance too low",
+        '{"type":"rate_limit"}',
+        '"reason":"billing_error"',
+        '{"seven_day":{"resets_at":123}}',
+    ]
+    for w in real_wordings:
+        body = json.dumps({"is_error": True, "result": w}, ensure_ascii=False)
+        check(f"한도로 판정: {w[:28]}", limit_detect.classify(1, body, "") == "limit")
+
+    # 도움말 문구가 성공 응답에 섞여도 한도로 오해하지 않는지
+    helpful = json.dumps({"is_error": False,
+                          "result": "Sonnet 5 uses your weekly limit much more slowly than Opus."})
+    check("성공 응답의 한도 단어는 무시", limit_detect.classify(0, helpful, "") == "ok")
+
 
 def case_auth(tmp):
     print("\n[7] 로그인이 안 된 상태면 계정을 바꾸지 않는다")
