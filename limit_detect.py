@@ -135,16 +135,18 @@ def is_failure(returncode: int, stdout: str = "") -> bool:
 
 
 def failure_text(stdout: str = "", stderr: str = "") -> str:
-    """한도/자격 문구를 찾을 자리. 오류출력 + 결과 껍데기의 오류 자리만.
+    """한도/자격 문구를 찾을 자리. 오류출력 + 결과 껍데기의 오류 자리.
 
-    모델 답변 본문, 붙임 도구가 가져온 글, 되울려 나온 프롬프트는 여기 안 들어간다.
+    결과 껍데기가 있으면 그 안의 오류 자리만 본다. 모델 답변 본문, 붙임 도구가 가져온 글,
+    되울려 나온 프롬프트는 여기 안 들어간다.
+    껍데기가 없으면(텍스트 모드나 CLI 가 뜨기도 전에 죽은 경우) 표준출력을 그대로 본다.
+    이 함수는 이미 실패로 판정된 호출에만 쓰므로, 그때의 표준출력은 오류 문구로 본다.
     """
     parts = [stderr or ""]
     env = _result_envelope(stdout)
     if env is not None:
         parts.append(_envelope_error_text(env))
-    elif not (stdout or "").strip().startswith("{"):
-        # JSON 형식이 아닌 출력(텍스트 모드). 이때는 오류 문구가 본문에 그대로 나온다.
+    else:
         parts.append(stdout or "")
     return "\n".join(parts)
 

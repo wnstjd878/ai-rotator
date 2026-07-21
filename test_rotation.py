@@ -201,8 +201,11 @@ def case_reset_parsing(tmp):
         '{"seven_day":{"resets_at":123}}',
     ]
     for w in real_wordings:
-        body = json.dumps({"is_error": True, "result": w}, ensure_ascii=False)
-        check(f"한도로 판정: {w[:28]}", limit_detect.classify(1, body, "") == "limit")
+        # 실제 CLI 형식(결과 껍데기)과 껍데기 없는 형식 둘 다 잡아야 한다
+        env = json.dumps({"type": "result", "is_error": True, "result": w}, ensure_ascii=False)
+        check(f"한도로 판정: {w[:28]}", limit_detect.classify(1, env, "") == "limit")
+        bare = json.dumps({"is_error": True, "result": w}, ensure_ascii=False)
+        check(f"껍데기 없어도 판정: {w[:22]}", limit_detect.classify(1, bare, "") == "limit")
 
     # 도움말 문구가 성공 응답에 섞여도 한도로 오해하지 않는지
     helpful = json.dumps({"is_error": False,
