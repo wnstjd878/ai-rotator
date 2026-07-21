@@ -1,0 +1,6 @@
+[
+  { "label": "A", "chrome_profile": "Default" },
+  { "label": "B", "chrome_profile": "Profile 1" },
+  { "label": "C", "chrome_profile": "Profile 2" },
+  { "label": "D", "chrome_profile": "Profile 3" }
+]
