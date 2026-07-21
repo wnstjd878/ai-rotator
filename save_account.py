@@ -71,9 +71,28 @@ def main():
     size = dest.stat().st_size
     where = "Keychain" if IS_MAC else "자격 파일"
     print(f"[save] 현재 로그인({where})을 '{label}' 로 백업했습니다 → {dest.name} ({size} bytes)")
-    print("[save] 저장된 계정 목록:")
-    for f in sorted(CREDS_DIR.glob("*.json")):
-        print(f"   - {f.stem}")
+
+    # 방금 저장한 계정이 지금 실제로 꽂혀 있는 계정이다. 순환기가 시작점을 알도록 적어둔다.
+    try:
+        sys.path.insert(0, str(BASE))
+        import pool_state as st
+
+        with st.with_lock():
+            state = st.prune_blocked(st.load_state())
+            blocked = dict(state.get("blocked") or {})
+            blocked.pop(label, None)
+            state["blocked"] = blocked
+            st.set_current(state, label, "자격 저장 시점")
+            st.save_state(state)
+        print(f"[save] 지금 쓰는 계정을 '{label}' 로 기록했습니다.")
+    except Exception as e:
+        print(f"[save] 현재 계정 기록은 건너뜁니다({type(e).__name__}). "
+              f"나중에  python claude_pool.py --use {label}  로 알려주세요.")
+
+    saved = sorted(f.stem for f in CREDS_DIR.glob("*.json"))
+    print(f"[save] 저장된 계정: {', '.join(saved)}  (총 {len(saved)}개)")
+    if len(saved) < 2:
+        print("[save] 계정이 2개 이상이어야 순환이 켜집니다. 다음 계정으로 로그인해 이어서 저장하세요.")
     return 0
 
 
