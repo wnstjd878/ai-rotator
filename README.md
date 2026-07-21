@@ -55,7 +55,29 @@ python claude_pool.py -- -p "안녕"  순환 보호를 받으며 claude 한 번 
 
 `--next` / `--use` 로 바꾼 뒤에는 **열려있던 claude 를 껐다 다시 실행**해야 적용된다.
 
-## 봇에 끼우는 법
+## 봇에 끼우는 법 (둘 중 하나만 고른다)
+
+### 1. 가로채기 설치 (권장, 봇 코드 안 고침)
+
+```
+bash install_shim.sh            설치
+bash install_shim.sh --status   지금 어느 쪽이 걸려 있는지
+bash install_shim.sh --uninstall 되돌리기
+```
+
+`/opt/homebrew/bin/claude` 자리에 앉아 단발 호출(`-p`)만 순환 보호로 넘긴다.
+Mac 의 claude 호출 43개 파일 55곳을 한 곳으로 덮는다. 다음 경우엔 아무것도 안 하고 그대로 통과시킨다.
+
+- 대화형 실행(`-p` 없음). 사람이 쓰는 창은 안 건드린다
+- 고를 수 있는 계정이 2개 미만(`creds/` 와 `accounts.json` 양쪽에 있는 라벨 기준)
+- `CLAUDE_ROTATOR_DISABLED=1` 을 준 경우
+
+npm 으로 Claude Code 를 업데이트하면 이 연결이 원래대로 돌아간다(봇은 정상 동작하고 순환만 꺼짐).
+업데이트 뒤에는 `install_shim.sh` 를 다시 실행한다.
+
+### 2. 봇 코드에서 직접 부르기
+
+가로채기를 설치했다면 이 방식은 쓰지 않는다. 두 겹이 되어 재시도와 알림이 겹친다.
 
 봇 코드에서 claude 를 부르는 `subprocess.run(...)` 을 이 모듈의 `run(...)` 으로 바꾸면 끝이다.
 인자와 반환값이 `subprocess.run` 과 같아서 나머지 코드는 안 고쳐도 된다.
