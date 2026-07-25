@@ -23,6 +23,15 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+try:  # 공유 저장소(세 머신이 같이 보는 한도 상태). 없어도 로컬 단독으로 돈다.
+    import shared_state
+except Exception:
+    shared_state = None
+
+
+def _shared_on() -> bool:
+    return bool(shared_state and shared_state.enabled())
+
 BASE = Path(__file__).resolve().parent
 STATE_FILE = BASE / "state.json"
 LOCK_FILE = BASE / "state.lock"
@@ -164,7 +173,11 @@ def save_state(state: dict) -> None:
 
 
 def prune_blocked(state: dict, now: float | None = None) -> dict:
-    """한도가 풀린 계정을 막힘 목록에서 뺀다."""
+    """한도가 풀린 계정을 막힘 목록에서 빼고, 공유 저장소의 막힘도 병합한다.
+
+    공유가 켜져 있으면 세 머신이 같은 막힘 목록을 보게 되어 같은 계정에 수렴한다.
+    공유를 못 읽으면(저장소 다운 등) 로컬 목록만으로 버틴다.
+    """
     now = time.time() if now is None else now
     blocked = {}
     for k, v in (state.get("blocked") or {}).items():
@@ -174,6 +187,13 @@ def prune_blocked(state: dict, now: float | None = None) -> dict:
             continue  # 숫자가 아닌 값은 버린다
         if until > now:
             blocked[k] = until
+
+    if _shared_on():
+        remote = shared_state.get_blocked(now)
+        if remote is not None:  # 읽기 실패면 로컬만 유지
+            for k, v in remote.items():
+                blocked[k] = max(blocked.get(k, 0.0), float(v))
+
     state["blocked"] = blocked
     if not blocked:
         state["notified_for"] = None  # 하나라도 풀렸으면 다음 소진 때 다시 알린다
@@ -210,12 +230,24 @@ def is_blocked(state: dict, label: str, now: float | None = None) -> bool:
 
 
 def mark_blocked(state: dict, label: str, until_epoch: float, reason: str = "") -> dict:
-    """계정을 한도 도달로 표시. 이미 더 늦은 해제 시각이 있으면 늦은 쪽을 유지."""
+    """계정을 한도 도달로 표시(로컬 + 공유). 이미 더 늦은 해제 시각이 있으면 늦은 쪽을 유지."""
     blocked = dict(state.get("blocked") or {})
     prev = float(blocked.get(label, 0))
     blocked[label] = max(prev, float(until_epoch))
     state["blocked"] = blocked
     _push_history(state, label, "blocked", reason)
+    if _shared_on():
+        shared_state.set_blocked(label, until_epoch, reason)  # 세 머신이 같이 본다
+    return state
+
+
+def clear_blocked_label(state: dict, label: str) -> dict:
+    """한 계정의 막힘을 푼다(로컬 + 공유). 사람이 --use 로 고른 계정 등."""
+    blocked = dict(state.get("blocked") or {})
+    blocked.pop(label, None)
+    state["blocked"] = blocked
+    if _shared_on():
+        shared_state.clear_blocked(label)
     return state
 
 
@@ -238,25 +270,21 @@ def _push_history(state: dict, label: str, kind: str, reason: str) -> None:
 
 
 def pick_next(state: dict, exclude: str | None = None, now: float | None = None) -> str | None:
-    """지금 쓸 수 있는 계정 라벨 하나. 없으면 None.
+    """지금 쓸 계정 라벨 하나. 없으면 None.
 
-    조건: accounts.json 에 있고, 자격 저장본이 있고, 막힘이 안 걸린 계정.
-    순서는 accounts.json 순서를 따르되 현재 계정 다음부터 돌아 한 계정에 몰리지 않게 한다.
+    순차 소진: accounts.json 순서(A→B→C→D)의 **최저 인덱스**부터 고른다. 분산하지 않는다.
+    막힌 계정만 건너뛰므로, A 가 살아 있으면 항상 A 를 쓴다. A 가 주간한도로 오래 막히면
+    B 로 넘어가 B 를 태운다. 5시간 한도로 잠깐 막힌 계정은 곧 풀려 다시 최저 인덱스가 되므로
+    자연히 오래 막히는 주간한도 기준으로 순서가 넘어간다.
+    공유 저장소가 켜져 있으면(prune_blocked 가 병합) 세 머신이 같은 막힘을 보고 같은 계정을 고른다.
     """
     now = time.time() if now is None else now
-    labels = account_labels()
+    labels = account_labels()  # accounts.json 에 적힌 순서 그대로
     saved = set(saved_labels())
     if not labels:
         return None
 
-    cur = state.get("current")
-    if cur in labels:
-        i = labels.index(cur)
-        ordered = labels[i + 1:] + labels[: i + 1]
-    else:
-        ordered = labels
-
-    for label in ordered:
+    for label in labels:
         if label == exclude:
             continue
         if label not in saved:
