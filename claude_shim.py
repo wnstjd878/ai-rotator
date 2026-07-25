@@ -28,11 +28,15 @@ ROTATOR_DIR = os.path.dirname(os.path.abspath(__file__))
 PRINT_FLAGS = {"-p", "--print"}
 
 # 진짜 claude 를 찾을 자리. 판이 올라가며 경로가 바뀔 수 있으므로 여러 곳을 본다.
+# 설치 스크립트가 CLAUDE_REAL_BIN 을 넘겨주면 그게 최우선이다(아래 find_real_claude).
 REAL_CANDIDATES = [
     "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
     "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js",
     "/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
     os.path.expanduser("~/.local/share/claude/claude"),
+    # Windows(winserver): 설치 스크립트가 원본을 claude-real.exe 로 옆에 밀어둔다
+    os.path.expanduser("~/.local/bin/claude-real.exe"),
+    os.path.expanduser("~/AppData/Local/Programs/claude/claude-real.exe"),
 ]
 
 
@@ -64,7 +68,17 @@ REAL_CLAUDE = find_real_claude()
 
 
 def passthrough(argv):
-    """진짜 claude 로 완전히 넘긴다. 이 프로세스를 그대로 대체하므로 흔적이 안 남는다."""
+    """진짜 claude 로 완전히 넘긴다.
+
+    유닉스는 execv 로 이 프로세스를 그대로 대체한다(흔적 안 남음).
+    Windows 는 execv 가 부모를 즉시 끝내버려 부르는 쪽(cmd/봇)이 출력을 놓칠 수 있으므로,
+    자식을 끝까지 기다렸다가 그 종료 코드로 나간다.
+    """
+    if os.name == "nt":
+        import subprocess
+
+        proc = subprocess.run([REAL_CLAUDE, *argv])
+        sys.exit(proc.returncode)
     os.execv(REAL_CLAUDE, [REAL_CLAUDE, *argv])
 
 

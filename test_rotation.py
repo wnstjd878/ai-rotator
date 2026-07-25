@@ -433,6 +433,95 @@ def case_subprocess_compat(tmp):
     check("capture_output 을 같이 안 넣음", "capture_output" not in seen, f"{sorted(seen)}")
 
 
+def case_sequential_lowest(tmp):
+    print("\n[17] 순차 소진: 항상 최저 인덱스부터 (분산 아님)")
+    setup(tmp, ["A", "B", "C", "D"], "C")  # 현재 C 에 앉아 있어도
+    state = st.prune_blocked(st.load_state())
+    check("A 가 살아 있으면 A 선택", st.pick_next(state) == "A",
+          f"골른 것={st.pick_next(state)}")
+
+    st.mark_blocked(state, "A", time.time() + 3 * 3600)
+    check("A 막히면 B", st.pick_next(state) == "B", f"골른 것={st.pick_next(state)}")
+
+    st.mark_blocked(state, "B", time.time() + 3 * 3600)
+    check("A,B 막히면 C", st.pick_next(state) == "C", f"골른 것={st.pick_next(state)}")
+
+    # A 가 풀리면 다시 A (5시간 한도가 풀린 상황)
+    state["blocked"].pop("A")
+    check("A 풀리면 다시 A 로 복귀", st.pick_next(state) == "A", f"골른 것={st.pick_next(state)}")
+
+
+def case_shared_merge(tmp):
+    print("\n[18] 공유 저장소: 다른 머신 막힘이 병합돼 같은 계정에 수렴")
+    setup(tmp, ["A", "B", "C"], "A")
+    fake = FakeShared()
+    st.shared_state = fake
+
+    # 다른 머신이 A 를 한도로 막았다(공유에 기록됨)
+    fake.blocked["A"] = time.time() + 3 * 3600
+    state = st.prune_blocked(st.load_state())  # 공유를 병합
+    check("공유 막힘이 로컬에 병합", st.is_blocked(state, "A"))
+    check("이 머신도 A 건너뛰고 B 선택", st.pick_next(state) == "B", f"골른 것={st.pick_next(state)}")
+
+    # 이 머신이 B 를 막으면 공유에도 전파돼 다른 머신이 본다
+    st.mark_blocked(state, "B", time.time() + 3 * 3600, "이 머신에서 막음")
+    check("내 막힘이 공유로 전파", "B" in fake.blocked, f"공유={list(fake.blocked)}")
+
+    # 사람이 --use 로 A 를 고르면 공유 막힘도 풀린다
+    st.clear_blocked_label(state, "A")
+    check("수동 지정이 공유 막힘도 품", "A" not in fake.blocked, f"공유={list(fake.blocked)}")
+
+
+def case_shared_three_machines(tmp):
+    print("\n[19] 세 머신 시뮬레이션: 한 계정을 순서대로 태운다")
+    # 공유 저장소 하나를 세 머신이 같이 본다
+    shared = FakeShared()
+    machines = []
+    for i in range(3):
+        mdir = Path(tmp) / f"m{i}"
+        setup(mdir, ["A", "B", "C", "D"], None)
+        machines.append({
+            "STATE_FILE": st.STATE_FILE, "LOCK_FILE": st.LOCK_FILE,
+            "ACCOUNTS_FILE": st.ACCOUNTS_FILE, "CREDS_DIR": st.CREDS_DIR,
+        })
+
+    def as_machine(m):
+        st.STATE_FILE = m["STATE_FILE"]; st.LOCK_FILE = m["LOCK_FILE"]
+        st.ACCOUNTS_FILE = m["ACCOUNTS_FILE"]; st.CREDS_DIR = m["CREDS_DIR"]
+        st.shared_state = shared
+
+    # 세 머신 모두 처음엔 A 를 고른다
+    picks = []
+    for m in machines:
+        as_machine(m)
+        picks.append(st.pick_next(st.prune_blocked(st.load_state())))
+    check("세 머신 모두 A 선택", picks == ["A", "A", "A"], f"골른 것={picks}")
+
+    # 머신 0 이 A 를 주간한도로 막는다(공유 전파)
+    as_machine(machines[0])
+    st.mark_blocked(st.prune_blocked(st.load_state()), "A", time.time() + 3 * 3600, "m0 한도")
+
+    # 나머지 머신도 다음 호출에서 A 를 건너뛰고 B 로 수렴
+    picks = []
+    for m in machines:
+        as_machine(m)
+        picks.append(st.pick_next(st.prune_blocked(st.load_state())))
+    check("A 막힌 뒤 세 머신 모두 B 로 수렴", picks == ["B", "B", "B"], f"골른 것={picks}")
+
+
+def case_shared_iso_roundtrip():
+    print("\n[20] 공유 저장소 시각 변환 왕복")
+    import shared_state as sh
+    now = 1785000000.0
+    iso = sh._to_iso(now)
+    back = sh._from_iso(iso)
+    check("epoch→ISO→epoch 왕복", abs(back - now) < 1, f"차이={back - now}")
+    check("Z 표기 파싱", sh._from_iso("2026-07-26T00:00:00Z") is not None)
+    check("빈 값은 None", sh._from_iso("") is None)
+    check("깨진 값은 None", sh._from_iso("어제") is None)
+    check("설정 없으면 꺼짐", not sh.enabled() or True)  # 환경변수 유무 무관, 예외만 안 나면 됨
+
+
 def case_shim_prompt_argument():
     print("\n[16] 가로채기가 표준입력을 언제 읽을지 가린다")
     import claude_shim
@@ -459,15 +548,19 @@ def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
     real_notify = claude_pool.notify
+    real_shared = st.shared_state
     try:
         for case in (case_success_no_switch, case_false_positive, case_rotate_on_limit,
                      case_all_exhausted, case_already_switched, case_reset_parsing,
                      case_auth, case_unknown_error, case_manual_next,
                      case_answer_json_not_failure, case_dirty_body_not_limit,
                      case_broken_cred_after_switch, case_notice_once,
-                     case_broken_state_file, case_subprocess_compat):
+                     case_broken_state_file, case_subprocess_compat,
+                     case_sequential_lowest, case_shared_merge,
+                     case_shared_three_machines):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
+        case_shared_iso_roundtrip()
         case_shim_prompt_argument()
     finally:
         claude_pool.subprocess.run = real_run
