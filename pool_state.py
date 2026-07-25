@@ -204,7 +204,16 @@ def mark_notified(state: dict, reset_at: float | None, now: float | None = None)
     """전 계정 소진 알림을 지금 보내야 하는지. 보낼 차례면 True 를 주고 표시한다.
 
     같은 소진 구간에서는 한 번만 보낸다. 봇 55곳이 각자 부르면 알림이 쏟아지기 때문.
+    공유가 켜져 있으면 세 머신을 통틀어 한 번만 나가게 공유 저장소로 판단한다.
     """
+    if _shared_on():
+        got = shared_state.claim_notify(reset_at)
+        # 공유로 한 번 잡았으면 로컬에도 표시해 이 머신 안에서도 중복을 막는다
+        if got:
+            state["notified_for"] = round(float(reset_at)) if reset_at else None
+            state["notified_at"] = time.time()
+        return got
+
     now = time.time() if now is None else now
     key = round(float(reset_at)) if reset_at else None
     prev_key = state.get("notified_for")

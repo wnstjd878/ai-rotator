@@ -124,9 +124,7 @@ def use(label: str) -> int:
         if not _switch(label):
             return 1
         state = st.prune_blocked(st.load_state())
-        blocked = dict(state.get("blocked") or {})
-        blocked.pop(label, None)  # 손으로 고른 계정은 막힘 표시를 푼다
-        state["blocked"] = blocked
+        st.clear_blocked_label(state, label)  # 손으로 고른 계정은 막힘 표시를 푼다(로컬+공유)
         st.set_current(state, label, "수동 지정")
         st.save_state(state)
     print(f"'{label}' 계정으로 교체했습니다.")

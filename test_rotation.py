@@ -74,6 +74,35 @@ class Fake:
         self.notices.append(message)
 
 
+class FakeShared:
+    """가짜 공유 저장소. 세 머신이 같이 보는 한도 상태를 메모리 dict 로 흉내낸다."""
+
+    def __init__(self):
+        self.blocked = {}
+        self.notified = None
+
+    def enabled(self):
+        return True
+
+    def get_blocked(self, now=None):
+        return dict(self.blocked)
+
+    def set_blocked(self, label, until, reason=""):
+        self.blocked[label] = max(self.blocked.get(label, 0.0), float(until))
+        return True
+
+    def clear_blocked(self, label):
+        self.blocked.pop(label, None)
+        return True
+
+    def claim_notify(self, reset_at):
+        key = str(round(float(reset_at))) if reset_at else "unknown"
+        if self.notified == key:
+            return False
+        self.notified = key
+        return True
+
+
 def setup(tmp, labels, current):
     """상태 파일·계정 목록·자격 저장본을 임시 폴더에 만든다."""
     tmp = Path(tmp)
@@ -88,6 +117,7 @@ def setup(tmp, labels, current):
     st.LOCK_FILE = tmp / "state.lock"
     st.ACCOUNTS_FILE = tmp / "accounts.json"
     st.CREDS_DIR = creds
+    st.shared_state = None  # 케이스마다 공유는 끈 채로 시작(공유 케이스만 따로 켠다)
     claude_pool.LOG_FILE = tmp / "rotator.log"
     state = st.load_state()
     st.set_current(state, current, "시험 준비")
