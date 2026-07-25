@@ -1,133 +1,119 @@
-# fable-rotator: 구독 계정 자동 순환
+# fable-rotator: 구독 계정 자동 순환 (3대 공유)
 
-클로드 구독 계정 여러 개를 번갈아 쓴다. 쓰는 길이 두 가지다.
+클로드 구독 계정 여러 개를 세 머신(Windows 본체·Mac mini·winserver)이 같이 쓰면서,
+한 계정을 주간한도까지 다 태우고 다음 계정으로 순서대로 넘어간다.
 
-1. **봇 자동 순환 (핵심)**. 봇이 claude 를 부르다 한도 거절을 받으면, 그 계정을 해제 시각까지
-   쉬게 표시하고 다음 계정 자격으로 갈아끼운 뒤 **같은 요청을 자동으로 다시 보낸다**. 사람이 안 봐도 된다.
-2. **사람이 쓰는 대화형**. 내 claude 창이 한도에 걸리면 `--next` 한 번으로 다음 계정으로 갈아끼운다.
-   (대화형 창은 자동 감지가 안 된다. 이미 떠 있는 창은 껐다 켜야 새 계정이 붙는다.)
+## 두 가지 핵심
 
-옛 방식(크롬으로 사용량 화면을 미리 읽어 고르기, `rotate.py`)도 남겨뒀다. 지금은 보조 수단이다.
-잔여량을 미리 정확히 알 방법이 없어 오차가 크고, 거절이 오면 그때 넘기는 쪽이 확실하기 때문.
+**순차 소진.** 항상 최저 인덱스(A→B→C→D)부터 쓴다. A가 살아 있으면 세 머신 모두 A만 쓴다.
+A가 주간한도로 오래 막히면 다 같이 B로 넘어간다. 5시간 한도로 잠깐 막힌 계정은 곧 풀려
+다시 A로 돌아오므로, 자연히 오래 막히는 주간한도 기준으로 순서가 넘어간다.
+분산(여러 계정을 동시에 조금씩)하지 않는다. 그래야 나머지 계정이 온전히 리셋되며 롤링된다.
 
-## 플랫폼 차이 (중요)
+**공유 상태.** 세 머신이 "어느 계정이 언제까지 막혔나"를 Supabase 한 테이블에서 같이 본다.
+이게 있어야 세 머신이 같은 계정에 수렴한다. 없으면 각자 다른 계정에 앉아 흩어진다.
+자격(로그인)은 공유하지 않는다. 머신마다 따로다.
 
-| | Windows | Mac |
+| 무엇 | 범위 | 왜 |
 |---|---|---|
-| 자격 저장 | `~/.claude/.credentials.json` 파일 | Keychain (`Claude Code-credentials` / `kwon`) |
-| 교체 방식 | 파일 바꿔치기 → 완전 자동 | `security` 로 Keychain 덮어쓰기 |
-| 실행 위치 | 어디서나 | **화면(Aqua) 세션에서만**. launchd 봇은 해당되지만 ssh 원격은 안 됨 |
+| 로그인 자격 | 머신마다 따로 | Windows=파일, Mac=Keychain. 형식이 달라 복사 불가 |
+| 구독 한도 | 계정 단위로 세 머신 공유 | 같은 계정이면 어느 머신에서 쓰든 같은 한도 창을 깎음 |
+| 순환 상태(막힘) | 공유(Supabase) | 세 머신이 같은 계정을 순서대로 태우려면 필요 |
 
-Mac 봇은 launchd LaunchAgent 로 화면 세션에서 도니 자동 교체가 된다.
-ssh 로 직접 돌리는 스크립트는 Keychain 을 못 고쳐 교체가 실패한다.
+## 머신별 지형
 
-## 최초 셋업 (계정마다 1회, 각 머신에서 각각)
+| 머신 | claude 쓰는 것 | 순환 방법 |
+|---|---|---|
+| winserver (192.168.0.3) | viral-radar 전체 (작업 스케줄러) | `install_shim.ps1` 로 가로채기 |
+| Mac mini | makwangsu-chat, mkt-agent, content-layer (launchd) | `install_shim.sh` 로 가로채기 |
+| Windows 본체 | 대화형 claude code | `claude_pool.py --next` 수동 |
 
-라벨(A, B, C, D)이 세 곳을 잇는 공통 키다: 크롬 프로필 ↔ `creds/<라벨>.json` ↔ `accounts.json`.
+## 셋업
 
-| 라벨 | 크롬 프로필 디렉토리 |
-|---|---|
-| A | `Default` (원래 쓰던 프로필) |
-| B | `Profile 1` |
-| C | `Profile 2` |
-| D | `Profile 3` |
+### 1. 공유 저장소 (한 번)
 
-1. **웹 로그인**: 크롬에서 계정마다 프로필을 만들고 각 프로필로 `claude.ai` 에 로그인.
-   프로필 디렉토리명은 `chrome://version` 의 "프로필 경로" 끝부분으로 확인.
-2. **CLI 자격 저장**: 각 계정으로 claude 에서 `/login` 한 뒤 그 자격을 라벨로 백업한다.
-   ```
-   python save_account.py A     # A 계정으로 로그인된 상태에서 → creds/A.json
-   ```
-   B, C, D 도 각 계정으로 다시 로그인한 뒤 반복. **Mac 은 본체 터미널에서** 실행(Keychain 읽기).
-3. **지금 꽂혀 있는 계정을 알려준다** (순환기가 어느 계정으로 시작할지 알아야 한다):
-   ```
-   python claude_pool.py --use A
-   ```
+신규 Supabase 프로젝트를 만들고, SQL Editor 에 아래를 붙여넣어 실행한다.
+(`python shared_state.py` 를 설정 없이 돌리면 이 SQL 을 출력해 준다.)
+
+```sql
+create table if not exists rotator_accounts (
+  label text primary key, blocked_until timestamptz, reason text,
+  updated_at timestamptz default now());
+create table if not exists rotator_meta (
+  key text primary key, value text, updated_at timestamptz default now());
+alter table rotator_accounts enable row level security;
+alter table rotator_meta enable row level security;
+```
+
+세 머신 각각의 `.env`(또는 셸 환경)에 넣는다. service_role 키는 채팅에 붙이지 말고 각 머신에서 직접.
+
+```
+ROTATOR_SUPABASE_URL=https://<ref>.supabase.co
+ROTATOR_SUPABASE_KEY=<service_role 키>
+```
+
+`python shared_state.py` 로 연결을 확인한다.
+
+### 2. 계정 자격 저장 (머신마다, 계정마다)
+
+각 계정으로 claude 에서 `/login` 한 뒤 저장한다. 세 머신에서 각각 A~D 를 다 저장한다.
+
+```
+python save_account.py A     # A 계정 로그인 상태에서 → creds/A.json
+```
+
+- Mac 은 **본체 화면 세션**에서(Keychain 잠금 해제 필요, ssh 원격 불가).
+- winserver·Windows 본체는 파일이라 어디서든 된다.
+
+`accounts.json` 의 라벨 순서(A→B→C→D)가 곧 소진 순서다.
+
+### 3. 가로채기 설치
+
+- Mac / winserver(자동 봇): 봇 코드를 안 고치고 claude 실행 파일 자리에 래퍼를 앉힌다.
+  ```
+  bash install_shim.sh                      # Mac
+  powershell -File install_shim.ps1         # winserver
+  ```
+  되돌리기: `--uninstall` / `-Uninstall`. claude 를 업데이트하면 다시 설치한다.
+- Windows 본체(대화형): 설치 안 함. 한도 걸리면 `python claude_pool.py --next`.
 
 ## 매일 사용
 
 ```
-python claude_pool.py --status     지금 계정과 각 계정 상태 보기
-python claude_pool.py --next       한도 걸렸을 때 다음 계정으로 넘기기
+python claude_pool.py --status     현재 계정과 각 계정 상태(공유 반영)
+python claude_pool.py --next       한도 걸렸을 때 다음 계정으로 (대화형용)
 python claude_pool.py --use B      B 계정으로 바로 지정
-python claude_pool.py -- -p "안녕"  순환 보호를 받으며 claude 한 번 실행
 ```
 
-`--next` / `--use` 로 바꾼 뒤에는 **열려있던 claude 를 껐다 다시 실행**해야 적용된다.
+## 동작 요약
 
-## 봇에 끼우는 법 (둘 중 하나만 고른다)
+봇이 claude 를 부르다 한도 거절을 받으면, 그 계정을 해제 시각까지 막고(공유에 기록),
+최저 인덱스의 살아 있는 계정으로 자격을 갈아끼운 뒤 같은 요청을 다시 보낸다.
 
-### 1. 가로채기 설치 (권장, 봇 코드 안 고침)
-
-```
-bash install_shim.sh            설치
-bash install_shim.sh --status   지금 어느 쪽이 걸려 있는지
-bash install_shim.sh --uninstall 되돌리기
-```
-
-`/opt/homebrew/bin/claude` 자리에 앉아 단발 호출(`-p`)만 순환 보호로 넘긴다.
-Mac 의 claude 호출 43개 파일 55곳을 한 곳으로 덮는다. 다음 경우엔 아무것도 안 하고 그대로 통과시킨다.
-
-- 대화형 실행(`-p` 없음). 사람이 쓰는 창은 안 건드린다
-- 고를 수 있는 계정이 2개 미만(`creds/` 와 `accounts.json` 양쪽에 있는 라벨 기준)
-- `CLAUDE_ROTATOR_DISABLED=1` 을 준 경우
-
-npm 으로 Claude Code 를 업데이트하면 이 연결이 원래대로 돌아간다(봇은 정상 동작하고 순환만 꺼짐).
-업데이트 뒤에는 `install_shim.sh` 를 다시 실행한다.
-
-### 2. 봇 코드에서 직접 부르기
-
-가로채기를 설치했다면 이 방식은 쓰지 않는다. 두 겹이 되어 재시도와 알림이 겹친다.
-
-봇 코드에서 claude 를 부르는 `subprocess.run(...)` 을 이 모듈의 `run(...)` 으로 바꾸면 끝이다.
-인자와 반환값이 `subprocess.run` 과 같아서 나머지 코드는 안 고쳐도 된다.
-
-```python
-import sys, os
-sys.path.insert(0, os.path.expanduser("~/projects/fable-rotator"))
-from claude_pool import run as pool_run
-
-proc = pool_run(args, capture_output=True, text=True, timeout=240)
-```
-
-- 한도 거절이면 계정을 바꿔 같은 요청을 다시 보낸다.
-- 로그인 거절은 두 가지로 갈린다. **처음부터** 났으면 이 환경에서 로그인이 안 된 것이라(ssh 비대화형이 대표적)
-  계정을 안 바꾸고 그대로 돌려준다. 계정을 **갈아끼운 뒤에** 났으면 그 저장본이 상한 것이라
-  30분 쉬게 하고 다음 계정으로 넘어간다.
-- 원인 모를 실패는 계정을 안 바꾸고 한 번만 더 시도한 뒤 결과를 그대로 돌려준다.
-- 쓸 계정이 하나도 없으면 `AllAccountsExhausted`(RuntimeError 의 한 종류)를 올리고 텔레그램으로 알린다.
-  알림은 소진 구간마다 한 번만 나간다.
+- 한도 거절 → 계정 막고 다음(순서대로). 세 머신이 같은 막힘을 봐서 같은 계정에 수렴.
+- 로그인 거절: **처음부터**면 이 환경 로그인이 안 된 것이라 안 바꾸고 멈춤. **갈아끼운 뒤**면
+  그 저장본이 상한 것이라 30분 쉬게 하고 다음 계정으로.
+- 원인 모를 실패는 계정 안 바꾸고 한 번만 더 시도.
+- 쓸 계정이 없으면 `AllAccountsExhausted` + 텔레그램 알림(소진 구간당 세 머신 통틀어 1건).
 - `check=True`, `stdout=...` 같은 인자도 `subprocess.run` 과 똑같이 받는다.
-
-여러 봇이 동시에 한도에 걸려도 교체는 잠금으로 한 번만 일어난다.
-다른 봇이 이미 계정을 바꿨으면 또 바꾸지 않고 바로 재시도한다.
+- 공유 저장소가 죽어도 봇을 멈추지 않는다. 각 머신이 로컬 상태로 버틴다.
 
 ## 파일
 
-핵심(자동 순환)
-- `claude_pool.py`: 실행 래퍼 + 명령줄 도구 (메인)
+- `claude_pool.py`: 실행 래퍼 + 명령줄 도구
 - `limit_detect.py`: 한도 거절 판정과 해제 시각 읽기
-- `pool_state.py`: 현재 계정·막힌 계정 상태와 잠금
-- `notify.py`: 전 계정 소진 같은 일을 텔레그램으로 알림
-- `test_rotation.py`: 순환 로직 시험 (가짜 호출로 16가지 상황 재현, 검사 93개)
-- `claude_shim.py` / `install_shim.sh`: claude 실행 파일 자리에 앉는 가로채기와 설치·해제
-- `state.json`: 현재 상태 (자동 생성, git 제외)
-- `rotator.log`: 교체 기록
-
-자격
-- `save_account.py` / `switch_account.py`: 자격 저장·교체 (Win=파일, Mac=Keychain 자동 분기)
-- `accounts.json`: 계정↔프로필 매핑 / `creds/`: 자격 백업 (둘 다 git 제외)
-
-보조(옛 방식, 사용량 화면 읽기)
-- `rotate.py`: 크롬을 계정마다 재시작하며 사용량을 읽어 여유 계정을 고름
-- `reader.py`: 한 계정 사용량만 읽어 판정
-- `launch_chrome_debug.ps1` / `.sh`: 크롬을 디버그 포트 9222 로 재시작
+- `pool_state.py`: 순차 소진 pick + 로컬/공유 막힘 병합
+- `shared_state.py`: 세 머신이 같이 보는 한도 상태(Supabase REST)
+- `claude_shim.py`: claude 실행 파일 자리에 앉는 가로채기(Mac·Windows 겸용)
+- `install_shim.sh` / `install_shim.ps1`: 가로채기 설치·해제(Mac / Windows)
+- `save_account.py` / `switch_account.py`: 자격 저장·교체(Win 파일 / Mac Keychain)
+- `notify.py`: 전 계정 소진 텔레그램 알림
+- `test_rotation.py`: 가짜 호출로 20가지 상황 재현(순차·공유·세 머신 수렴 포함)
+- `accounts.json` / `creds/`: 계정 매핑 / 자격 백업(둘 다 git 제외)
 
 ## 주의
 
-- `creds/` 는 자격정보다. 화면 출력·git 커밋 금지(`.gitignore` 처리됨).
-- `creds/` 는 각 머신에서 각자 저장한다(Win 자격 파일 ≠ Mac Keychain 값). 머신 간 복사하지 말 것.
-- Mac 의 Keychain 교체는 자격 값을 표준입력으로 넘긴다(명령 인자에 안 실림). 다만 잠금 해제된
-  Keychain 이 필요하므로 원격(ssh)이 아니라 본체나 launchd 화면 세션에서만 된다.
-- 계정을 바꿔도 이미 떠 있는 claude 세션에는 반영 안 된다. 다음 실행부터 적용된다.
-- `rotate.py` 는 계정마다 크롬을 강제 종료하고 재시작한다. 그동안 크롬으로 다른 작업 하지 말 것.
+- `creds/`·`state.json`·`.env` 는 자격정보/로컬 상태. git 제외.
+- Mac Keychain 교체는 자격을 표준입력으로 넘긴다(명령 인자에 안 실림). 본체/launchd 화면 세션에서만.
+- 계정을 바꿔도 이미 떠 있는 claude 세션에는 반영 안 된다. 다음 실행부터.
+- `rotate.py`(옛 방식, 크롬으로 사용량 화면 읽기)는 보조로 남겨둠. 지금 순환은 거절 기반이다.

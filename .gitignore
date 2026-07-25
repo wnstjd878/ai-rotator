@@ -15,3 +15,8 @@ state.json.tmp
 state.lock
 rotator.log
 claude_shim.sh
+
+# 공유 저장소 키 (머신마다 직접 넣음)
+.env
+.env.*
+.original_claude_link
