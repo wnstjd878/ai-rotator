@@ -74,17 +74,26 @@ def which_limit(usage: dict | None, threshold: float = 95.0) -> str | None:
     return None
 
 
+def _fmt_reset(epoch) -> str:
+    """리셋 시각을 ' (MM/DD HH:MM 풀림)' 로. 없으면 빈 문자열."""
+    if not epoch:
+        return ""
+    import time
+    return f" ({time.strftime('%m/%d %H:%M', time.localtime(float(epoch)))} 풀림)"
+
+
 def summarize(usage: dict | None) -> str:
-    """사람이 읽는 한 줄. 예: '주간 99%(1%p 남음), 세션 5%'"""
+    """사람이 읽는 한 줄. 남은량 앞, 리셋 시각 뒤.
+    예: '주간 남은 1% (08/01 20:59 풀림), 세션 남은 95% (07/27 20:59 풀림)'"""
     if not usage:
         return "사용량 못 읽음"
     wk = usage.get("weekly_pct")
     se = usage.get("session_pct")
     parts = []
     if wk is not None:
-        parts.append(f"주간 {wk:.0f}%(남은 {max(0, 100 - wk):.0f}%p)")
+        parts.append(f"주간 남은 {max(0, 100 - wk):.0f}%{_fmt_reset(usage.get('weekly_reset'))}")
     if se is not None:
-        parts.append(f"세션 {se:.0f}%")
+        parts.append(f"세션 남은 {max(0, 100 - se):.0f}%{_fmt_reset(usage.get('session_reset'))}")
     return ", ".join(parts) if parts else "사용량 없음"
 
 
