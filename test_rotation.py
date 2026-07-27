@@ -504,6 +504,24 @@ def case_reset_soonest_first(tmp):
           f"정렬={st.priority_order(state, ['A', 'C', 'D'])}")
 
 
+def case_skip_blocked_before_call(tmp):
+    print("\n[17-3] 이미 막힌 계정이면 부르기 전에 갈아탄다 (헛걸음 없음)")
+    setup(tmp, ["A", "B"], "A")
+    state = st.prune_blocked(st.load_state())
+    st.mark_blocked(state, "A", time.time() + 3 * 3600, "다른 머신이 한도로 막음")
+    st.save_state(state)
+
+    fake = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake)
+    proc = claude_pool.run(["claude", "-p", "안녕"])
+    check("성공", proc.returncode == 0)
+    check("막힌 A 는 아예 안 부름", "A" not in fake.calls, f"부른 계정={fake.calls}")
+    check("한 번만 부름(헛걸음 없음)", len(fake.calls) == 1, f"부른 계정={fake.calls}")
+    check("현재 계정이 B 로 바뀜",
+          st.prune_blocked(st.load_state()).get("current") == "B",
+          f"현재={st.prune_blocked(st.load_state()).get('current')}")
+
+
 def case_shared_merge(tmp):
     print("\n[18] 공유 저장소: 다른 머신 막힘이 병합돼 같은 계정에 수렴")
     setup(tmp, ["A", "B", "C"], "A")

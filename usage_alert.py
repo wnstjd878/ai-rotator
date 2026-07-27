@@ -4,6 +4,9 @@
       50% / 70% / 90% 를 넘을 때마다 텔레그램으로 남은량을 알린다. (선제 경고)
 실행: python usage_alert.py   (winserver 작업 스케줄러 ai-rotator-usage-alert, 10분마다)
       python usage_alert.py --preview  → 지금 값으로 알림 문구만 출력(전송·기록 안 함)
+      python usage_alert.py --refresh-order → 계정 순서 기준만 갱신(알림 없음).
+        Mac LaunchAgent com.user.ai-rotator-order 가 1시간마다 실행. 봇만 도는 머신은
+        사용량을 읽을 일이 없어 순서 기준이 안 쌓이기 때문이다.
 동작: 현재 계정(state.current, 없으면 순차상 다음)의 usage 를 /api/oauth/usage 로 읽어
       주간·세션 각각 넘은 단계(50/70/90)를 그 리셋 구간에 한 번씩만 알린다(스팸 방지).
       리셋되면(리셋 시각이 바뀌면) 다시 무장돼 다음 구간에 또 알린다.
@@ -143,7 +146,34 @@ def build_message(label: str, hits: list, others: list) -> str:
     return "\n".join(lines)
 
 
+def refresh_order() -> int:
+    """알림 판정 없이 계정 순서 기준(주간 초기화 시각)만 갱신한다.
+
+    봇만 도는 머신(Mac)에는 사용량을 읽을 일이 없어 이 값이 안 쌓인다. 비어 있으면
+    그 계정이 순서 뒤로 밀려 세 머신이 서로 다른 계정을 고르게 된다.
+    """
+    state = st.prune_blocked(st.load_state())
+    cur = state.get("current")
+    seen = []
+    for l in st.account_labels():
+        cred = BASE / "creds" / f"{l}.json"
+        if not cred.exists():
+            continue
+        u = usage_check.get_usage_for(cred, is_current=(l == cur))
+        if u and u.get("weekly_reset"):
+            seen.append((l, u["weekly_reset"]))
+    if not seen:
+        print(f"순서 갱신 실패: 사용량을 못 읽음 ({usage_check.last_error or '사유 모름'})")
+        return 1
+    st.remember_resets(seen)
+    order = st.priority_order(st.prune_blocked(st.load_state()))
+    print("순서 갱신: " + " → ".join(order))
+    return 0
+
+
 def main() -> int:
+    if "--refresh-order" in sys.argv:
+        return refresh_order()
     preview = "--preview" in sys.argv
     state = st.prune_blocked(st.load_state())
     label = state.get("current") or st.pick_next(state)
@@ -185,8 +215,36 @@ def main() -> int:
     else:
         _save_alerted(alerted)  # 마킹 갱신은 저장
         print(f"새 단계 없음: {label} (주간 {u.get('weekly_pct')}%, 세션 {u.get('session_pct')}%)")
+    _fill_missing_resets(state, label, seen)
     st.remember_resets(seen)
     return 0
+
+
+def _fill_missing_resets(state: dict, label: str, seen: list) -> None:
+    """순서 기준(주간 초기화 시각)이 비어 있는 계정만 채운다.
+
+    이게 비어 있으면 그 계정은 뒤로 밀려 순서가 틀어진다. 봇 머신은 사용량을 읽을 일이
+    적어서 저절로 안 쌓인다. 다만 매번 다 조회하면 429 가 나므로 없는 것만 읽는다.
+    초기화가 지나면 그 값이 과거가 되어 자동으로 다시 채우게 된다.
+    """
+    import time
+    now = time.time()
+    resets = state.get("weekly_reset") or {}
+    already = {l for l, _ in seen}
+    for l in st.account_labels():
+        if l == label or l in already:
+            continue
+        try:
+            if float(resets.get(l)) > now:
+                continue  # 이미 쓸 만한 값이 있다
+        except (TypeError, ValueError):
+            pass
+        cred = BASE / "creds" / f"{l}.json"
+        if not cred.exists():
+            continue
+        u = usage_check.get_usage(cred)
+        if u and u.get("weekly_reset"):
+            seen.append((l, u["weekly_reset"]))
 
 
 if __name__ == "__main__":

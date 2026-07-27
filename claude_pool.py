@@ -242,6 +242,30 @@ def ensure_usable() -> int:
     return 0
 
 
+def _switch_if_blocked(state: dict):
+    """지금 계정이 이미 막혀 있으면 부르기 전에 갈아탄다. 막힌 계정 목록만 보고 판단한다.
+
+    막힘은 세 머신이 공유하므로, 다른 머신이 한도로 막아둔 계정을 이 머신이 그대로 쓰다가
+    똑같이 거절받는 헛걸음을 없앤다. 사용량 조회를 하지 않아 값싸고, 알림도 안 보낸다
+    (막을 때 이미 한 번 나갔다).
+    """
+    cur = state.get("current")
+    if not cur or not st.is_blocked(state, cur):
+        return cur
+    with st.with_lock():
+        s = st.prune_blocked(st.load_state())
+        cur = s.get("current")
+        if not cur or not st.is_blocked(s, cur):
+            return cur  # 그 사이 다른 프로세스가 바꿨다
+        nxt = st.pick_next(s, exclude=cur)
+        if nxt is None or not _switch(nxt):
+            return cur  # 갈아탈 데가 없으면 기존 흐름(거절 → 소진 알림)이 처리한다
+        st.set_current(s, nxt, f"{cur} → {nxt} (이미 막힌 계정이라 미리 교체)")
+        st.save_state(s)
+        log(f"'{cur}' 는 이미 막혀 있어 부르기 전에 '{nxt}' 로 교체")
+        return nxt
+
+
 def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
     """실패한 계정을 쉬게 하고 다음 계정으로 교체. 교체된 라벨을 반환.
 
@@ -414,7 +438,7 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
     proc = None
     for attempt in range(max_attempts):
         state = st.prune_blocked(st.load_state())
-        used_label = state.get("current")
+        used_label = _switch_if_blocked(state)
 
         try:
             proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)
