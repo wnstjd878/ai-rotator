@@ -1,7 +1,17 @@
-# fable-rotator: 구독 계정 자동 순환 (3대 공유)
+# ai-rotator: 구독 계정 자동 순환 (클로드 + 지피티, 여러 머신 공유)
 
-클로드 구독 계정 여러 개를 세 머신(Windows 본체·Mac mini·winserver)이 같이 쓰면서,
-한 계정을 주간한도까지 다 태우고 다음 계정으로 순서대로 넘어간다.
+구독 계정 여러 개를 여러 머신이 같이 쓰면서, 한 계정을 주간한도까지 다 태우고
+다음 계정으로 순서대로 넘어간다. **클로드(claude)와 지피티(codex) 둘 다 같은 뼈대를 쓴다.**
+
+| | 클로드 | 지피티(Codex) |
+|---|---|---|
+| 명령 | `claude_pool.py`, 짧은 명령 `cc`/`cn`/`cs` | `codex_pool.py`, 짧은 명령 `gc`/`gn`/`gs` |
+| 상태 파일 | `state.json` / `accounts.json` / `creds/` | `codex_state.json` / `codex_accounts.json` / `creds/codex/` |
+| 자격 | `~/.claude/.credentials.json` | `~/.codex/auth.json` |
+| 사용량 조회 | `api.anthropic.com/api/oauth/usage` | `chatgpt.com/backend-api/codex/usage` |
+| 공유 라벨 | `A`, `B`, … | `codex:A`, `codex:B`, … (한 테이블을 나눠 씀) |
+
+지피티 쪽만 다른 점은 아래 "지피티(Codex) 순환" 절에.
 
 ## 두 가지 핵심
 
@@ -98,8 +108,64 @@ python claude_pool.py --use B      B 계정으로 바로 지정
 - `check=True`, `stdout=...` 같은 인자도 `subprocess.run` 과 똑같이 받는다.
 - 공유 저장소가 죽어도 봇을 멈추지 않는다. 각 머신이 로컬 상태로 버틴다.
 
+## 지피티(Codex) 순환
+
+클로드와 규칙은 같다. 거절을 받은 뒤에만 계정을 바꾸고, 남은량은 알림으로만 알린다
+(2026-07-28 사용자 결정 — 사용률을 보고 미리 넘기지 않는다).
+
+### 셋업
+
+```
+codex login              # 계정 1로 로그인 (codex logout 은 절대 쓰지 말 것)
+python codex_save.py A   # → creds/codex/A.json
+codex login              # 계정 2로 로그인 (logout 없이 바로 login)
+python codex_save.py B   # → creds/codex/B.json
+```
+
+`codex_save.py` 는 저장한 자격으로 서버에 한 번 물어 계정 주소와 요금제를 보여준다.
+그게 안 뜨면 저장이 안 된 것이다. 저장본이 2개 이상이어야 순환이 켜진다.
+
+### 매일 사용
+
+```
+gs                              계정별 사용률 (주간/세션 남은 %, 초기화 시각)
+gc                              codex 를 감싸 실행 (한도로 끝나면 자동 전환 후 재시작)
+gn                              지금 계정을 한도로 보고 다음 계정으로
+python codex_pool.py --use B    B 계정으로 바로 지정
+python codex_pool.py --sync     지금 자격을 사본에 반영(대화형으로 쓴 뒤)
+python codex_alert.py --preview 알림 문구 미리보기
+```
+
+정기 알림: Windows 본체 작업 스케줄러 `ai-rotator-codex-alert` 가 10분마다
+`codex_alert.py` 를 돌린다. 주간/세션이 50·70·90% 를 넘을 때 그 구간에 한 번씩 알린다.
+
+### 지피티에서 특히 조심할 것 (실측)
+
+1. **`codex logout` 금지.** 저장된 자격을 지운다. 계정을 바꿔 로그인할 땐 `codex login` 만.
+2. **같은 계정으로 다시 로그인하면 그 전에 저장한 사본이 죽는다.** 옛 사본을 꽂으면
+   `refresh token was revoked` 로 거절당한다(2026-07-28 실측). 로그인했으면 바로
+   `codex_save.py` 로 다시 저장한다.
+3. **자격 사본은 저절로 낡는다.** codex 는 돌면서 `auth.json` 을 갱신한다. 그래서 순환기가
+   ① 교체 직전 ② 실행이 끝날 때마다 사본을 최신으로 맞춘다(`sync_current_cred`).
+   계정 번호가 다르면 되백업하지 않는다(남의 자리를 덮어쓰지 않게).
+4. **한도 판정은 서버에 한 번 더 물어 확증한다.** codex 는 모델 답변을 표준출력에 그대로
+   흘려서 문구만 믿으면 답변 내용에 넘어간다. 사용량 조회에 여유가 있으면 계정을 안 막는다.
+5. **Mac 에서는 사용량 조회가 403(HTML)** 으로 막힌다(2026-07-28 확인). 조회가 안 되면
+   확증 단계는 건너뛰고 문구 판정을 따른다 — 순환 자체는 돈다.
+
 ## 파일
 
+### 지피티(Codex) 쪽
+- `codex_pool.py`: 실행 래퍼 + 명령줄 도구(`--status/--next/--use/--limited/--sync`)
+- `codex_limit.py`: 한도 판정(무시 문구 + 서버 확증)
+- `codex_usage.py`: 계정별 사용률 조회(주간/세션은 창 길이로 가름)
+- `codex_switch.py` / `codex_save.py`: 자격 되백업·교체 / 저장
+- `codex_alert.py`: 사용률 단계 알림(50/70/90%)
+- `codex_shim.py` / `install_codex_shim.sh`: `codex exec`·`codex review` 가로채기
+- `gcauto.ps1`: 본체 대화형 래퍼(`gc`)
+- `test_codex_rotation.py`: 가짜 호출로 15가지 상황 재현
+
+### 클로드 쪽
 - `claude_pool.py`: 실행 래퍼 + 명령줄 도구
 - `limit_detect.py`: 한도 거절 판정과 해제 시각 읽기
 - `pool_state.py`: 순차 소진 pick + 로컬/공유 막힘 병합
