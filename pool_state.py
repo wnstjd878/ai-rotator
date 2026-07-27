@@ -32,6 +32,19 @@ except Exception:
 def _shared_on() -> bool:
     return bool(shared_state and shared_state.enabled())
 
+
+def claim_notice(key: str) -> bool:
+    """알림을 지금 보낼 차례인지. 공유가 켜져 있으면 세 머신 통틀어 key 당 1회.
+
+    공유가 꺼진 단독 머신이면 항상 True(그 머신 혼자라 중복 없음).
+    """
+    if _shared_on():
+        try:
+            return shared_state.claim_once(key)
+        except Exception:
+            return False
+    return True
+
 BASE = Path(__file__).resolve().parent
 STATE_FILE = BASE / "state.json"
 LOCK_FILE = BASE / "state.lock"

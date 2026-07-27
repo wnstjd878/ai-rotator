@@ -27,6 +27,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,6 +181,23 @@ def claim_notify(reset_at: float | None) -> bool:
         return False
     body = [{"key": "rotator_notified", "value": key, "updated_at": _to_iso(time.time())}]
     res = _request("POST", META_TABLE, body=body,
+                   headers={"Prefer": "resolution=merge-duplicates"})
+    return res is not None
+
+
+def claim_once(key: str) -> bool:
+    """어떤 알림을 이 머신이 처음 보내는지(공유). 세 머신 통틀어 key 당 한 번만 True.
+
+    계정 전환 알림이 세 머신에서 각자 나가지 않게 한다. 공유를 못 읽으면 False(중복 회피).
+    """
+    q = urllib.parse.quote(key, safe="")
+    cur = _request("GET", META_TABLE, params=f"key=eq.{q}&select=value")
+    if cur is None:
+        return False  # 공유 못 읽으면 알림을 보내지 않는다(중복보다 누락이 낫다)
+    if cur:
+        return False  # 이미 누군가 보냈다
+    res = _request("POST", META_TABLE,
+                   body=[{"key": key, "value": "1", "updated_at": _to_iso(time.time())}],
                    headers={"Prefer": "resolution=merge-duplicates"})
     return res is not None
 

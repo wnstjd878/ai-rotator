@@ -102,6 +102,14 @@ class FakeShared:
         self.notified = key
         return True
 
+    def claim_once(self, key):
+        if not hasattr(self, "claimed"):
+            self.claimed = set()
+        if key in self.claimed:
+            return False
+        self.claimed.add(key)
+        return True
+
 
 def setup(tmp, labels, current):
     """상태 파일·계정 목록·자격 저장본을 임시 폴더에 만든다."""
@@ -164,6 +172,7 @@ def case_rotate_on_limit(tmp):
     state = st.load_state()
     check("현재 계정이 B", state["current"] == "B", f"current={state['current']}")
     check("A 가 막힘으로 기록됨", "A" in state["blocked"], f"blocked={state['blocked']}")
+    check("전환 알림이 나감", any("전환" in n for n in fake.notices), f"notices={fake.notices}")
     left = float(state["blocked"]["A"]) - time.time()
     check("A 해제 시각이 약 3시간 뒤", 2.5 * 3600 < left < 3.5 * 3600, f"{left / 3600:.2f}시간")
     check("호출은 A, B 순서", fake.calls == ["A", "B"], f"calls={fake.calls}")
@@ -180,7 +189,8 @@ def case_all_exhausted(tmp):
     except claude_pool.AllAccountsExhausted as e:
         raised = e
     check("AllAccountsExhausted 발생", raised is not None)
-    check("알림을 보냄", len(fake.notices) == 1, f"notices={len(fake.notices)}")
+    check("소진 알림 1건", len([n for n in fake.notices if "전부 한도" in n]) == 1,
+          f"notices={fake.notices}")
     check("해제 시각을 알려줌", raised is not None and raised.reset_at is not None)
     state = st.load_state()
     check("세 계정 모두 막힘 기록", set(state["blocked"]) == {"A", "B", "C"}, f"{state['blocked']}")
@@ -381,7 +391,8 @@ def case_notice_once(tmp):
             claude_pool.run(["claude", "-p", "안녕"])
         except claude_pool.AllAccountsExhausted:
             pass
-    check("네 번 불러도 알림 1건", len(fake.notices) == 1, f"notices={len(fake.notices)}")
+    check("네 번 불러도 소진 알림 1건",
+          len([n for n in fake.notices if "전부 한도" in n]) == 1, f"notices={fake.notices}")
 
 
 def case_broken_state_file(tmp):

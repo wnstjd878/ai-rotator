@@ -206,7 +206,29 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
         st.set_current(state, nxt, f"{used_label or '?'} → {nxt} ({verdict})")
         st.save_state(state)
         log(f"'{used_label or '?'}' → '{nxt}' 계정 교체 완료")
+        _notify_switch(used_label, nxt, verdict, state)
         return nxt
+
+
+def _notify_switch(used_label, nxt, verdict, state):
+    """계정이 바뀔 때 사용자에게 텔레그램으로 알린다. 세 머신 통틀어 전환당 한 번만.
+
+    실제로 교체를 수행한 머신만 이 지점에 오고, claim_notice 로 한 번 더 걸러 중복을 막는다.
+    """
+    if not used_label:
+        return  # 시작점 지정 등, 전환이 아니면 알리지 않는다
+    key = f"switch_{used_label}_{nxt}_{int(time.time() // 600)}"  # 10분 창당 1회
+    if not st.claim_notice(key):
+        return
+    reason = "주간/세션 한도 도달" if verdict == "limit" else "로그인 저장본 문제"
+    blocked = state.get("blocked") or {}
+    avail = [l for l in st.account_labels() if l not in blocked]
+    when = ""
+    until = blocked.get(used_label)
+    if until:
+        when = " " + time.strftime("%m/%d %H:%M 풀림", time.localtime(float(until)))
+    notify(f"[클로드 계정 전환] '{used_label}' {reason} → '{nxt}' 사용 시작.{when} "
+           f"남은 계정: {', '.join(avail) or '없음'}")
 
 
 def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs):
