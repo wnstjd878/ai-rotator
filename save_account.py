@@ -27,11 +27,13 @@ KC_SERVICE = "Claude Code-credentials"                      # Mac Keychain 서�
 KC_ACCOUNT = "kwon"                                         # Mac Keychain account (OS 사용자)
 
 
-def save_windows(dest):
+def save_file(dest):
+    """지금 쓰는 자격 파일(~/.claude/.credentials.json)을 creds 로 복사.
+
+    파일이 없으면 None 을 돌려준다(호출부가 Mac Keychain 으로 넘어감).
+    """
     if not LIVE.exists():
-        print(f"[save] 현재 로그인 파일이 없습니다: {LIVE}")
-        print("[save] 먼저 claude 에서 /login 하세요.")
-        return False
+        return None
     shutil.copy2(LIVE, dest)
     return True
 
@@ -79,12 +81,19 @@ def main():
     except Exception:
         pass  # 확인을 못 해도 저장 자체는 막지 않는다
 
-    ok = save_mac(dest) if IS_MAC else save_windows(dest)
+    # 파일 자격이 우선. 파일이 없을 때만(Mac 레거시) Keychain 에서 읽는다.
+    ok = save_file(dest)
+    if ok is None:
+        if IS_MAC:
+            ok = save_mac(dest)
+        else:
+            print("[save] 현재 로그인 파일이 없습니다. 먼저 claude 에서 /login 하세요.")
+            return 1
     if not ok:
         return 1
 
     size = dest.stat().st_size
-    where = "Keychain" if IS_MAC else "자격 파일"
+    where = "자격 파일" if LIVE.exists() else "Keychain"
     print(f"[save] 현재 로그인({where})을 '{label}' 로 백업했습니다 → {dest.name} ({size} bytes)")
 
     # 방금 저장한 계정이 지금 실제로 꽂혀 있는 계정이다. 순환기가 시작점을 알도록 적어둔다.
