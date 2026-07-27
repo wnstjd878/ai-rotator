@@ -12,6 +12,7 @@
       전환은 순환기가 자동으로 하므로 사람에게 행동을 시키지 않는다(알림만).
       계정 목록은 라벨 순서 = 실제 전환 순서(A→B→C→D)로 두고, 다음 대상만 표시한다.
       잔여 0%(소진) 계정은 "사용 불가"로 갈라 아래에 둔다.
+      주간이 0% 면 세션 줄은 빼고 주간만 보여준다(세션이 남아도 그 계정은 못 쓴다).
 상태: alert_state.json 에 "이미 알린 (계정, 종류, 리셋구간, 단계)" 를 기록.
 자격: 사용률만 읽고, 텔레그램 자격은 notify 가 파일에서 읽음.
 의도적 미구현: 굵게·고정폭 표시 없음. notify.send 가 평문(parse_mode 없음)으로 보내므로
@@ -139,6 +140,9 @@ def _next_label(label: str, others: list):
 def build_message(label: str, hits: list, others: list) -> str:
     """알림 본문. 첫 줄에 결론, 그 아래 상세, 그 아래 계정 목록."""
     nxt = _next_label(label, others)
+    wk = next((h for h in hits if h[0] == "wk"), None)
+    if wk and wk[1] <= 0:
+        hits = [wk]  # 주간이 다 차면 세션이 얼마 남았든 못 쓴다 — 세션 줄을 빼서 헷갈리지 않게
     worst = min(hits, key=lambda h: h[1])
     head = f"[클로드] 계정 {label} {_KIND_NAME[worst[0]]} {_pct(worst[1])} 남음"
     if worst[1] <= SWITCH_SOON:
