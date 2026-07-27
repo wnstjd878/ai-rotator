@@ -291,13 +291,35 @@ def _push_history(state: dict, label: str, kind: str, reason: str) -> None:
     state["history"] = hist[-HISTORY_MAX:]
 
 
+def note_weekly_reset(state: dict, label: str, epoch, now: float | None = None) -> dict:
+    """그 계정의 주간 초기화 시각을 기억한다. 다음 계정을 고르는 순서 기준이 된다.
+
+    사용량을 읽는 곳(사용량 경고, 상태 보기, 켜기 전 확인, 전환)에서 부르면 저절로 쌓인다.
+    이걸 위해 따로 조회하지는 않는다 — 조회가 잦으면 429 가 난다.
+    """
+    if not epoch:
+        return state
+    try:
+        epoch = float(epoch)
+    except (TypeError, ValueError):
+        return state
+    now = time.time() if now is None else now
+    if epoch <= now:
+        return state  # 이미 지난 시각은 낡은 값이다. 다음 조회 때 새 주기로 갱신된다
+    r = dict(state.get("weekly_reset") or {})
+    r[label] = round(epoch)
+    state["weekly_reset"] = r
+    return state
+
+
 def pick_next(state: dict, exclude: str | None = None, now: float | None = None) -> str | None:
     """지금 쓸 계정 라벨 하나. 없으면 None.
 
-    순차 소진: accounts.json 순서(A→B→C→D)의 **최저 인덱스**부터 고른다. 분산하지 않는다.
-    막힌 계정만 건너뛰므로, A 가 살아 있으면 항상 A 를 쓴다. A 가 주간한도로 오래 막히면
-    B 로 넘어가 B 를 태운다. 5시간 한도로 잠깐 막힌 계정은 곧 풀려 다시 최저 인덱스가 되므로
-    자연히 오래 막히는 주간한도 기준으로 순서가 넘어간다.
+    순차 소진: 한 계정을 다 태우고 다음으로 간다(분산하지 않는다).
+    순서는 **주간 초기화가 이른 계정부터**. 곧 초기화되는 계정의 남은 양은 안 쓰면 그냥
+    사라지기 때문이다(2026-07-27 사용자 지적: 8/1 초기화인 A 보다 7/31 초기화인 B 를
+    먼저 썼어야 했다). 초기화 시각을 아직 모르는 계정은 뒤로 밀고 accounts.json 순서를 따른다.
+    막힌 계정은 건너뛴다. 5시간 한도로 잠깐 막힌 계정은 곧 풀려 다시 후보가 된다.
     공유 저장소가 켜져 있으면(prune_blocked 가 병합) 세 머신이 같은 막힘을 보고 같은 계정을 고른다.
     """
     now = time.time() if now is None else now
@@ -306,15 +328,22 @@ def pick_next(state: dict, exclude: str | None = None, now: float | None = None)
     if not labels:
         return None
 
-    for label in labels:
-        if label == exclude:
-            continue
-        if label not in saved:
-            continue
-        if is_blocked(state, label, now):
-            continue
-        return label
-    return None
+    resets = state.get("weekly_reset") or {}
+
+    def order(label):
+        try:
+            r = float(resets.get(label))
+        except (TypeError, ValueError):
+            r = None
+        if r is None or r <= now:  # 모르거나 낡은 값이면 뒤로
+            return (1, 0.0, labels.index(label))
+        return (0, r, labels.index(label))
+
+    candidates = [l for l in labels
+                  if l != exclude and l in saved and not is_blocked(state, label=l, now=now)]
+    if not candidates:
+        return None
+    return min(candidates, key=order)
 
 
 def earliest_reset(state: dict) -> float | None:
