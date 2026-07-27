@@ -10,6 +10,9 @@
       - CLAUDE_ROTATOR_DISABLED=1 : 손으로 끈 경우
       - 이미 순환기 안에서 부른 호출 (되돌이 방지)
       그 밖의 단발 호출만 claude_pool.run 으로 실행한다. 한도 거절이면 계정을 바꿔 재시도.
+대체: 구독 계정이 전부 한도에 걸리고 부르는 쪽이 CLAUDE_API_FALLBACK=1 을 준 호출만
+      api_fallback 이 직접 호출로 대신 답한다(회원이 기다리는 일만 — 2026-07-27).
+      봇 입장에서는 CLI 가 답한 것과 같은 모양이라 코드를 안 고쳐도 된다(2026-07-27).
 안전: 순환기 쪽에서 무슨 문제가 생기든 마지막에는 진짜 claude 를 그대로 실행한다.
       순환기가 죽어도 봇이 멈추지 않는 것이 이 파일의 첫 번째 목표다.
 주의: 단발 호출은 출력을 다 모은 뒤 한 번에 내보낸다(중간 출력을 실시간으로 흘리지 않음).
@@ -24,6 +27,7 @@ import sys
 
 GUARD_ENV = "CLAUDE_ROTATOR_ACTIVE"
 DISABLE_ENV = "CLAUDE_ROTATOR_DISABLED"
+FALLBACK_ENV = "CLAUDE_API_FALLBACK"   # 이 값이 "1" 인 호출만 직접 호출로 대체
 ROTATOR_DIR = os.path.dirname(os.path.abspath(__file__))
 PRINT_FLAGS = {"-p", "--print"}
 
@@ -173,7 +177,24 @@ def main():
             capture_output=True, text=True,
         )
     except claude_pool.AllAccountsExhausted as e:
+        # 구독이 전부 떨어졌다. 회원이 기다리는 일이면 직접 호출로 한 번 답해 본다(2026-07-27).
+        # 켜는 쪽이 기본이 아니다 — 부르는 쪽이 CLAUDE_API_FALLBACK=1 을 준 호출만 대체한다.
+        # 백그라운드 일(수집·분류·백필)은 구독이 풀릴 때까지 기다리는 게 맞다.
         sys.stderr.write(f"[shim] {e}\n")
+        if os.environ.get(FALLBACK_ENV) != "1":
+            return 1
+        try:
+            import api_fallback
+
+            code, out, err = api_fallback.run(argv, stdin_data)
+            if code == 0:
+                sys.stdout.write(out)
+                sys.stdout.flush()
+                sys.stderr.write("[shim] 구독이 다 차서 API 로 답했습니다\n")
+                return 0
+            sys.stderr.write(err)
+        except Exception as fe:
+            sys.stderr.write(f"[shim] API 대체 실패({type(fe).__name__})\n")
         return 1
     except Exception as e:
         # 순환기 문제로 봇을 멈추지 않는다. 원래 방식으로 한 번 더 실행한다.
