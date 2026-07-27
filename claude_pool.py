@@ -298,6 +298,64 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
         return nxt
 
 
+def switch_message(used_label, nxt, verdict, state) -> str:
+    """계정 전환 알림 문구. 두괄식 — 첫 줄이 '어디서 어디로, 왜'.
+
+    사용량 경고(usage_alert)와 같은 표기를 쓴다. 시각·남은량 표기는 usage_check 한 벌에서 온다.
+    """
+    # 어느 한도(세션 5시간 / 주간)에 걸렸는지 실시간으로 읽어 사유에 붙인다
+    reason = "한도 도달"
+    used_until = None
+    if verdict == "limit" and usage_check:
+        u_used = usage_check.get_usage(BASE / "creds" / f"{used_label}.json")
+        kind = usage_check.which_limit(u_used)
+        if kind == "session":
+            reason = "세션(5시간) 한도 도달"
+            used_until = (u_used or {}).get("session_reset")
+        elif kind == "weekly":
+            reason = "주간 한도 도달"
+            used_until = (u_used or {}).get("weekly_reset")
+    elif verdict == "limit":
+        reason = "주간/세션 한도 도달"
+    else:
+        reason = "로그인 저장본 문제"
+
+    lines = [f"[클로드] 계정 {used_label} → {nxt} 전환됨 ({used_label} {reason})", ""]
+
+    if usage_check:  # 새 계정이 얼마나 남았는지
+        rem = usage_check.weekly_left(BASE / "creds" / f"{nxt}.json")
+        if rem is not None:
+            lines.append(f"{nxt} 주간 {usage_check.pct_text(rem)} 남음")
+
+    blocked = state.get("blocked") or {}
+    if used_until is None:
+        used_until = blocked.get(used_label)
+    when = usage_check.fmt_reset_full(used_until) if usage_check else ""
+    if when:
+        lines.append(f"{used_label} {when}")
+
+    # 남은 계정: 새로 쓰는 것과 이미 막힌 것을 빼고, 주간 남은량을 같이 보여준다.
+    # 잔여 0% 는 막힘 표시가 아직 없어도 못 쓰는 계정이라 따로 가른다(사용량 경고와 같은 규칙).
+    ok, dead = [], []
+    for l in st.account_labels():
+        if l in (used_label, nxt) or l in blocked:
+            continue
+        rem = usage_check.weekly_left(BASE / "creds" / f"{l}.json") if usage_check else None
+        if rem is None:
+            ok.append(f"계정 {l}")  # 못 읽었으면 못 쓴다고 단정하지 않는다
+        elif rem > 0:
+            ok.append(f"계정 {l} {usage_check.pct_text(rem)}")
+        else:
+            dead.append(f"계정 {l} 0%")
+    if ok:
+        lines += ["", "전환 가능"] + ok
+    if dead:
+        lines += ["", "사용 불가"] + dead
+    if not ok and not dead:
+        lines += ["", "남은 계정 없음"]
+    return "\n".join(lines)
+
+
 def _notify_switch(used_label, nxt, verdict, state):
     """계정이 바뀔 때 사용자에게 텔레그램으로 알린다. 세 머신 통틀어 전환당 한 번만.
 
@@ -308,32 +366,7 @@ def _notify_switch(used_label, nxt, verdict, state):
     key = f"switch_{used_label}_{nxt}_{int(time.time() // 600)}"  # 10분 창당 1회
     if not st.claim_notice(key):
         return
-    # 어느 한도(세션 5시간 / 주간)인지, 다음 계정이 얼마 남았는지 실시간으로 읽어 붙인다
-    kind_txt = "한도 도달"
-    next_txt = ""
-    if verdict == "limit" and usage_check:
-        u_used = usage_check.get_usage(BASE / "creds" / f"{used_label}.json")
-        kind = usage_check.which_limit(u_used)
-        if kind == "session":
-            kind_txt = "세션(5시간) 한도 도달"
-        elif kind == "weekly":
-            kind_txt = "주간 한도 도달"
-        u_next = usage_check.get_usage(BASE / "creds" / f"{nxt}.json")
-        if u_next:
-            next_txt = f" | {nxt}: {usage_check.summarize(u_next)}"
-    elif verdict == "limit":
-        kind_txt = "주간/세션 한도 도달"
-    else:
-        kind_txt = "로그인 저장본 문제"
-
-    blocked = state.get("blocked") or {}
-    avail = [l for l in st.account_labels() if l not in blocked]
-    when = ""
-    until = blocked.get(used_label)
-    if until:
-        when = " " + time.strftime("%m/%d %H:%M 풀림", time.localtime(float(until)))
-    notify(f"[클로드 계정 전환] '{used_label}' {kind_txt} → '{nxt}' 사용 시작.{when}{next_txt} "
-           f"남은 계정: {', '.join(avail) or '없음'}")
+    notify(switch_message(used_label, nxt, verdict, state))
 
 
 def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs):

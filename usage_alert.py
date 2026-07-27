@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -38,37 +37,11 @@ ALERT_STATE = BASE / "alert_state.json"
 THRESHOLDS = [50, 70, 90]  # 넘을 때마다 알리는 단계
 SWITCH_SOON = 10           # 남은량이 이 % 이하면 첫 줄에 다음 계정을 붙인다
 HISTORY_KEEP = 80
-_WEEKDAY = "월화수목금토일"
 _KIND_NAME = {"wk": "주간", "se": "세션"}
 
 
-def _pct(rem: float) -> str:
-    """남은량 표기. 0.4% 를 '0%' 로 반올림하면 아직 쓸 수 있는 계정이 소진으로 보인다."""
-    if rem <= 0:
-        return "0%"
-    if rem < 1:
-        return "1% 미만"
-    return f"{rem:.0f}%"
-
-
-def _left_phrase(sec: float) -> str:
-    """남은 시간을 '5일 뒤' / '3시간 뒤' / '20분 뒤' 로. 지났으면 '곧'."""
-    if sec <= 0:
-        return "곧"
-    if sec < 3600:
-        return f"{int(sec // 60)}분 뒤"
-    if sec < 86400:
-        return f"{int(sec // 3600)}시간 뒤"
-    return f"{int(sec // 86400)}일 뒤"
-
-
-def _fmt_reset_full(epoch) -> str:
-    """'8/1 토 21:00 초기화, 5일 뒤' 형식. 없으면 빈 문자열."""
-    if not epoch:
-        return ""
-    lt = time.localtime(float(epoch))
-    when = f"{lt.tm_mon}/{lt.tm_mday} {_WEEKDAY[lt.tm_wday]} {time.strftime('%H:%M', lt)}"
-    return f"{when} 초기화, {_left_phrase(float(epoch) - time.time())}"
+_pct = usage_check.pct_text            # 남은량 표기 (공용)
+_fmt_reset_full = usage_check.fmt_reset_full  # 초기화 시각 표기 (공용)
 
 
 def _load_alerted() -> dict:
@@ -114,10 +87,10 @@ def _others_weekly(label: str) -> list:
         cred = BASE / "creds" / f"{l}.json"
         if not cred.exists():
             continue
-        u = usage_check.get_usage(cred)
-        if not u or u.get("weekly_pct") is None:
+        rem = usage_check.weekly_left(cred)
+        if rem is None:
             continue
-        out.append((l, max(0.0, 100 - float(u["weekly_pct"]))))
+        out.append((l, rem))
     return out
 
 

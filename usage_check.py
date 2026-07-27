@@ -6,6 +6,9 @@
       응답: five_hour.utilization(세션 %), seven_day.utilization(주간 %), 각 resets_at.
 출력: get_usage(cred_path) → {session_pct, weekly_pct, session_reset(epoch), weekly_reset(epoch)}
       실패(네트워크·토큰 만료 등)면 None. 봇을 멈추지 않는다.
+      알림 문구용 공용 표기도 여기 둔다: fmt_reset_full(초기화 시각+남은 기간),
+      pct_text(남은량), left_phrase(남은 기간), weekly_left(주간 남은량).
+      사용량 경고와 계정 전환 알림이 같은 표기를 쓰게 하려는 것이다.
 자격 취급: accessToken 은 파일에서 읽어 헤더에만 싣는다. 값은 화면·기록에 안 남긴다.
           돌려주는 건 사용률 %(자격 아님)뿐.
 마지막 점검: 2026-07-27
@@ -21,6 +24,7 @@ from datetime import datetime, timezone
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 UA = "claude-cli/2.1.0 (external, cli)"
 TIMEOUT = 10
+_WEEKDAY = "월화수목금토일"
 
 
 def _iso_to_epoch(text):
@@ -72,6 +76,47 @@ def which_limit(usage: dict | None, threshold: float = 95.0) -> str | None:
     if se is not None and se >= threshold:
         return "session"
     return None
+
+
+def left_phrase(sec: float) -> str:
+    """남은 시간을 '5일 뒤' / '3시간 뒤' / '20분 뒤' 로. 지났으면 '곧'."""
+    if sec <= 0:
+        return "곧"
+    if sec < 3600:
+        return f"{int(sec // 60)}분 뒤"
+    if sec < 86400:
+        return f"{int(sec // 3600)}시간 뒤"
+    return f"{int(sec // 86400)}일 뒤"
+
+
+def fmt_reset_full(epoch) -> str:
+    """'8/1 토 21:00 초기화, 5일 뒤' 형식. 없으면 빈 문자열.
+
+    알림 문구를 만드는 곳이 여럿이라 여기 한 벌만 둔다(문구가 갈라지면 한쪽만 고치게 된다).
+    """
+    if not epoch:
+        return ""
+    import time as _t
+    lt = _t.localtime(float(epoch))
+    when = f"{lt.tm_mon}/{lt.tm_mday} {_WEEKDAY[lt.tm_wday]} {_t.strftime('%H:%M', lt)}"
+    return f"{when} 초기화, {left_phrase(float(epoch) - _t.time())}"
+
+
+def pct_text(rem: float) -> str:
+    """남은량 표기. 0.4% 를 '0%' 로 반올림하면 아직 쓸 수 있는 계정이 소진으로 보인다."""
+    if rem <= 0:
+        return "0%"
+    if rem < 1:
+        return "1% 미만"
+    return f"{rem:.0f}%"
+
+
+def weekly_left(cred_path):
+    """그 계정의 주간 남은량(%). 못 읽으면 None."""
+    u = get_usage(cred_path)
+    if not u or u.get("weekly_pct") is None:
+        return None
+    return max(0.0, 100 - float(u["weekly_pct"]))
 
 
 def _fmt_reset(epoch) -> str:
