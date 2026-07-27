@@ -87,7 +87,7 @@ def _switch(label: str) -> bool:
     """switch_account.py 를 그대로 재사용해 자격을 교체한다."""
     ret = subprocess.run(
         [sys.executable, str(BASE / "switch_account.py"), label],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if ret.returncode != 0:
         log(f"자격 교체 실패({label}): {(ret.stderr or ret.stdout).strip()[:200]}")

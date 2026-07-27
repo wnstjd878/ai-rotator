@@ -19,6 +19,11 @@ import shutil
 import sys
 from pathlib import Path
 
+try:  # Windows 콘솔·파이프에서 한글 출력이 깨지지 않게
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 BASE = Path(__file__).resolve().parent
 CREDS_DIR = BASE / "creds"
 LIVE = Path.home() / ".claude" / ".credentials.json"
