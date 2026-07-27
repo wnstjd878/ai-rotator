@@ -36,6 +36,10 @@ if str(BASE) not in sys.path:
 
 import limit_detect  # noqa: E402
 import pool_state as st  # noqa: E402
+try:
+    import usage_check  # 계정별 세션/주간 사용률 (없어도 순환은 됨)
+except Exception:
+    usage_check = None
 
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
@@ -111,8 +115,26 @@ def notify(message: str) -> None:
 
 def status_text() -> str:
     state = st.prune_blocked(st.load_state())
-    cur = state.get("current") or "(모름 — --use 로 한 번 정해주세요)"
-    return f"현재 계정: {cur}\n" + st.describe(state)
+    cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
+    now = time.time()
+    saved = set(st.saved_labels())
+    lines = [f"현재 계정: {cur}"]
+    for label in st.account_labels():
+        marks = []
+        if label == cur:
+            marks.append("현재 사용 중")
+        if label not in saved:
+            marks.append("자격 없음")
+        until = (state.get("blocked") or {}).get(label)
+        if until and float(until) > now:
+            left = int(float(until) - now)
+            marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
+        # 실시간 사용률(세션/주간)
+        if usage_check and label in saved:
+            u = usage_check.get_usage(BASE / "creds" / f"{label}.json")
+            marks.append(usage_check.summarize(u))
+        lines.append(f"  {label}: " + ", ".join(marks))
+    return "\n".join(lines)
 
 
 def use(label: str) -> int:
@@ -176,7 +198,18 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
         # 원인 모를 실패로 넘어온 경우엔 계정을 막지 않는다. 한도인지 확실치 않아서다.
         if used_label and verdict != "error":
             if verdict == "limit":
-                until = limit_detect.reset_epoch(out, err)
+                # 세션(5시간)인지 주간인지에 맞는 리셋 시각을 실시간 사용량에서 읽는다.
+                # 못 읽으면 응답 문구 파싱으로 떨어진다.
+                until = None
+                if usage_check:
+                    u = usage_check.get_usage(BASE / "creds" / f"{used_label}.json")
+                    kind = usage_check.which_limit(u)
+                    if kind == "weekly" and u.get("weekly_reset"):
+                        until = u["weekly_reset"]
+                    elif kind == "session" and u.get("session_reset"):
+                        until = u["session_reset"]
+                if until is None:
+                    until = limit_detect.reset_epoch(out, err)
                 st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
                 left = int(until - time.time())
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
@@ -220,14 +253,31 @@ def _notify_switch(used_label, nxt, verdict, state):
     key = f"switch_{used_label}_{nxt}_{int(time.time() // 600)}"  # 10분 창당 1회
     if not st.claim_notice(key):
         return
-    reason = "주간/세션 한도 도달" if verdict == "limit" else "로그인 저장본 문제"
+    # 어느 한도(세션 5시간 / 주간)인지, 다음 계정이 얼마 남았는지 실시간으로 읽어 붙인다
+    kind_txt = "한도 도달"
+    next_txt = ""
+    if verdict == "limit" and usage_check:
+        u_used = usage_check.get_usage(BASE / "creds" / f"{used_label}.json")
+        kind = usage_check.which_limit(u_used)
+        if kind == "session":
+            kind_txt = "세션(5시간) 한도 도달"
+        elif kind == "weekly":
+            kind_txt = "주간 한도 도달"
+        u_next = usage_check.get_usage(BASE / "creds" / f"{nxt}.json")
+        if u_next:
+            next_txt = f" | {nxt}: {usage_check.summarize(u_next)}"
+    elif verdict == "limit":
+        kind_txt = "주간/세션 한도 도달"
+    else:
+        kind_txt = "로그인 저장본 문제"
+
     blocked = state.get("blocked") or {}
     avail = [l for l in st.account_labels() if l not in blocked]
     when = ""
     until = blocked.get(used_label)
     if until:
         when = " " + time.strftime("%m/%d %H:%M 풀림", time.localtime(float(until)))
-    notify(f"[클로드 계정 전환] '{used_label}' {reason} → '{nxt}' 사용 시작.{when} "
+    notify(f"[클로드 계정 전환] '{used_label}' {kind_txt} → '{nxt}' 사용 시작.{when}{next_txt} "
            f"남은 계정: {', '.join(avail) or '없음'}")
 
 

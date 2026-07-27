@@ -126,6 +126,7 @@ def setup(tmp, labels, current):
     st.ACCOUNTS_FILE = tmp / "accounts.json"
     st.CREDS_DIR = creds
     st.shared_state = None  # 케이스마다 공유는 끈 채로 시작(공유 케이스만 따로 켠다)
+    claude_pool.usage_check = None  # 시험에서는 실제 사용량 API 를 부르지 않는다
     claude_pool.LOG_FILE = tmp / "rotator.log"
     state = st.load_state()
     st.set_current(state, current, "시험 준비")
