@@ -97,7 +97,24 @@ def main() -> int:
         msgs.append(m)
 
     if msgs:
-        notify.send(f"[클로드 사용량 경고] 계정 {label} - " + ", ".join(msgs))
+        body = f"[클로드 사용량 경고] 계정 {label} - " + ", ".join(msgs)
+        # 나머지 계정들의 주간 남은량도 같이 보여준다
+        others = []
+        for l in st.account_labels():
+            if l == label:
+                continue
+            oc = BASE / "creds" / f"{l}.json"
+            if not oc.exists():
+                continue
+            ou = usage_check.get_usage(oc)
+            if not ou or ou.get("weekly_pct") is None:
+                continue
+            rem = max(0, 100 - ou["weekly_pct"])
+            tag = " (소진)" if rem <= 0 else ""
+            others.append(f"{l} {rem:.0f}%{tag}")
+        if others:
+            body += "\n남은 계정 주간: " + ", ".join(others)
+        notify.send(body)
         _save_alerted(alerted)
         print(f"알림 보냄: {label} " + ", ".join(msgs))
     else:
