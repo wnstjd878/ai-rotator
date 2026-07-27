@@ -29,21 +29,45 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
 
 URL_ENV = "ROTATOR_SUPABASE_URL"
 KEY_ENV = "ROTATOR_SUPABASE_KEY"
+
+
+def _env_file_val(key: str) -> str | None:
+    """ai-rotator/.env 에서 값을 읽는다. 봇·스케줄러 환경을 안 건드려도 되게.
+
+    환경변수가 우선이고(_base/_key), 없을 때만 이 파일을 본다.
+    """
+    p = BASE / ".env"
+    if not p.exists():
+        return None
+    try:
+        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except Exception:
+        return None
+    return None
 ACCOUNTS_TABLE = "rotator_accounts"
 META_TABLE = "rotator_meta"
 TIMEOUT = 8  # 공유 저장소 통신 상한(초). 넘으면 로컬로 버틴다.
 
 
 def _base() -> str | None:
-    url = (os.environ.get(URL_ENV) or "").strip().rstrip("/")
+    url = (os.environ.get(URL_ENV) or _env_file_val(URL_ENV) or "").strip().rstrip("/")
     return url or None
 
 
 def _key() -> str | None:
-    return (os.environ.get(KEY_ENV) or "").strip() or None
+    return (os.environ.get(KEY_ENV) or _env_file_val(KEY_ENV) or "").strip() or None
 
 
 def enabled() -> bool:
