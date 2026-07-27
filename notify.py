@@ -1,8 +1,10 @@
 """
 == 운영 맥락 ==
 용도: 계정 순환에서 사람이 알아야 할 일(전 계정 한도 도달 등)을 텔레그램으로 보낸다.
-입력: 봇 자격은 ~/projects/main-agent/.env 의 TELEGRAM_TOKEN / CHAT_ID 를 읽어 쓴다.
-      (없으면 mkt-agent/.env 로 넘어감. 둘 다 없으면 조용히 아무것도 안 한다.)
+입력: TELEGRAM_TOKEN / CHAT_ID 를 환경변수 → ~/.config/ai-rotator/notify.env →
+      ~/projects/main-agent/.env → ~/projects/mkt-agent/.env 순으로 찾아 쓴다.
+      (하나도 없으면 조용히 아무것도 안 한다. Windows 본체엔 봇 .env 가 없어서
+       notify.env 가 없으면 알림이 통째로 빠진다 — 2026-07-27 실제로 그랬다.)
 출력: 텔레그램 메시지 1건
 주의: 자격 값은 이 모듈 안에서만 쓰고 화면·기록·명령 인자에 절대 싣지 않는다.
       보내기 실패는 예외를 올리지 않는다 — 알림 때문에 본 작업이 멈추면 안 되므로.
@@ -18,6 +20,8 @@ import urllib.request
 from pathlib import Path
 
 ENV_CANDIDATES = [
+    # 봇이 없는 머신(Windows 본체)용. 자동 백업이 도는 폴더 밖에 둬서 딸려 올라가지 않게 한다.
+    Path.home() / ".config" / "ai-rotator" / "notify.env",
     Path.home() / "projects" / "main-agent" / ".env",
     Path.home() / "projects" / "mkt-agent" / ".env",
 ]
