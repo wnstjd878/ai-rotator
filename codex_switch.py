@@ -48,6 +48,19 @@ def _account_id(path: Path):
         return None
 
 
+def is_stale(label: str) -> bool:
+    """그 라벨 사본이 지금 쓰는 자격보다 낡았는지. 낡았으면 되백업이 필요하다."""
+    dest = CREDS_DIR / f"{label}.json"
+    if not LIVE.exists():
+        return False
+    if not dest.exists():
+        return True
+    try:
+        return LIVE.stat().st_mtime > dest.stat().st_mtime + 1
+    except OSError:
+        return False
+
+
 def backup_current(label: str) -> str:
     """지금 쓰는 자격을 그 라벨 자리에 되백업한다. 결과 사유를 문자열로 돌려준다."""
     if not label:

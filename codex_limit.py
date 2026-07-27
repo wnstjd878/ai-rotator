@@ -65,6 +65,11 @@ AUTH_PATTERNS = [
     r"authentication (required|failed|error)",
     r"invalid (api key|token|credentials)",
     r"(oauth|session) (token )?(expired|revoked)",
+    # 실측 문구(2026-07-28): 낡은 자격 사본을 꽂으면 이게 나온다.
+    # "Your access token could not be refreshed because your refresh token was revoked."
+    r"refresh token was revoked",
+    r"could not be refreshed",
+    r"log out and sign in again",
     r"\bunauthorized\b",
     r"\b401\b",
 ]

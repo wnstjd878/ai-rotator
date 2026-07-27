@@ -1,0 +1,522 @@
+"""
+== 운영 맥락 ==
+용도: codex 를 부를 때 구독 한도 거절이 오면 자동으로 다음 계정 자격으로 갈아끼우고
+      같은 요청을 다시 보낸다. 클로드 쪽 claude_pool.py 와 같은 뼈대이고, 상태만
+      따로 쓴다(codex_state.json / codex_accounts.json / creds/codex).
+흐름: (1) codex 실행 → (2) 결과 판정(codex_limit) → (3) 한도로 보이면 서버에 한 번 물어
+      확증 → (4) 진짜면 그 계정을 해제 시각까지 쉬게 표시하고 다음 계정으로 교체 →
+      (5) 같은 요청 재시도 → (6) 쓸 계정이 없으면 AllAccountsExhausted + 텔레그램 알림.
+실행: python codex_pool.py --status        지금 계정 상태와 사용률 보기
+      python codex_pool.py --next          지금 계정을 한도로 보고 다음 계정으로 넘김
+      python codex_pool.py --use A         A 계정으로 지금 바로 교체
+      python codex_pool.py -- exec "안녕"   codex 를 순환 보호 아래서 실행
+호출: from codex_pool import run;  proc = run([codex_bin, "exec", ...], timeout=600)
+전제: creds/codex/<라벨>.json 에 계정별 자격 저장본이 있어야 한다 (codex_save.py 로 저장).
+      각 머신에서 직접 codex login 해서 저장한다. codex logout 은 쓰지 않는다.
+의도적 미구현(2026-07-28 사용자 결정): 사용률을 미리 보고 넘기는 선제 전환 없음.
+      거절을 받은 뒤에만 넘기고, 남은량은 codex_alert.py 가 알림으로만 알린다.
+      실행 중인 codex 창의 실시간 교체 없음 — 껐다 다시 실행해야 새 계정이 붙는다.
+마지막 점검: 2026-07-28
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
+
+import pool_state as st  # noqa: E402
+
+st.use("codex")  # 이 프로세스는 지피티 쪽 상태만 다룬다 (불러오는 즉시)
+
+import codex_limit  # noqa: E402
+import codex_switch  # noqa: E402
+try:
+    import codex_usage  # 계정별 사용률 (없어도 순환은 됨)
+except Exception:
+    codex_usage = None
+
+LOG_FILE = BASE / "rotator.log"
+BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
+CODEX_BINS = (
+    os.path.expanduser("~/AppData/Roaming/npm/codex.cmd"),
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+    os.path.expanduser("~/.local/bin/codex"),
+)
+
+
+class AllAccountsExhausted(RuntimeError):
+    """쓸 수 있는 계정이 하나도 안 남았을 때."""
+
+    def __init__(self, message, reset_at=None, notify_message=None):
+        super().__init__(message)
+        self.reset_at = reset_at
+        self.notify_message = notify_message  # 알림을 보낼 차례면 그 문구, 아니면 None
+
+
+def log(msg: str) -> None:
+    """기록은 파일에만 남긴다.
+
+    오류 통로로 내보내면 부르는 쪽이 출력을 합쳐 받을 때(2>&1) 이 줄이 codex 응답 앞에
+    섞여 결과 해석이 깨진다. 화면으로 보려면 ROTATOR_VERBOSE=1 을 준다.
+    """
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [codex] {msg}"
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    if os.environ.get("ROTATOR_VERBOSE") or os.environ.get("CLAUDE_ROTATOR_VERBOSE"):
+        print(f"[codex-pool] {msg}", file=sys.stderr)
+
+
+def codex_bin() -> str:
+    p = shutil.which("codex")
+    if p:
+        return p
+    for c in CODEX_BINS:
+        if os.path.isfile(c):
+            return c
+    raise RuntimeError("codex CLI 를 못 찾았습니다 (PATH 및 알려진 경로에 없음)")
+
+
+def cred_path(label: str) -> Path:
+    return BASE / "creds" / "codex" / f"{label}.json"
+
+
+def _switch(label: str, current: str | None) -> bool:
+    """자격을 교체한다. 교체 전에 지금 쓰던 계정 자격을 그 라벨 자리에 되백업한다."""
+    try:
+        ok, note = codex_switch.switch_to(label, current)
+    except Exception as e:
+        log(f"자격 교체 실패({label}): {type(e).__name__}")
+        return False
+    if not ok:
+        log(f"자격 교체 실패({label}): {note}")
+        return False
+    if note:
+        log(note)
+    return True
+
+
+def sync_current_cred(label: str | None = None) -> str:
+    """지금 쓰는 자격이 사본보다 새로우면 사본을 최신으로 맞춘다. 사유를 돌려준다.
+
+    왜 필요한가(2026-07-28 실측): codex 는 돌면서 자격을 갱신하고, 그때 갱신용 토큰도
+    함께 바뀔 수 있다. 낡은 사본을 나중에 꽂으면
+    "refresh token was revoked" 로 거절당해 그 계정이 통째로 못 쓰게 된다.
+    교체 직전에만 되백업하면, 교체 없이 며칠 쓰다 꺼진 경우의 사본이 낡은 채로 남는다.
+    그래서 실행이 끝날 때마다 값싸게(수정 시각 비교) 확인하고 달라졌을 때만 복사한다.
+    """
+    if label is None:
+        label = (st.load_state() or {}).get("current")
+    if not label:
+        return ""
+    try:
+        if not codex_switch.is_stale(label):
+            return ""
+        note = codex_switch.backup_current(label)
+    except Exception as e:
+        return f"자격 최신화 실패({type(e).__name__})"
+    if note:
+        log(note)
+    return note
+
+
+def notify(message: str) -> None:
+    """사람이 알아야 할 일을 텔레그램으로 보낸다. 자격은 notify.py 가 파일에서 직접 읽는다."""
+    try:
+        import notify as notifier
+
+        notifier.send(message)
+    except Exception as e:
+        log(f"알림 전송 실패: {type(e).__name__}")
+
+
+def status_text() -> str:
+    state = st.prune_blocked(st.load_state())
+    cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
+    now = time.time()
+    saved = set(st.saved_labels())
+    lines = [f"현재 계정: {cur}"]
+    seen_resets = []  # 여기서 읽은 초기화 시각은 다음 계정 고르는 순서에 쓰인다
+    for label in st.account_labels():
+        marks = []
+        if label == cur:
+            marks.append("현재 사용 중")
+        if label not in saved:
+            marks.append("자격 없음")
+        until = (state.get("blocked") or {}).get(label)
+        if until and float(until) > now:
+            left = int(float(until) - now)
+            marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
+        if codex_usage and label in saved:
+            u = codex_usage.get_usage_for(cred_path(label), is_current=(label == cur))
+            marks.append(codex_usage.summarize(u))
+            if u:
+                if u.get("email"):
+                    marks.append(str(u["email"]))
+                seen_resets.append((label, u.get("weekly_reset")))
+        lines.append(f"  {label}: " + ", ".join(marks))
+    st.remember_resets(seen_resets)
+    return "\n".join(lines)
+
+
+def use(label: str) -> int:
+    """지정한 계정으로 즉시 교체하고 상태에 기록한다."""
+    if label not in st.saved_labels():
+        print(f"'{label}' 자격 저장본이 없습니다. 저장된 계정: {', '.join(st.saved_labels()) or '(없음)'}")
+        return 1
+    with st.with_lock():
+        state = st.prune_blocked(st.load_state())
+        if not _switch(label, state.get("current")):
+            return 1
+        st.clear_blocked_label(state, label)  # 손으로 고른 계정은 막힘 표시를 푼다(로컬+공유)
+        st.set_current(state, label, "수동 지정")
+        st.save_state(state)
+    print(f"'{label}' 계정으로 교체했습니다.")
+    return 0
+
+
+def next_account(cooldown: float = codex_limit.DEFAULT_COOLDOWN) -> int:
+    """지금 계정을 한도 도달로 보고 다음 계정으로 넘긴다 (사람이 직접 쓸 때).
+
+    해제 시각은 서버 사용량에서 읽고, 못 읽으면 기본값으로 쉬게 한다.
+    """
+    with st.with_lock():
+        state = st.prune_blocked(st.load_state())
+        cur = state.get("current")
+        if cur:
+            until = None
+            if codex_usage:
+                u = codex_usage.get_usage_for(cred_path(cur), is_current=True)
+                if u:
+                    st.note_weekly_reset(state, cur, u.get("weekly_reset"))
+                    until = codex_limit.reset_epoch_from_usage(
+                        u, codex_usage.which_limit(u, threshold=90.0))
+            st.mark_blocked(state, cur, until or (time.time() + cooldown), "사람이 한도 도달로 지정")
+        nxt = st.pick_next(state, exclude=cur)
+        if nxt is None:
+            st.save_state(state)
+            reset_at = st.earliest_reset(state)
+            when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
+            print(f"쓸 수 있는 계정이 없습니다. 가장 빨리 풀리는 시각: {when}")
+            print(st.describe(state))
+            return 2
+        if not _switch(nxt, cur):
+            st.save_state(state)
+            return 1
+        st.set_current(state, nxt, f"{cur or '?'} → {nxt} (사람 지정)")
+        st.save_state(state)
+    print(f"'{cur or '?'}' → '{nxt}' 계정으로 교체했습니다.")
+    print("열려있는 codex 를 종료하고 다시 실행하면 적용됩니다.")
+    return 0
+
+
+def _switch_if_blocked(state: dict):
+    """지금 계정이 이미 막혀 있으면 부르기 전에 갈아탄다. 막힌 계정 목록만 보고 판단한다.
+
+    막힘은 머신들이 공유하므로, 다른 머신이 한도로 막아둔 계정을 그대로 쓰다가 똑같이
+    거절받는 헛걸음을 없앤다. 사용량 조회를 하지 않아 값싸고, 알림도 안 보낸다
+    (막을 때 이미 한 번 나갔다). 남은량을 보고 미리 넘기는 선제 전환과는 다르다.
+    """
+    cur = state.get("current")
+    if not cur or not st.is_blocked(state, cur):
+        return cur
+    with st.with_lock():
+        s = st.prune_blocked(st.load_state())
+        cur = s.get("current")
+        if not cur or not st.is_blocked(s, cur):
+            return cur  # 그 사이 다른 프로세스가 바꿨다
+        nxt = st.pick_next(s, exclude=cur)
+        if nxt is None or not _switch(nxt, cur):
+            return cur  # 갈아탈 데가 없으면 기존 흐름(거절 → 소진 알림)이 처리한다
+        st.set_current(s, nxt, f"{cur} → {nxt} (이미 막힌 계정이라 미리 교체)")
+        st.save_state(s)
+        log(f"'{cur}' 는 이미 막혀 있어 부르기 전에 '{nxt}' 로 교체")
+        return nxt
+
+
+def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
+    """실패한 계정을 쉬게 하고 다음 계정으로 교체. 교체된 라벨을 반환."""
+    with st.with_lock():
+        state = st.prune_blocked(st.load_state())
+        current = state.get("current")
+
+        # 내가 쓰던 계정이 이미 다른 프로세스에 의해 교체됐으면 그대로 재시도
+        if used_label is not None and current is not None and current != used_label:
+            log(f"이미 '{current}' 로 교체돼 있어 그대로 재시도합니다.")
+            return current
+
+        if used_label and verdict != "error":
+            if verdict == "limit":
+                # 어느 한도인지, 언제 풀리는지는 서버 사용량에서 읽는다.
+                # 못 읽으면 응답 문구 파싱으로 떨어진다.
+                until = None
+                if codex_usage:
+                    u = codex_usage.get_usage_for(cred_path(used_label), is_current=True)
+                    if u:
+                        st.note_weekly_reset(state, used_label, u.get("weekly_reset"))
+                        until = codex_limit.reset_epoch_from_usage(
+                            u, codex_usage.which_limit(u, threshold=90.0))
+                if until is None:
+                    until = codex_limit.reset_epoch(out, err)
+                st.mark_blocked(state, used_label, until, codex_limit.short_reason(out, err))
+                left = int(until - time.time())
+                log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
+            else:  # auth: 갈아끼운 저장본이 상한 경우에만 여기로 온다
+                st.mark_blocked(state, used_label, time.time() + BROKEN_CRED_COOLDOWN,
+                                codex_limit.short_reason(out, err))
+                log(f"'{used_label}' 저장본이 상했습니다(로그인 거절). "
+                    f"{BROKEN_CRED_COOLDOWN // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
+                    f"그 계정으로 codex login 한 뒤 codex_save.py 로 다시 저장하세요.")
+
+        nxt = st.pick_next(state, exclude=used_label)
+        if nxt is None:
+            reset_at = st.earliest_reset(state)
+            when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
+            msg = f"지피티 구독 계정이 전부 한도에 걸렸습니다. 가장 빨리 풀리는 시각: {when}"
+            log(msg)
+            should_notify = st.mark_notified(state, reset_at)
+            st.save_state(state)
+            # 실제 전송은 잠금 밖에서 한다. 통신이 잠금을 붙잡으면 뒤에 온 호출이 대기하다 터진다.
+            raise AllAccountsExhausted(msg, reset_at=reset_at,
+                                       notify_message=msg if should_notify else None)
+
+        if not _switch(nxt, used_label):
+            st.save_state(state)
+            raise AllAccountsExhausted(f"'{nxt}' 로 자격 교체에 실패했습니다.")
+
+        st.set_current(state, nxt, f"{used_label or '?'} → {nxt} ({verdict})")
+        st.save_state(state)
+        log(f"'{used_label or '?'}' → '{nxt}' 계정 교체 완료")
+        _notify_switch(used_label, nxt, verdict, state)
+        return nxt
+
+
+def switch_message(used_label, nxt, verdict, state) -> str:
+    """계정 전환 알림 문구. 두괄식 — 첫 줄이 '어디서 어디로, 왜'."""
+    reason = "한도 도달"
+    used_until = None
+    if verdict == "limit" and codex_usage:
+        u_used = codex_usage.get_usage(cred_path(used_label))
+        kind = codex_usage.which_limit(u_used, threshold=90.0)
+        if kind == "session":
+            reason = "세션(5시간) 한도 도달"
+            used_until = (u_used or {}).get("session_reset")
+        elif kind == "weekly":
+            reason = "주간 한도 도달"
+            used_until = (u_used or {}).get("weekly_reset")
+    elif verdict != "limit":
+        reason = "로그인 저장본 문제"
+
+    lines = [f"[지피티] 계정 {used_label} → {nxt} 전환됨 ({used_label} {reason})", ""]
+
+    if codex_usage:  # 새 계정이 얼마나 남았는지 (전환 직후라 이게 지금 쓰는 계정)
+        u_next = codex_usage.get_usage_for(cred_path(nxt), is_current=True)
+        rem = None if not u_next or u_next.get("weekly_pct") is None \
+            else max(0.0, 100 - float(u_next["weekly_pct"]))
+        if rem is not None:
+            lines.append(f"{nxt} 주간 {codex_usage.pct_text(rem)} 남음")
+
+    blocked = state.get("blocked") or {}
+    if used_until is None:
+        used_until = blocked.get(used_label)
+    if used_until and codex_usage:
+        if verdict == "limit":
+            lines.append(f"{used_label} {codex_usage.fmt_reset_full(used_until)}")
+        else:  # 한도가 아니라 잠깐 쉬게 한 것이라 '초기화' 라고 하면 안 된다
+            left = codex_usage.left_phrase(float(used_until) - time.time())
+            lines.append(f"{used_label} {left} 다시 시도")
+
+    ok, dead = [], []
+    for l in st.account_labels():
+        if l in (used_label, nxt) or l in blocked:
+            continue
+        rem = codex_usage.weekly_left(cred_path(l)) if codex_usage else None
+        if rem is None:
+            ok.append(f"계정 {l}")  # 못 읽었으면 못 쓴다고 단정하지 않는다
+        elif rem > 0:
+            ok.append(f"계정 {l} {codex_usage.pct_text(rem)}")
+        else:
+            dead.append(f"계정 {l} 0%")
+    if ok:
+        lines += ["", "전환 가능"] + ok
+    if dead:
+        lines += ["", "사용 불가"] + dead
+    if not ok and not dead:
+        lines += ["", "남은 계정 없음"]
+    return "\n".join(lines)
+
+
+def _notify_switch(used_label, nxt, verdict, state):
+    """계정이 바뀔 때 텔레그램으로 알린다. 머신들을 통틀어 전환당 한 번만."""
+    if not used_label:
+        return  # 시작점 지정 등, 전환이 아니면 알리지 않는다
+    key = f"switch_{used_label}_{nxt}_{int(time.time() // 600)}"  # 10분 창당 1회
+    if not st.claim_notice(key):
+        return
+    notify(switch_message(used_label, nxt, verdict, state))
+
+
+def _verify_limit(used_label: str | None, verdict: str) -> str:
+    """한도로 보이는 판정을 서버에 물어 확증한다. 아니면 error 로 낮춘다.
+
+    codex 는 모델 답변을 그대로 흘리므로 문구만 믿으면 답변 내용에 넘어갈 수 있다.
+    확증에 실패(조회 불가)하면 원래 판정을 그대로 둔다 — 조회가 막혔다고 순환이
+    멈추면 안 되기 때문이다.
+    """
+    if verdict != "limit" or not used_label:
+        return verdict
+    conf = codex_limit.confirm_limit(cred_path(used_label), is_current=True)
+    if conf is False:
+        log(f"'{used_label}' 한도 문구가 보였지만 서버 사용량은 여유가 있습니다. "
+            f"계정을 막지 않고 일반 실패로 처리합니다.")
+        return "error"
+    return verdict
+
+
+def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs):
+    """codex 를 순환 보호 아래서 실행한다. subprocess.run 과 같은 결과를 돌려준다.
+
+    한도 거절이면 계정을 바꿔 같은 요청을 다시 보낸다.
+    로그인 거절은 두 가지로 갈린다. 처음부터 났으면 이 환경에서 로그인이 안 된 것이라
+    계정을 안 바꾸고 멈추고, 계정을 갈아끼운 뒤에 났으면 그 저장본이 상한 것이라
+    쉬게 하고 다음 계정으로 넘어간다.
+    """
+    labels = st.saved_labels()
+    if max_attempts is None:
+        max_attempts = max(2, len(labels) + 1)
+    max_attempts = max(1, int(max_attempts))
+
+    if "stdout" not in kwargs and "stderr" not in kwargs:
+        kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    kwargs.setdefault("encoding", "utf-8")   # Windows 기본 코드페이지로 읽다 깨지는 것 방지
+    kwargs.setdefault("errors", "replace")
+    if not kwargs.get("capture_output") and "stdout" not in kwargs:
+        log("출력을 안 잡는 호출이라 한도 거절을 알아볼 수 없습니다. 계정 교체가 안 됩니다.")
+
+    want_check = bool(kwargs.pop("check", False))
+
+    retried_plain = False
+    switched_here = False  # 이 호출 안에서 계정을 갈아끼웠는지
+    proc = None
+    for attempt in range(max_attempts):
+        state = st.prune_blocked(st.load_state())
+        used_label = _switch_if_blocked(state)
+
+        proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)
+        # codex 가 자격을 갱신했으면 사본도 바로 맞춘다(낡은 사본은 나중에 거절당한다)
+        sync_current_cred(used_label)
+        verdict = codex_limit.classify(proc.returncode, proc.stdout, proc.stderr)
+        verdict = _verify_limit(used_label, verdict)
+
+        if verdict == "ok":
+            return _finish(proc, args, want_check)
+
+        if verdict == "auth" and not switched_here:
+            log("로그인이 안 된 상태입니다. 계정을 바꾸지 않습니다. "
+                "그 머신에서 codex login 을 했는지 확인하세요.")
+            return _finish(proc, args, want_check)
+
+        if verdict == "error":
+            if retried_plain:
+                return _finish(proc, args, want_check)  # 원인 모를 실패는 부르는 쪽이 판단
+            retried_plain = True
+            log(f"한도와 무관한 실패. 한 번 더 시도합니다 (종료코드 {proc.returncode})")
+            time.sleep(2)
+            continue
+
+        try:
+            nxt = _rotate_after_failure(used_label, verdict, proc.stdout, proc.stderr)
+        except AllAccountsExhausted as e:
+            if e.notify_message:  # 전송은 잠금 밖에서
+                notify(e.notify_message)
+            raise
+        switched_here = switched_here or (nxt != used_label)
+
+    log("재시도 횟수를 다 썼습니다. 마지막 결과를 그대로 돌려줍니다.")
+    return _finish(proc, args, want_check)
+
+
+def _finish(proc, args, want_check):
+    """부르는 쪽이 check=True 를 원했다면 원래 뜻대로 실패에서 예외를 올린다."""
+    if want_check and proc is not None and proc.returncode != 0:
+        raise subprocess.CalledProcessError(
+            proc.returncode, args, output=proc.stdout, stderr=proc.stderr
+        )
+    return proc
+
+
+def run_codex(cli_args, **kwargs):
+    """codex 실행 파일 경로를 알아서 붙여주는 짧은 형태. run() 과 동작 같음."""
+    return run([codex_bin(), *cli_args], **kwargs)
+
+
+def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if argv[0] == "--status":
+        print(status_text())
+        return 0
+    if argv[0] == "--next":
+        return next_account()
+    if argv[0] == "--use":
+        if len(argv) < 2:
+            print("사용법: python codex_pool.py --use <라벨>")
+            return 1
+        return use(argv[1].strip())
+    if argv[0] == "--limited":
+        # 지금 계정이 이미 한도에 걸려 있는지만 알려준다(종료코드 3). 미리 넘기지는 않는다.
+        # 대화형 래퍼(gcauto.ps1)가 codex 가 끝난 뒤 이걸로 판단한다.
+        if codex_usage is None:
+            return 0
+        cur = (st.load_state() or {}).get("current")
+        if not cur:
+            return 0
+        u = codex_usage.get_usage_for(cred_path(cur), is_current=True)
+        if not u:
+            print(f"사용량 못 읽음 ({codex_usage.last_error or '사유 모름'})")
+            return 0
+        if u.get("limit_reached") or u.get("reached_type") or \
+                codex_usage.which_limit(u, threshold=99.5):
+            print(f"{cur} 한도 도달: {codex_usage.summarize(u)}")
+            return 3
+        print(f"{cur} 여유 있음: {codex_usage.summarize(u)}")
+        return 0
+    if argv[0] == "--sync":
+        # 대화형 codex 를 쓰고 난 뒤 부른다. 갱신된 자격을 사본에 반영해 둔다.
+        note = sync_current_cred()
+        print(note or "자격 사본이 이미 최신입니다.")
+        return 0
+    if argv[0] == "--":
+        try:
+            proc = run_codex(argv[1:])
+        except AllAccountsExhausted as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        sys.stdout.write(proc.stdout or "")
+        sys.stderr.write(proc.stderr or "")
+        return proc.returncode
+
+    print("알 수 없는 인자입니다. --status / --next / --use <라벨> / -- <codex 인자> 중 하나를 쓰세요.")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

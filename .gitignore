@@ -8,13 +8,19 @@ __pycache__/
 
 # 개인 계정 설정 (example 만 커밋)
 accounts.json
+codex_accounts.json
 
 # 운영 중 생기는 것
 state.json
 state.json.tmp
 state.lock
+codex_state.json
+codex_state.json.tmp
+codex_state.lock
+codex_alert_state.json
 rotator.log
 claude_shim.sh
+codex_shim.sh
 
 # 공유 저장소 키 (머신마다 직접 넣음)
 .env
