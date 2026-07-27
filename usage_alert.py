@@ -111,9 +111,9 @@ def main() -> int:
                 continue
             rem = max(0, 100 - ou["weekly_pct"])
             tag = " (소진)" if rem <= 0 else ""
-            others.append(f"{l} {rem:.0f}%{tag}")
+            others.append(f"계정 {l} {rem:.0f}%{tag}")
         if others:
-            body += "\n남은 계정 주간: " + ", ".join(others)
+            body += "\n남은 계정 주간 사용량 :\n" + "\n".join(others)
         notify.send(body)
         _save_alerted(alerted)
         print(f"알림 보냄: {label} " + ", ".join(msgs))
