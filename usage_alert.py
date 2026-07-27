@@ -28,6 +28,16 @@ import notify  # noqa: E402
 ALERT_STATE = BASE / "alert_state.json"
 THRESHOLDS = [50, 70, 90]  # 넘을 때마다 알리는 단계
 HISTORY_KEEP = 80
+_WEEKDAY = "월화수목금토일"
+
+
+def _fmt_reset_full(epoch) -> str:
+    """' 8/1 (토) 20:59에 초기화 됨' 형식. 없으면 빈 문자열."""
+    if not epoch:
+        return ""
+    import time
+    lt = time.localtime(float(epoch))
+    return f" {lt.tm_mon}/{lt.tm_mday} ({_WEEKDAY[lt.tm_wday]}) {time.strftime('%H:%M', lt)}에 초기화 됨"
 
 
 def _load_alerted() -> dict:
@@ -61,9 +71,8 @@ def _check(kind: str, pct, reset, label: str, alerted: dict) -> str | None:
         alerted[f"{kind}_{label}_{rr}_{t}"] = 1
     if not fresh:
         return None
-    top = fresh[0]
     name = "주간" if kind == "wk" else "세션(5시간)"
-    return f"{name} 남은 {max(0, 100 - pct):.0f}% ({top}% 초과){usage_check._fmt_reset(reset)}"
+    return f"{name} 남은 사용량 {max(0, 100 - pct):.0f}% ({pct:.0f}% 사용됨){_fmt_reset_full(reset)}"
 
 
 def main() -> int:
@@ -88,7 +97,7 @@ def main() -> int:
         msgs.append(m)
 
     if msgs:
-        notify.send(f"[사용량 경고] 계정 {label} — " + ", ".join(msgs))
+        notify.send(f"[클로드 사용량 경고] 계정 {label} - " + ", ".join(msgs))
         _save_alerted(alerted)
         print(f"알림 보냄: {label} " + ", ".join(msgs))
     else:
