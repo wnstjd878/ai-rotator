@@ -25,6 +25,7 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 UA = "claude-cli/2.1.0 (external, cli)"
 TIMEOUT = 10
 _WEEKDAY = "월화수목금토일"
+last_error = None  # 마지막 조회 실패 사유(종류만, 자격 값은 절대 안 담는다)
 
 
 def _iso_to_epoch(text):
@@ -37,13 +38,21 @@ def _iso_to_epoch(text):
 
 
 def get_usage(cred_path) -> dict | None:
-    """creds/<라벨>.json 의 계정 사용량을 읽는다. 실패하면 None."""
+    """creds/<라벨>.json 의 계정 사용량을 읽는다. 실패하면 None.
+
+    실패 사유는 last_error 에 남는다(값이 아니라 종류만). 조회가 너무 잦으면 429 가 나는데,
+    사유 없이 None 만 돌려주면 토큰 만료와 구분이 안 돼 엉뚱한 데를 파게 된다.
+    """
+    global last_error
+    last_error = None
     try:
         d = json.load(open(cred_path, encoding="utf-8"))
     except Exception:
+        last_error = "자격 파일 못 읽음"
         return None
     tok = (d.get("claudeAiOauth") or {}).get("accessToken")
     if not tok:
+        last_error = "자격 파일에 접근 토큰 없음"
         return None
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": "Bearer " + tok,
@@ -53,7 +62,11 @@ def get_usage(cred_path) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             j = json.loads(r.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError):
+    except urllib.error.HTTPError as e:
+        last_error = "조회 제한(429). 잠시 뒤 다시" if e.code == 429 else f"HTTP {e.code}"
+        return None
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+        last_error = type(e).__name__
         return None
     fh = j.get("five_hour") or {}
     sd = j.get("seven_day") or {}
@@ -63,6 +76,22 @@ def get_usage(cred_path) -> dict | None:
         "weekly_pct": sd.get("utilization"),
         "weekly_reset": _iso_to_epoch(sd.get("resets_at")),
     }
+
+
+def get_usage_for(cred_path, *, is_current: bool = False) -> dict | None:
+    """사용량을 읽되, 지금 쓰는 계정이면 살아있는 자격 파일로 한 번 더 시도한다.
+
+    creds/<라벨>.json 의 accessToken 은 수명이 짧아 며칠 지나면 만료된다(refresh 는 안 한다).
+    그러면 사용량을 못 읽어 경고가 조용히 안 나간다 — 2026-07-27 실제로 그랬다.
+    지금 쓰는 계정은 claude 가 ~/.claude/.credentials.json 을 갱신해 주므로 그 파일이 최신이다.
+    현재 계정일 때만 쓴다. 다른 계정에 쓰면 남의 사용량을 그 계정 것으로 잘못 보여준다.
+    """
+    u = get_usage(cred_path)
+    if u or not is_current:
+        return u
+    from pathlib import Path
+    live = Path.home() / ".claude" / ".credentials.json"
+    return get_usage(live) if live.exists() else None
 
 
 def which_limit(usage: dict | None, threshold: float = 95.0) -> str | None:

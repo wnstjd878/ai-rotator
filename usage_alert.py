@@ -149,8 +149,10 @@ def main() -> int:
     cred = BASE / "creds" / f"{label}.json"
     if not cred.exists():
         return 0
-    u = usage_check.get_usage(cred)
+    u = usage_check.get_usage_for(cred, is_current=True)
     if not u:
+        # 조용히 넘어가면 경고가 통째로 멈춘 걸 아무도 모른다. 실행 기록에는 남긴다.
+        print(f"사용량 못 읽음: {label} ({usage_check.last_error or '사유 모름'})")
         return 0
 
     if preview:  # 단계를 안 넘었어도 지금 값으로 문구를 만들어 보여준다

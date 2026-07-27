@@ -133,7 +133,8 @@ def status_text() -> str:
             marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
         # 실시간 사용률(세션/주간)
         if usage_check and label in saved:
-            u = usage_check.get_usage(BASE / "creds" / f"{label}.json")
+            u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
+                                          is_current=(label == cur))
             marks.append(usage_check.summarize(u))
         lines.append(f"  {label}: " + ", ".join(marks))
     return "\n".join(lines)
@@ -202,7 +203,7 @@ def ensure_usable() -> int:
             cur = state.get("current")
             if not cur or cur not in st.saved_labels():
                 break
-            u = usage_check.get_usage(BASE / "creds" / f"{cur}.json")
+            u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
             if not u:
                 break  # 못 읽었으면 그대로 쓴다
             kind = usage_check.which_limit(u, threshold=100.0)  # 진짜 소진(100% 사용)일 때만
@@ -322,17 +323,22 @@ def switch_message(used_label, nxt, verdict, state) -> str:
 
     lines = [f"[클로드] 계정 {used_label} → {nxt} 전환됨 ({used_label} {reason})", ""]
 
-    if usage_check:  # 새 계정이 얼마나 남았는지
-        rem = usage_check.weekly_left(BASE / "creds" / f"{nxt}.json")
+    if usage_check:  # 새 계정이 얼마나 남았는지 (전환 직후라 이게 지금 쓰는 계정)
+        u_next = usage_check.get_usage_for(BASE / "creds" / f"{nxt}.json", is_current=True)
+        rem = None if not u_next or u_next.get("weekly_pct") is None \
+            else max(0.0, 100 - float(u_next["weekly_pct"]))
         if rem is not None:
             lines.append(f"{nxt} 주간 {usage_check.pct_text(rem)} 남음")
 
     blocked = state.get("blocked") or {}
     if used_until is None:
         used_until = blocked.get(used_label)
-    when = usage_check.fmt_reset_full(used_until) if usage_check else ""
-    if when:
-        lines.append(f"{used_label} {when}")
+    if used_until and usage_check:
+        if verdict == "limit":
+            lines.append(f"{used_label} {usage_check.fmt_reset_full(used_until)}")
+        else:  # 한도가 아니라 잠깐 쉬게 한 것이라 '초기화' 라고 하면 안 된다
+            left = usage_check.left_phrase(float(used_until) - time.time())
+            lines.append(f"{used_label} {left} 다시 시도")
 
     # 남은 계정: 새로 쓰는 것과 이미 막힌 것을 빼고, 주간 남은량을 같이 보여준다.
     # 잔여 0% 는 막힘 표시가 아직 없어도 못 쓰는 계정이라 따로 가른다(사용량 경고와 같은 규칙).
