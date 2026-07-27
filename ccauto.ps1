@@ -4,6 +4,9 @@
 $POOL = "C:\Users\JUNSEONG\ai-rotator\claude_pool.py"
 $fails = 0
 while ($true) {
+    # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
+    # (래퍼는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
+    python $POOL --ensure
     claude @args
 
     # claude 가 끝났다. 지금 계정이 한도/만료인지 조용히 확인(haiku ping, 소비 미미)

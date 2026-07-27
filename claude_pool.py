@@ -9,6 +9,7 @@
 실행: python claude_pool.py --status          지금 계정 상태 보기
       python claude_pool.py --next            지금 계정을 한도로 보고 다음 계정으로 넘김
       python claude_pool.py --use A           A 계정으로 지금 바로 교체
+      python claude_pool.py --ensure          켜기 직전 확인: 지금 계정이 다 찼으면 미리 교체
       python claude_pool.py -- -p "안녕"       claude 를 순환 보호 아래서 실행
 호출: from claude_pool import run;  proc = run([claude_bin, "--print", ...], timeout=240)
 전제: creds/<라벨>.json 에 계정별 자격 저장본이 있어야 한다 (save_account.py 로 저장).
@@ -16,9 +17,10 @@
       ssh 비대화형에서는 자격 교체가 실패할 수 있다.
 동시성: 여러 봇이 같이 실패해도 교체는 잠금으로 한 번만 일어난다. 다른 프로세스가 이미
       계정을 바꿨으면 교체 없이 바로 재시도한다.
-의도적 미구현: 사용량을 미리 재는 선제 전환 없음(limit_detect 참고). 대화형 claude 세션의
-      실시간 교체 없음 — 이미 떠 있는 세션은 재시작해야 새 계정이 붙는다.
-마지막 점검: 2026-07-22
+의도적 미구현: 여유 있는 계정을 미리 바꾸는 선제 전환 없음(limit_detect 참고).
+      --ensure 는 선제 전환이 아니다 — 이미 100% 다 찬 계정만 켜기 전에 건너뛴다.
+      대화형 claude 세션의 실시간 교체 없음 — 이미 떠 있는 세션은 재시작해야 새 계정이 붙는다.
+마지막 점검: 2026-07-27
 """
 
 from __future__ import annotations
@@ -178,6 +180,49 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN) -> int:
         st.save_state(state)
     print(f"'{cur or '?'}' → '{nxt}' 계정으로 교체했습니다.")
     print("열려있는 claude 를 종료하고 다시 실행하면 적용됩니다.")
+    return 0
+
+
+def ensure_usable() -> int:
+    """켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 다음 계정으로 바꾼다.
+
+    선제 전환이 아니다. 잔여가 조금이라도 있으면 그대로 둔다(거절 기반 순환은 그대로).
+    사용량을 못 읽으면(네트워크 실패 등) 아무것도 안 한다 — 멀쩡한 계정을 막으면 안 되므로.
+    전환할 때는 그 계정을 실제 리셋 시각까지 쉬게 표시하므로 세 머신이 같이 건너뛴다.
+    """
+    if usage_check is None:
+        return 0
+    with st.with_lock():
+        state = st.prune_blocked(st.load_state())
+        cur = state.get("current")
+        if not cur or cur not in st.saved_labels():
+            return 0
+        u = usage_check.get_usage(BASE / "creds" / f"{cur}.json")
+        if not u:
+            return 0  # 못 읽었으면 그대로 쓴다
+        kind = usage_check.which_limit(u, threshold=100.0)  # 진짜 소진(100% 사용)일 때만
+        if not kind:
+            return 0
+        kind_txt = "주간" if kind == "weekly" else "세션(5시간)"
+        until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
+        st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
+                        f"{kind_txt} 한도 소진(켜기 전 확인)")
+        nxt = st.pick_next(state, exclude=cur)
+        if nxt is None:
+            st.save_state(state)
+            reset_at = st.earliest_reset(state)
+            when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
+            print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진. 갈아탈 계정이 없습니다. "
+                  f"가장 빨리 풀리는 시각: {when}")
+            return 2
+        if not _switch(nxt):
+            st.save_state(state)
+            return 1
+        st.set_current(state, nxt, f"{cur} → {nxt} (켜기 전 확인)")
+        st.save_state(state)
+        log(f"켜기 전 확인: '{cur}' {kind_txt} 소진 → '{nxt}' 로 교체")
+    print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진 → '{nxt}' 계정으로 바꿔서 켭니다.")
+    _notify_switch(cur, nxt, "limit", state)  # 전송은 잠금 밖에서
     return 0
 
 
@@ -376,6 +421,8 @@ def main():
         return 0
     if argv[0] == "--next":
         return next_account()
+    if argv[0] == "--ensure":
+        return ensure_usable()
     if argv[0] == "--use":
         if len(argv) < 2:
             print("사용법: python claude_pool.py --use <라벨>")
