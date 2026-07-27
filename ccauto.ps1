@@ -1,4 +1,4 @@
-# 클로드 계정 자동 순환 래퍼 (claude 를 감싸는 코드)
+﻿# 클로드 계정 자동 순환 래퍼 (claude 를 감싸는 코드)
 # claude 대화형을 실행하고, 한도로 끝나면 자동으로 다음 계정 전환 후 다시 시작한다.
 # 사용: cc   (PowerShell 프로필에 등록된 짧은 명령. claude 대신 이걸 쓴다)
 $POOL = "C:\Users\JUNSEONG\ai-rotator\claude_pool.py"
