@@ -182,6 +182,45 @@ def _from_epoch_token(text: str, now: float) -> float | None:
     return None
 
 
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+
+
+def _from_date_clock(text: str, now: float) -> float | None:
+    """'resets Jul 31 at 8am' / 'resets Jul 31, 8am' 처럼 월 이름+일+시각을 읽는다.
+
+    claude 주간 한도 응답이 이 형식이다. 못 읽으면 기본 5시간으로 떨어져 시각이 틀린다.
+    타임존은 시스템 로컬(한국 머신이면 KST)로 계산한다.
+    """
+    m = re.search(
+        r"resets?\s+([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,)?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)",
+        text, re.I)
+    if not m:
+        return None
+    mon = _MONTHS.get(m.group(1)[:3].lower())
+    if not mon:
+        return None
+    day = int(m.group(2))
+    hour = int(m.group(3))
+    minute = int(m.group(4) or 0)
+    ap = m.group(5).lower()
+    if ap == "pm" and hour < 12:
+        hour += 12
+    if ap == "am" and hour == 12:
+        hour = 0
+    if not (1 <= day <= 31 and 0 <= hour <= 23):
+        return None
+    lt = time.localtime(now)
+    for yr in (lt.tm_year, lt.tm_year + 1):  # 연말이면 내년으로
+        try:
+            t = time.mktime((yr, mon, day, hour, minute, 0, 0, 0, -1))
+        except (OverflowError, ValueError):
+            continue
+        if t > now - 3600:
+            return float(t)
+    return None
+
+
 def _from_clock(text: str, now: float) -> float | None:
     """'resets 3pm' / 'resets at 11:30 PM' 처럼 적힌 시계 시각을 다음 도래 시각으로.
 
@@ -214,7 +253,7 @@ def reset_epoch(stdout: str = "", stderr: str = "", now: float | None = None) ->
     """한도가 풀리는 시각(epoch 초). 문구에서 못 읽으면 기본 5시간 뒤."""
     now = time.time() if now is None else now
     text = failure_text(stdout, stderr) or f"{stdout or ''}\n{stderr or ''}"
-    for parse in (_from_epoch_token, _from_clock):
+    for parse in (_from_epoch_token, _from_date_clock, _from_clock):
         val = parse(text, now)
         if val:
             return val

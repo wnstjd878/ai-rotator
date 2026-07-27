@@ -229,6 +229,13 @@ def case_reset_parsing(tmp):
     stale = limit_detect.reset_epoch("error code 1699999999 something", "", now=now)
     check("지난 시각 숫자는 무시", abs(stale - (now + 5 * 3600)) < 5, f"{stale - now:.0f}초")
 
+    # 실제 주간 한도 응답 형식(월 이름+일+시각). now=1785000000 은 2026-07-24 무렵
+    wk = limit_detect.reset_epoch("You've hit your weekly limit resets Jul 31 at 8am (Asia/Seoul)", "", now=now)
+    lt = time.localtime(wk)
+    check("주간 리셋 월/일/시 파싱", lt.tm_mon == 7 and lt.tm_mday == 31 and lt.tm_hour == 8,
+          f"읽은값={time.strftime('%m/%d %H:%M', lt)}")
+    check("주간 리셋은 5시간 기본이 아님", wk - now > 5 * 3600)
+
     # claude 실행 파일 안에 실제로 박혀 있던 표기들이 한도로 잡히는지
     real_wordings = [
         "usage limit reached",
