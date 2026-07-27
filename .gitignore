@@ -20,3 +20,4 @@ claude_shim.sh
 .env
 .env.*
 .original_claude_link
+alert_state.json
