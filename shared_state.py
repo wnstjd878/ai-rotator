@@ -165,21 +165,22 @@ def clear_blocked(label: str) -> bool:
     return res is not None
 
 
-def claim_notify(reset_at: float | None) -> bool:
+def claim_notify(reset_at: float | None, meta_key: str = "rotator_notified") -> bool:
     """전 계정 소진 알림을 지금 이 머신이 보낼 차례인지(공유). 소진 구간당 한 번만 True.
 
     세 머신이 동시에 소진을 만나도 rotator_meta 의 notified_for 로 한 건만 나가게 한다.
     경합으로 두 건 나가는 극단은 허용한다(알림이 하나 더 오는 정도).
+    meta_key 는 제공자별로 다르다(클로드는 예전 이름 그대로, 지피티는 뒤에 codex 가 붙는다).
     """
     key = str(round(float(reset_at))) if reset_at else "unknown"
     cur = _request("GET", META_TABLE,
-                   params="key=eq.rotator_notified&select=value")
+                   params=f"key=eq.{urllib.parse.quote(meta_key, safe='')}&select=value")
     if cur is None:
         return False  # 공유 못 읽으면 알림은 로컬 판단에 맡긴다
     prev = (cur[0].get("value") if cur else None)
     if prev == key:
         return False
-    body = [{"key": "rotator_notified", "value": key, "updated_at": _to_iso(time.time())}]
+    body = [{"key": meta_key, "value": key, "updated_at": _to_iso(time.time())}]
     res = _request("POST", META_TABLE, body=body,
                    headers={"Prefer": "resolution=merge-duplicates"})
     return res is not None

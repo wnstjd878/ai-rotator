@@ -44,16 +44,64 @@ def claim_notice(key: str) -> bool:
     """
     if _shared_on():
         try:
-            return shared_state.claim_once(key)
+            return shared_state.claim_once(_to_shared(key))
         except Exception:
             return False
     return True
 
 BASE = Path(__file__).resolve().parent
+
+# 제공자별 자리. 기본은 클로드(예전 경로 그대로).
+NAMESPACE = "claude"
+SHARED_PREFIX = ""          # 공유 저장소 라벨 앞에 붙는 것. 클로드는 예전 데이터 호환으로 빈 값.
 STATE_FILE = BASE / "state.json"
 LOCK_FILE = BASE / "state.lock"
 ACCOUNTS_FILE = BASE / "accounts.json"
 CREDS_DIR = BASE / "creds"
+
+_LAYOUT = {
+    "claude": {"state": "state.json", "lock": "state.lock",
+               "accounts": "accounts.json", "creds": "creds", "prefix": ""},
+    "codex": {"state": "codex_state.json", "lock": "codex_state.lock",
+              "accounts": "codex_accounts.json", "creds": "creds/codex", "prefix": "codex:"},
+}
+
+
+def use(namespace: str) -> None:
+    """이 프로세스가 다룰 제공자를 정한다. codex_* 모듈이 불러오자마자 부른다.
+
+    한 프로세스가 둘을 번갈아 쓰지는 않는다(가로채기도 래퍼도 한쪽만 다룬다).
+    모르는 이름을 주면 예전 자리(클로드)를 그대로 쓴다 — 상태 파일이 엉뚱한 데
+    생기는 것보다 낫다.
+    """
+    global NAMESPACE, SHARED_PREFIX, STATE_FILE, LOCK_FILE, ACCOUNTS_FILE, CREDS_DIR
+    layout = _LAYOUT.get(namespace)
+    if not layout:
+        return
+    NAMESPACE = namespace
+    SHARED_PREFIX = layout["prefix"]
+    STATE_FILE = BASE / layout["state"]
+    LOCK_FILE = BASE / layout["lock"]
+    ACCOUNTS_FILE = BASE / layout["accounts"]
+    CREDS_DIR = BASE / layout["creds"]
+
+
+def _to_shared(label: str) -> str:
+    """이 제공자의 라벨을 공유 저장소용 라벨로."""
+    return f"{SHARED_PREFIX}{label}"
+
+
+def _from_shared(key: str):
+    """공유 저장소 라벨을 이 제공자의 라벨로. 남의 제공자 것이면 None.
+
+    클로드는 접두가 없으므로 콜론이 든 라벨(=다른 제공자)을 걸러야 한다.
+    이게 없으면 지피티 계정이 막힌 걸 클로드가 자기 계정으로 잘못 읽는다.
+    """
+    key = str(key)
+    if SHARED_PREFIX:
+        return key[len(SHARED_PREFIX):] if key.startswith(SHARED_PREFIX) else None
+    return None if ":" in key else key
+
 
 HISTORY_MAX = 20
 LOCK_TIMEOUT = 60  # 잠금 대기 상한(초). 넘으면 예외로 알린다.
@@ -209,7 +257,10 @@ def prune_blocked(state: dict, now: float | None = None) -> dict:
         remote = shared_state.get_blocked(now)
         if remote is not None:  # 읽기 실패면 로컬만 유지
             for k, v in remote.items():
-                blocked[k] = max(blocked.get(k, 0.0), float(v))
+                label = _from_shared(k)  # 다른 제공자 것은 건너뛴다
+                if label is None:
+                    continue
+                blocked[label] = max(blocked.get(label, 0.0), float(v))
 
     state["blocked"] = blocked
     if not blocked:
@@ -224,7 +275,8 @@ def mark_notified(state: dict, reset_at: float | None, now: float | None = None)
     공유가 켜져 있으면 세 머신을 통틀어 한 번만 나가게 공유 저장소로 판단한다.
     """
     if _shared_on():
-        got = shared_state.claim_notify(reset_at)
+        # 제공자마다 따로 센다. 한 쪽 소진 알림이 다른 쪽 알림을 막으면 안 된다.
+        got = shared_state.claim_notify(reset_at, meta_key=f"rotator_notified{'_' + NAMESPACE if SHARED_PREFIX else ''}")
         # 공유로 한 번 잡았으면 로컬에도 표시해 이 머신 안에서도 중복을 막는다
         if got:
             state["notified_for"] = round(float(reset_at)) if reset_at else None
@@ -263,7 +315,7 @@ def mark_blocked(state: dict, label: str, until_epoch: float, reason: str = "") 
     state["blocked"] = blocked
     _push_history(state, label, "blocked", reason)
     if _shared_on():
-        shared_state.set_blocked(label, until_epoch, reason)  # 세 머신이 같이 본다
+        shared_state.set_blocked(_to_shared(label), until_epoch, reason)  # 세 머신이 같이 본다
     return state
 
 
@@ -273,7 +325,7 @@ def clear_blocked_label(state: dict, label: str) -> dict:
     blocked.pop(label, None)
     state["blocked"] = blocked
     if _shared_on():
-        shared_state.clear_blocked(label)
+        shared_state.clear_blocked(_to_shared(label))
     return state
 
 
