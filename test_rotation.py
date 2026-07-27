@@ -627,7 +627,8 @@ def main():
                      case_answer_json_not_failure, case_dirty_body_not_limit,
                      case_broken_cred_after_switch, case_notice_once,
                      case_broken_state_file, case_subprocess_compat,
-                     case_sequential_lowest, case_reset_soonest_first, case_shared_merge,
+                     case_sequential_lowest, case_reset_soonest_first,
+                     case_skip_blocked_before_call, case_shared_merge,
                      case_shared_three_machines):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
