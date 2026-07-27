@@ -41,6 +41,15 @@ _WEEKDAY = "월화수목금토일"
 _KIND_NAME = {"wk": "주간", "se": "세션"}
 
 
+def _pct(rem: float) -> str:
+    """남은량 표기. 0.4% 를 '0%' 로 반올림하면 아직 쓸 수 있는 계정이 소진으로 보인다."""
+    if rem <= 0:
+        return "0%"
+    if rem < 1:
+        return "1% 미만"
+    return f"{rem:.0f}%"
+
+
 def _left_phrase(sec: float) -> str:
     """남은 시간을 '5일 뒤' / '3시간 뒤' / '20분 뒤' 로. 지났으면 '곧'."""
     if sec <= 0:
@@ -131,23 +140,26 @@ def build_message(label: str, hits: list, others: list) -> str:
     """알림 본문. 첫 줄에 결론, 그 아래 상세, 그 아래 계정 목록."""
     nxt = _next_label(label, others)
     worst = min(hits, key=lambda h: h[1])
-    head = f"[클로드] 계정 {label} {_KIND_NAME[worst[0]]} {worst[1]:.0f}% 남음"
+    head = f"[클로드] 계정 {label} {_KIND_NAME[worst[0]]} {_pct(worst[1])} 남음"
     if worst[1] <= SWITCH_SOON:
-        head += f", 곧 계정 {nxt}로 자동 전환" if nxt else ", 자동 전환할 계정 없음"
+        if nxt:
+            head += f", 곧 계정 {nxt}로 자동 전환"
+        elif others:  # 목록이 비면 사용량을 못 읽은 것 — 없다고 단정하지 않는다
+            head += ", 자동 전환할 계정 없음"
 
     lines = [head, ""]
     for kind, rem, reset in hits:
         when = _fmt_reset_full(reset)
-        lines.append(f"{_KIND_NAME[kind]} {rem:.0f}% 남음" + (f" ({when})" if when else ""))
+        lines.append(f"{_KIND_NAME[kind]} {_pct(rem)} 남음" + (f" ({when})" if when else ""))
 
     ok = [(l, r) for l, r in others if r > 0]
     dead = [(l, r) for l, r in others if r <= 0]
     if ok:
         lines += ["", "전환 가능"]
-        lines += [f"계정 {l} {r:.0f}%" + (" (다음)" if l == nxt else "") for l, r in ok]
+        lines += [f"계정 {l} {_pct(r)}" + (" (다음)" if l == nxt else "") for l, r in ok]
     if dead:
         lines += ["", "사용 불가"]
-        lines += [f"계정 {l} {r:.0f}%" for l, r in dead]
+        lines += [f"계정 {l} {_pct(r)}" for l, r in dead]
     return "\n".join(lines)
 
 
