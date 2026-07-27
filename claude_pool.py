@@ -192,37 +192,47 @@ def ensure_usable() -> int:
     """
     if usage_check is None:
         return 0
+    started_from = None   # 처음 쓰던 계정 (알림·안내용)
+    first_kind = ""       # 그 계정이 무슨 한도로 막혔는지
+    landed = None         # 최종으로 고른 계정
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
-        cur = state.get("current")
-        if not cur or cur not in st.saved_labels():
-            return 0
-        u = usage_check.get_usage(BASE / "creds" / f"{cur}.json")
-        if not u:
-            return 0  # 못 읽었으면 그대로 쓴다
-        kind = usage_check.which_limit(u, threshold=100.0)  # 진짜 소진(100% 사용)일 때만
-        if not kind:
-            return 0
-        kind_txt = "주간" if kind == "weekly" else "세션(5시간)"
-        until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
-        st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
-                        f"{kind_txt} 한도 소진(켜기 전 확인)")
-        nxt = st.pick_next(state, exclude=cur)
-        if nxt is None:
-            st.save_state(state)
-            reset_at = st.earliest_reset(state)
-            when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
-            print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진. 갈아탈 계정이 없습니다. "
-                  f"가장 빨리 풀리는 시각: {when}")
-            return 2
-        if not _switch(nxt):
-            st.save_state(state)
-            return 1
-        st.set_current(state, nxt, f"{cur} → {nxt} (켜기 전 확인)")
+        # 다음 계정도 이미 소진돼 있을 수 있다. 쓸 만한 계정이 나올 때까지 이어서 건너뛴다.
+        for _ in range(len(st.account_labels()) + 1):
+            cur = state.get("current")
+            if not cur or cur not in st.saved_labels():
+                break
+            u = usage_check.get_usage(BASE / "creds" / f"{cur}.json")
+            if not u:
+                break  # 못 읽었으면 그대로 쓴다
+            kind = usage_check.which_limit(u, threshold=100.0)  # 진짜 소진(100% 사용)일 때만
+            if not kind:
+                break
+            kind_txt = "주간" if kind == "weekly" else "세션(5시간)"
+            until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
+            st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
+                            f"{kind_txt} 한도 소진(켜기 전 확인)")
+            nxt = st.pick_next(state, exclude=cur)
+            if nxt is None:
+                st.save_state(state)
+                reset_at = st.earliest_reset(state)
+                when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
+                print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진. 갈아탈 계정이 없습니다. "
+                      f"가장 빨리 풀리는 시각: {when}")
+                return 2
+            if not _switch(nxt):
+                st.save_state(state)
+                return 1
+            if started_from is None:
+                started_from, first_kind = cur, kind_txt
+            landed = nxt
+            st.set_current(state, nxt, f"{cur} → {nxt} (켜기 전 확인)")
+            log(f"켜기 전 확인: '{cur}' {kind_txt} 소진 → '{nxt}' 로 교체")
         st.save_state(state)
-        log(f"켜기 전 확인: '{cur}' {kind_txt} 소진 → '{nxt}' 로 교체")
-    print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진 → '{nxt}' 계정으로 바꿔서 켭니다.")
-    _notify_switch(cur, nxt, "limit", state)  # 전송은 잠금 밖에서
+    if not started_from:
+        return 0
+    print(f"[켜기 전 확인] '{started_from}' {first_kind} 한도 소진 → '{landed}' 계정으로 바꿔서 켭니다.")
+    _notify_switch(started_from, landed, "limit", state)  # 전송은 잠금 밖에서
     return 0
 
 
