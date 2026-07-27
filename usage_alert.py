@@ -78,8 +78,11 @@ def _check(kind: str, pct, reset, label: str, alerted: dict):
     return (kind, max(0.0, 100 - float(pct)), reset)
 
 
-def _others_weekly(label: str) -> list:
-    """다른 계정들의 주간 남은량. 라벨 순서(=전환 순서) 그대로 [(라벨, 남은%)]."""
+def _others_weekly(label: str, seen: list | None = None) -> list:
+    """다른 계정들의 주간 남은량. 라벨 순서 그대로 [(라벨, 남은%)].
+
+    읽은 김에 초기화 시각도 seen 에 모은다 — 다음 계정을 고르는 순서 기준이라 값이 필요하다.
+    """
     out = []
     for l in st.account_labels():
         if l == label:
@@ -87,27 +90,27 @@ def _others_weekly(label: str) -> list:
         cred = BASE / "creds" / f"{l}.json"
         if not cred.exists():
             continue
-        rem = usage_check.weekly_left(cred)
-        if rem is None:
+        u = usage_check.get_usage(cred)
+        if not u or u.get("weekly_pct") is None:
             continue
-        out.append((l, rem))
+        if seen is not None:
+            seen.append((l, u.get("weekly_reset")))
+        out.append((l, max(0.0, 100 - float(u["weekly_pct"]))))
     return out
 
 
-def _next_label(label: str, others: list):
-    """이 계정이 막히면 순환기가 다음에 고를 계정. 주간이 남은 것 중 순서상 다음."""
+def _next_label(label: str, others: list, state: dict | None = None):
+    """이 계정이 막히면 순환기가 다음에 고를 계정.
+
+    순서 규칙은 pool_state.priority_order 한 곳에서 온다(주간 초기화가 이른 것부터).
+    이미 다 쓴 계정은 후보에서 뺀다 — 막힘 표시가 아직 안 붙었어도 못 쓰기 때문.
+    """
     alive = [l for l, rem in others if rem > 0]
     if not alive:
         return None
-    labels = st.account_labels()
-    if label not in labels:
-        return alive[0]
-    i = labels.index(label)
-    order = labels[i + 1:] + labels[:i]  # 순차 소진: 다음 인덱스부터 한 바퀴
-    for l in order:
-        if l in alive:
-            return l
-    return alive[0]
+    state = st.prune_blocked(st.load_state()) if state is None else state
+    order = st.priority_order(state, alive)
+    return order[0] if order else None
 
 
 def build_message(label: str, hits: list, others: list) -> str:
@@ -166,6 +169,7 @@ def main() -> int:
         print(build_message(label, hits, _others_weekly(label)))
         return 0
 
+    seen = [(label, u.get("weekly_reset"))]  # 다음 계정 고르는 순서 기준으로 쌓아둔다
     alerted = _load_alerted()
     hits = []
     for kind, pct_key, reset_key in (("wk", "weekly_pct", "weekly_reset"),
@@ -175,12 +179,13 @@ def main() -> int:
             hits.append(hit)
 
     if hits:
-        notify.send(build_message(label, hits, _others_weekly(label)))
+        notify.send(build_message(label, hits, _others_weekly(label, seen)))
         _save_alerted(alerted)
         print(f"알림 보냄: {label} " + ", ".join(f"{_KIND_NAME[k]} {r:.0f}% 남음" for k, r, _ in hits))
     else:
         _save_alerted(alerted)  # 마킹 갱신은 저장
         print(f"새 단계 없음: {label} (주간 {u.get('weekly_pct')}%, 세션 {u.get('session_pct')}%)")
+    st.remember_resets(seen)
     return 0
 
 

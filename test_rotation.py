@@ -470,6 +470,40 @@ def case_sequential_lowest(tmp):
     check("A 풀리면 다시 A 로 복귀", st.pick_next(state) == "A", f"골른 것={st.pick_next(state)}")
 
 
+def case_reset_soonest_first(tmp):
+    print("\n[17-2] 초기화가 이른 계정부터 태운다 (안 쓰면 남은 양이 사라지므로)")
+    setup(tmp, ["A", "B", "C", "D"], "A")
+    now = time.time()
+    state = st.prune_blocked(st.load_state())
+
+    # 시각을 하나도 모르면 예전처럼 accounts.json 순서
+    check("시각 모르면 라벨 순서", st.pick_next(state) == "A", f"골른 것={st.pick_next(state)}")
+
+    # A=8/1, B=7/31 처럼 B 가 먼저 초기화되면 B 부터 (2026-07-27 사용자 지적 상황)
+    st.note_weekly_reset(state, "A", now + 5 * 86400)
+    st.note_weekly_reset(state, "B", now + 3 * 86400)
+    st.note_weekly_reset(state, "D", now + 9 * 86400)
+    check("초기화 이른 B 를 먼저", st.pick_next(state) == "B", f"골른 것={st.pick_next(state)}")
+
+    # 시각을 아는 계정이 먼저, 모르는 계정(C)은 뒤로
+    st.mark_blocked(state, "B", now + 3600)
+    check("B 막히면 그 다음으로 이른 A", st.pick_next(state) == "A", f"골른 것={st.pick_next(state)}")
+    st.mark_blocked(state, "A", now + 3600)
+    st.mark_blocked(state, "D", now + 3600)
+    check("아는 계정이 다 막히면 모르는 C", st.pick_next(state) == "C", f"골른 것={st.pick_next(state)}")
+
+    # 이미 지난 시각은 낡은 값이라 순서 기준으로 안 쓴다
+    state["blocked"] = {}
+    st.note_weekly_reset(state, "C", now + 86400)
+    state["weekly_reset"]["A"] = round(now - 86400)  # 낡은 값을 직접 박아둔다
+    check("낡은 시각은 뒤로 밀림", st.pick_next(state) == "C", f"골른 것={st.pick_next(state)}")
+
+    # 알림의 '(다음)' 표시도 같은 규칙을 쓴다
+    check("정렬 규칙이 한 곳에서 나온다",
+          st.priority_order(state, ["A", "C", "D"])[0] == "C",
+          f"정렬={st.priority_order(state, ['A', 'C', 'D'])}")
+
+
 def case_shared_merge(tmp):
     print("\n[18] 공유 저장소: 다른 머신 막힘이 병합돼 같은 계정에 수렴")
     setup(tmp, ["A", "B", "C"], "A")
@@ -575,7 +609,7 @@ def main():
                      case_answer_json_not_failure, case_dirty_body_not_limit,
                      case_broken_cred_after_switch, case_notice_once,
                      case_broken_state_file, case_subprocess_compat,
-                     case_sequential_lowest, case_shared_merge,
+                     case_sequential_lowest, case_reset_soonest_first, case_shared_merge,
                      case_shared_three_machines):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)

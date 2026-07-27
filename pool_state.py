@@ -312,6 +312,21 @@ def note_weekly_reset(state: dict, label: str, epoch, now: float | None = None) 
     return state
 
 
+def remember_resets(pairs) -> None:
+    """읽어둔 초기화 시각들을 상태 파일에 반영한다. 잠금은 저장하는 순간만 잡는다.
+
+    이미 잠금을 쥔 곳에서는 부르지 말 것(중첩). 거기서는 note_weekly_reset 을 직접 쓴다.
+    """
+    pairs = [(l, e) for l, e in pairs if e]
+    if not pairs:
+        return
+    with with_lock():
+        s = prune_blocked(load_state())
+        for l, e in pairs:
+            note_weekly_reset(s, l, e)
+        save_state(s)
+
+
 def pick_next(state: dict, exclude: str | None = None, now: float | None = None) -> str | None:
     """지금 쓸 계정 라벨 하나. 없으면 None.
 
@@ -323,27 +338,35 @@ def pick_next(state: dict, exclude: str | None = None, now: float | None = None)
     공유 저장소가 켜져 있으면(prune_blocked 가 병합) 세 머신이 같은 막힘을 보고 같은 계정을 고른다.
     """
     now = time.time() if now is None else now
-    labels = account_labels()  # accounts.json 에 적힌 순서 그대로
     saved = set(saved_labels())
-    if not labels:
-        return None
+    candidates = [l for l in account_labels()
+                  if l != exclude and l in saved and not is_blocked(state, label=l, now=now)]
+    order = priority_order(state, candidates, now)
+    return order[0] if order else None
 
+
+def priority_order(state: dict, labels=None, now: float | None = None) -> list:
+    """계정을 실제로 고르는 순서로 정렬해 돌려준다.
+
+    주간 초기화가 이른 것부터, 시각을 모르면 뒤로 밀고 accounts.json 순서.
+    pick_next 와 알림의 '(다음)' 표시가 같은 규칙을 쓰게 하려고 여기 한 벌만 둔다.
+    """
+    now = time.time() if now is None else now
+    base = account_labels()
+    labels = list(base) if labels is None else list(labels)
     resets = state.get("weekly_reset") or {}
 
-    def order(label):
+    def key(label):
+        idx = base.index(label) if label in base else len(base)
         try:
             r = float(resets.get(label))
         except (TypeError, ValueError):
             r = None
         if r is None or r <= now:  # 모르거나 낡은 값이면 뒤로
-            return (1, 0.0, labels.index(label))
-        return (0, r, labels.index(label))
+            return (1, 0.0, idx)
+        return (0, r, idx)
 
-    candidates = [l for l in labels
-                  if l != exclude and l in saved and not is_blocked(state, label=l, now=now)]
-    if not candidates:
-        return None
-    return min(candidates, key=order)
+    return sorted(labels, key=key)
 
 
 def earliest_reset(state: dict) -> float | None:

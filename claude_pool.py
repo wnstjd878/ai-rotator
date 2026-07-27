@@ -121,6 +121,7 @@ def status_text() -> str:
     now = time.time()
     saved = set(st.saved_labels())
     lines = [f"현재 계정: {cur}"]
+    seen_resets = []  # 여기서 읽은 초기화 시각은 다음 계정 고르는 순서에 쓰인다
     for label in st.account_labels():
         marks = []
         if label == cur:
@@ -136,7 +137,10 @@ def status_text() -> str:
             u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
                                           is_current=(label == cur))
             marks.append(usage_check.summarize(u))
+            if u:
+                seen_resets.append((label, u.get("weekly_reset")))
         lines.append(f"  {label}: " + ", ".join(marks))
+    st.remember_resets(seen_resets)
     return "\n".join(lines)
 
 
@@ -206,6 +210,7 @@ def ensure_usable() -> int:
             u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
             if not u:
                 break  # 못 읽었으면 그대로 쓴다
+            st.note_weekly_reset(state, cur, u.get("weekly_reset"))  # 순서 기준으로 쓰인다
             kind = usage_check.which_limit(u, threshold=100.0)  # 진짜 소진(100% 사용)일 때만
             if not kind:
                 break
@@ -259,6 +264,8 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 until = None
                 if usage_check:
                     u = usage_check.get_usage(BASE / "creds" / f"{used_label}.json")
+                    if u:
+                        st.note_weekly_reset(state, used_label, u.get("weekly_reset"))
                     kind = usage_check.which_limit(u)
                     if kind == "weekly" and u.get("weekly_reset"):
                         until = u["weekly_reset"]
