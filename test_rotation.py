@@ -660,6 +660,12 @@ def case_save_back(tmp):
         path.write_text(json.dumps({"claudeAiOauth": {"refreshToken": token, "expiresAt": 1}}),
                         encoding="utf-8")
 
+    # 실측 판별(live_label)은 여기선 끈 채로 본다. 켠 경우는 아래 [25] 에서 따로 본다.
+    # (이 시험은 subprocess.run 을 통째로 가짜로 바꿔놔서, 안 끄면 조용히 None 이 되어
+    #  "검사한 줄 알았는데 사실은 폴백만 검사" 하는 상태가 된다 — 2026-07-28 실제로 그랬음)
+    real_live_label = sa.live_label
+    sa.live_label = lambda: None
+
     try:
         a = sa.CREDS_DIR / "A.json"
         write(a, "옛-A")
@@ -687,6 +693,49 @@ def case_save_back(tmp):
         check("백업 폴더가 라벨 목록에 안 섞임", sa.list_labels() == ["A", "B"], sa.list_labels())
     finally:
         sa.CREDS_DIR, sa.LIVE = real_creds, real_live
+        sa.live_label = real_live_label
+
+
+def case_save_back_live_label(tmp):
+    print("\n[25] 기록이 낡았으면 실제로 꽂힌 계정 쪽에 저장한다")
+    import switch_account as sa
+
+    real_creds, real_live, real_fn = sa.CREDS_DIR, sa.LIVE, sa.live_label
+    root = Path(tmp) / "livelabel"
+    (root / "creds").mkdir(parents=True, exist_ok=True)
+    (root / "home").mkdir(parents=True, exist_ok=True)
+    sa.CREDS_DIR = root / "creds"
+    sa.LIVE = root / "home" / ".credentials.json"
+
+    def write(path, token):
+        path.write_text(json.dumps({"claudeAiOauth": {"refreshToken": token, "expiresAt": 1}}),
+                        encoding="utf-8")
+
+    try:
+        a, b = sa.CREDS_DIR / "A.json", sa.CREDS_DIR / "B.json"
+        write(a, "옛-A")
+        write(b, "옛-B")
+        # 사람이 /login 으로 B 를 꽂았는데 기록은 아직 A 인 상태
+        write(sa.LIVE, "새-B")
+        sa.live_label = lambda: "B"
+
+        msg = sa.save_back("A")
+        check("어긋남을 알아챈다", "실제로는 'B'" in msg, msg)
+        check("B 에 저장됐다", sa._fingerprint(b) == sa._fingerprint(sa.LIVE), msg)
+        check("A 는 안 건드렸다", sa._fingerprint(a) != sa._fingerprint(sa.LIVE))
+
+        # 기록이 비어 있어도 실측으로 알아낸다
+        write(sa.LIVE, "더새-B")
+        msg = sa.save_back(None)
+        check("기록이 비어도 실측으로 저장", sa._fingerprint(b) == sa._fingerprint(sa.LIVE), msg)
+
+        # 실측이 기록과 같으면 그대로 그 라벨에 저장
+        sa.live_label = lambda: "A"
+        write(sa.LIVE, "새-A")
+        msg = sa.save_back("A")
+        check("일치하면 그대로 저장", sa._fingerprint(a) == sa._fingerprint(sa.LIVE), msg)
+    finally:
+        sa.CREDS_DIR, sa.LIVE, sa.live_label = real_creds, real_live, real_fn
 
 
 def case_switch_passes_leaving(tmp):
@@ -761,7 +810,7 @@ def main():
                      case_skip_blocked_before_call, case_reclaim_when_freed,
                      case_manual_use_not_reverted, case_shared_merge,
                      case_shared_three_machines, case_save_back,
-                     case_switch_passes_leaving):
+                     case_save_back_live_label, case_switch_passes_leaving):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

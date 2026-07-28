@@ -20,6 +20,7 @@
 
 import hashlib
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -61,6 +62,36 @@ def current_label():
         return None
 
 
+def live_label():
+    """지금 실제로 꽂혀 있는 계정의 라벨. 못 알아내면 None.
+
+    claude auth status 가 알려주는 이메일을 accounts.json 의 라벨별 email 과 대조한다.
+    사람이 순환기 모르게 /login 하면 state.json 의 current 가 낡는데(사용량이 없어
+    계정을 바꾸는 건 흔한 일이다), 그 낡은 값을 믿고 되저장하면 엉뚱한 라벨에
+    다른 계정 자격이 들어간다. 그래서 기록보다 이 실측을 우선한다.
+    """
+    import subprocess
+
+    try:
+        accounts = json.loads((BASE / "accounts.json").read_text(encoding="utf-8"))
+        by_mail = {(x.get("email") or "").lower(): x.get("label")
+                   for x in accounts if x.get("email") and x.get("label")}
+    except Exception:
+        return None
+    if not by_mail:
+        return None
+    try:
+        r = subprocess.run(
+            ["claude", "auth", "status", "--text"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(BASE), shell=(sys.platform == "win32"), timeout=60,
+        )
+    except Exception:
+        return None
+    m = re.search(r"Email:\s*(\S+)", r.stdout or "")
+    return by_mail.get(m.group(1).lower()) if m else None
+
+
 def save_back(leaving) -> str:
     """갈아타기 직전, 지금 쓰던 계정의 갱신된 자격을 그 라벨 파일에 되저장한다.
 
@@ -70,15 +101,19 @@ def save_back(leaving) -> str:
     되돌아온 순간 "Login expired" 가 뜬다.
     2026-07-28 실제 사고: 이 유실로 저장해둔 계정 네 개가 전부 못 쓰게 됐다.
 
-    라벨을 잘못 알고 덮어쓰면 멀쩡한 계정 하나를 잃으므로, 지금 자격이 다른 라벨의
-    저장본과 같으면(= 기록이 실제와 어긋난 상태) 되저장하지 않고 넘어간다.
+    라벨을 잘못 알고 덮어쓰면 멀쩡한 계정 하나를 잃는다. 그래서 두 겹으로 막는다.
+    (1) 기록(state.current)보다 실측(live_label — claude auth status 의 이메일)을 우선한다.
+        사용량이 없어 사람이 /login 으로 계정을 바꾸는 일은 흔하고, 그때 기록이 낡는다.
+    (2) 그래도 지금 자격이 다른 라벨의 저장본과 같으면 덮어쓰지 않고 넘어간다.
     돌려주는 값은 기록용 한 줄이다.
     """
-    if not leaving:
-        return "떠나는 계정을 몰라 되저장 안 함"
-    dest = CREDS_DIR / f"{leaving}.json"
     if not LIVE.exists():
         return "지금 쓰는 자격 파일이 없어 되저장 안 함"
+    if not leaving:
+        leaving = live_label()  # 기록이 비었어도 실측으로 알아낼 수 있다
+        if not leaving:
+            return "떠나는 계정을 몰라 되저장 안 함"
+    dest = CREDS_DIR / f"{leaving}.json"
     if not dest.exists():
         return f"'{leaving}' 저장본이 없어 되저장 안 함"
 
@@ -87,6 +122,17 @@ def save_back(leaving) -> str:
         return "지금 자격을 못 읽어 되저장 안 함"
     if live_fp == _fingerprint(dest):
         return f"'{leaving}' 자격에 변화 없음(되저장 불필요)"
+
+    # 기록보다 실측이 우선. 사람이 /login 으로 계정을 바꿔 기록이 낡았을 수 있다.
+    actual = live_label()
+    if actual and actual != leaving:
+        note = f"기록은 '{leaving}' 이지만 실제로는 '{actual}' 이라 그쪽에 저장합니다"
+        leaving = actual
+        dest = CREDS_DIR / f"{leaving}.json"
+        if not dest.exists() or live_fp == _fingerprint(dest):
+            return f"{note} — 이미 최신이라 되저장 불필요"
+    else:
+        note = None
 
     # 기록된 라벨과 실제 꽂힌 자격이 어긋나면 덮어쓰지 않는다(다른 계정 자격 오염 방지)
     for other in CREDS_DIR.glob("*.json"):
@@ -101,7 +147,8 @@ def save_back(leaving) -> str:
     prev_dir.mkdir(exist_ok=True)
     shutil.copy2(dest, prev_dir / f"{leaving}.json")
     shutil.copy2(LIVE, dest)
-    return f"'{leaving}' 의 갱신된 자격을 되저장했습니다"
+    done = f"'{leaving}' 의 갱신된 자격을 되저장했습니다"
+    return f"{note} — {done}" if note else done
 
 
 def switch_file(src: Path, leaving=None) -> bool:
