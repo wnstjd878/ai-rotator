@@ -471,8 +471,8 @@ def main():
     cases = [case_success, case_false_positive_body, case_rotate_on_limit,
              case_limit_text_but_server_ok, case_ignored_limits, case_all_exhausted,
              case_already_switched, case_auth_stops, case_reset_from_usage,
-             case_backup_before_switch, case_revoked_copy, case_revoked_first_call,
-             case_sync_cred, case_shared_namespace]
+             case_folder_switch, case_revoked_copy, case_revoked_first_call,
+             case_not_logged_in_skipped, case_shared_namespace]
     for fn in cases:
         with tempfile.TemporaryDirectory() as tmp:
             fn(tmp)
