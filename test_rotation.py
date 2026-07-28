@@ -738,6 +738,45 @@ def case_save_back_live_label(tmp):
         sa.CREDS_DIR, sa.LIVE, sa.live_label = real_creds, real_live, real_fn
 
 
+def case_live_label_source(tmp):
+    print("\n[26] 지금 계정 판별은 캐시가 아니라 자격으로 물어본다")
+    import switch_account as sa
+
+    real_creds, real_live, real_mail = sa.CREDS_DIR, sa.LIVE, sa.cred_email
+    root = Path(tmp) / "labelsrc"
+    (root / "creds").mkdir(parents=True, exist_ok=True)
+    (root / "home").mkdir(parents=True, exist_ok=True)
+    sa.CREDS_DIR = root / "creds"
+    sa.LIVE = root / "home" / ".credentials.json"
+
+    def write(path, token):
+        path.write_text(json.dumps({"claudeAiOauth": {"refreshToken": token, "expiresAt": 1}}),
+                        encoding="utf-8")
+
+    try:
+        write(sa.CREDS_DIR / "A.json", "옛-A")
+        write(sa.CREDS_DIR / "D.json", "옛-D")
+        write(sa.LIVE, "갱신된-D")  # 갱신돼서 어느 저장본과도 지문이 안 맞는 상태
+
+        # 서버가 D 라고 답하면 지문이 안 맞아도 D 로 알아낸다.
+        # 이게 핵심이다: 갱신된 자격은 지문 대조만으로는 절대 못 알아낸다.
+        sa.cred_email = lambda path=None: "REDACTED@example.com"
+        check("갱신돼도 서버 답으로 알아냄", sa.live_label() == "D", sa.live_label())
+
+        # 조회가 안 되면(연결 실패) 지문 대조로 떨어진다
+        sa.cred_email = lambda path=None: None
+        check("조회 실패 시 지문 대조로 떨어짐", sa.live_label() is None, sa.live_label())
+        write(sa.LIVE, "옛-A")
+        check("지문이 맞으면 그걸로 알아냄", sa.live_label() == "A", sa.live_label())
+
+        # accounts.json 에 없는 계정이면 라벨을 못 정한다(엉뚱한 라벨로 우기지 않는다)
+        sa.cred_email = lambda path=None: "모르는사람@example.com"
+        write(sa.LIVE, "낯선-자격")
+        check("모르는 계정은 None", sa.live_label() is None, sa.live_label())
+    finally:
+        sa.CREDS_DIR, sa.LIVE, sa.cred_email = real_creds, real_live, real_mail
+
+
 def case_switch_passes_leaving(tmp):
     print("\n[24] 계정을 바꿀 때 떠나는 계정을 함께 넘긴다")
     setup(tmp, ["A", "B"], "A")
@@ -810,7 +849,8 @@ def main():
                      case_skip_blocked_before_call, case_reclaim_when_freed,
                      case_manual_use_not_reverted, case_shared_merge,
                      case_shared_three_machines, case_save_back,
-                     case_save_back_live_label, case_switch_passes_leaving):
+                     case_save_back_live_label, case_live_label_source,
+                     case_switch_passes_leaving):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

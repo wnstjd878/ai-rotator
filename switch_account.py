@@ -62,34 +62,72 @@ def current_label():
         return None
 
 
+PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+CLI_UA = "claude-cli/2.1.0 (external, cli)"
+
+
+def cred_email(path=None):
+    """그 자격이 실제로 누구 계정인지 서버에 직접 물어본다. 못 알아내면 None.
+
+    **`claude auth status` 를 쓰면 안 된다(2026-07-28 실측).** 그 명령이 말하는 이메일은
+    자격 파일이 아니라 `~/.claude.json` 의 oauthAccount 에 따로 캐시된 값이다. 자격 파일을
+    바꿔 끼워도 캐시는 안 따라오므로, 파일은 D 인데 status 는 C 라고 답한다. 그걸 믿고
+    되저장하면 멀쩡한 계정 자격을 엉뚱한 라벨에 덮어쓴다.
+    자격 파일에는 계정 식별자가 없어서 파일만 봐서는 알 수 없고, 이 조회가 유일한 방법이다.
+    출입증이 만료된 저장본은 조회가 안 된다(그건 알 수 없음으로 둔다).
+    """
+    import urllib.error
+    import urllib.request
+
+    path = path or LIVE
+    try:
+        token = json.loads(Path(path).read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+    except Exception:
+        return None
+    req = urllib.request.Request(PROFILE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "User-Agent": CLI_UA,
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    return ((body.get("account") or {}).get("email")) or None
+
+
+def label_of_email(email):
+    if not email:
+        return None
+    try:
+        accounts = json.loads((BASE / "accounts.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    for x in accounts:
+        if (x.get("email") or "").lower() == email.lower():
+            return x.get("label")
+    return None
+
+
 def live_label():
     """지금 실제로 꽂혀 있는 계정의 라벨. 못 알아내면 None.
 
-    claude auth status 가 알려주는 이메일을 accounts.json 의 라벨별 email 과 대조한다.
-    사람이 순환기 모르게 /login 하면 state.json 의 current 가 낡는데(사용량이 없어
-    계정을 바꾸는 건 흔한 일이다), 그 낡은 값을 믿고 되저장하면 엉뚱한 라벨에
-    다른 계정 자격이 들어간다. 그래서 기록보다 이 실측을 우선한다.
+    1순위는 서버에 직접 물어보기(cred_email). 사람이 순환기 모르게 로그인하면 기록이
+    낡는데(사용량이 없어 계정을 바꾸는 건 흔한 일이다), 그 낡은 값을 믿고 되저장하면
+    엉뚱한 라벨에 다른 계정 자격이 들어간다.
+    조회가 안 되면(연결 실패 등) 지문 대조로 떨어진다 — 갱신 안 된 자격은 이걸로 잡힌다.
     """
-    import subprocess
-
-    try:
-        accounts = json.loads((BASE / "accounts.json").read_text(encoding="utf-8"))
-        by_mail = {(x.get("email") or "").lower(): x.get("label")
-                   for x in accounts if x.get("email") and x.get("label")}
-    except Exception:
+    label = label_of_email(cred_email(LIVE))
+    if label:
+        return label
+    live_fp = _fingerprint(LIVE)
+    if live_fp is None:
         return None
-    if not by_mail:
-        return None
-    try:
-        r = subprocess.run(
-            ["claude", "auth", "status", "--text"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=str(BASE), shell=(sys.platform == "win32"), timeout=60,
-        )
-    except Exception:
-        return None
-    m = re.search(r"Email:\s*(\S+)", r.stdout or "")
-    return by_mail.get(m.group(1).lower()) if m else None
+    for f in sorted(CREDS_DIR.glob("*.json")):
+        if _fingerprint(f) == live_fp:
+            return f.stem
+    return None
 
 
 def save_back(leaving) -> str:

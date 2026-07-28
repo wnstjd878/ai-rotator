@@ -9,8 +9,12 @@
       (4) 코드를 로그인 프로세스의 표준입력으로 넘긴다 (화면·명령 인자에 절대 안 싣는다)
       (5) claude auth status 로 어느 계정이 붙었는지 확인하고 save_account 로 저장한다
 실행: python relogin.py <라벨>              그 계정을 다시 로그인해 creds/<라벨>.json 갱신
+                                            (끝나면 쓰던 계정으로 되돌린다 — 한도 없는
+                                             계정으로 갈아타지는 사고 방지)
+      python relogin.py <라벨> --stay       갱신 후 그 계정을 그대로 쓴다(되돌리지 않음)
       python relogin.py <라벨> --setup      전용 크롬만 띄운다(그 계정으로 1회 로그인해둘 때)
       python relogin.py --status            계정별 재발급 열쇠 만료일 보기
+      python relogin.py --reset             전용 크롬을 전부 닫고 폴더를 비운다(처음부터 다시)
 전제: 계정별 전용 크롬 폴더(chrome/<라벨>)에 그 계정이 한 번 로그인돼 있어야 자동으로 끝난다.
       비어 있으면 창을 띄운 채 기다리므로 그 창에서 사람이 한 번 로그인하면 된다(그 뒤론 자동).
       사용자가 쓰는 크롬은 건드리지 않는다(전용 폴더 + 전용 포트).
@@ -325,13 +329,14 @@ def finish_login(p, code):
 
 
 def current_email():
-    r = subprocess.run(
-        ["claude", "auth", "status", "--text"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(BASE), shell=(sys.platform == "win32"), timeout=120,
-    )
-    m = re.search(r"Email:\s*(\S+)", r.stdout or "")
-    return m.group(1) if m else None
+    """지금 꽂힌 자격이 실제로 누구 계정인지.
+
+    claude auth status 는 별도 캐시를 읽어 파일 교체 후 낡으므로 쓰지 않는다
+    (switch_account.cred_email 설명 참조). 자격으로 서버에 직접 물어본다.
+    """
+    import switch_account as sa
+
+    return sa.cred_email()
 
 
 def expected_email(label):
@@ -345,11 +350,40 @@ def expected_email(label):
     return None
 
 
-def relogin(label):
+def restore_previous(before):
+    """재로그인 전에 쓰던 계정으로 되돌린다.
+
+    claude auth login 은 그 계정을 지금 쓰는 자격 자리에 꽂아버린다. 만료 갱신만 하려고
+    부른 건데 한도가 0% 인 계정으로 갈아타지면 곤란하다(2026-07-28 실제로 그랬음).
+    그래서 갱신이 끝나면 원래 쓰던 계정으로 되돌려 놓는다.
+    """
+    if not before:
+        return
+    import switch_account as sa
+
+    if sa.live_label() == before:
+        return  # 이미 그 계정이면 할 일 없음
+    src = CREDS_DIR / f"{before}.json"
+    if not src.exists():
+        print(f"[relogin] 되돌릴 '{before}' 저장본이 없어 그대로 둡니다.")
+        return
+    r = subprocess.run([sys.executable, str(BASE / "claude_pool.py"), "--use", before],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode == 0:
+        print(f"[relogin] 쓰던 계정 '{before}' 로 되돌렸습니다.")
+    else:
+        print(f"[relogin] '{before}' 로 못 되돌렸습니다: {(r.stderr or r.stdout).strip()[:200]}")
+
+
+def relogin(label, keep_current=True):
     if label not in labels():
         print(f"[relogin] '{label}' 은 accounts.json 에 없는 라벨입니다. 쓸 수 있는 라벨: {labels()}")
         return 1
     from playwright.sync_api import sync_playwright
+
+    import switch_account as sa
+
+    before = sa.live_label() if keep_current else None  # 지금 쓰는 계정을 기억해둔다
 
     port = launch_chrome(label)
     print("[relogin] 로그인 절차를 시작합니다...")
@@ -363,6 +397,7 @@ def relogin(label):
     except Exception as e:
         p.kill()
         print(f"[relogin] 브라우저 단계에서 막혔습니다: {type(e).__name__}: {e}")
+        restore_previous(before)
         return 1
 
     if code == "DONE":
@@ -376,10 +411,12 @@ def relogin(label):
         ok, tail = finish_login(p, code)
         if not ok:
             print(f"[relogin] 로그인이 끝나지 않았습니다: {tail}")
+            restore_previous(before)
             return 1
     else:
         p.kill()
         print("[relogin] 인증 코드를 못 받았습니다.")
+        restore_previous(before)
         return 1
 
     email = current_email()
@@ -388,16 +425,19 @@ def relogin(label):
     if want and email and want.lower() != email.lower():
         print(f"[relogin] 경고: '{label}' 는 {want} 여야 하는데 {email} 로 로그인됐습니다.")
         print("[relogin] 저장하지 않고 멈춥니다(라벨이 섞이면 계정을 잃습니다).")
+        restore_previous(before)
         return 1
 
     r = subprocess.run([sys.executable, str(BASE / "save_account.py"), label],
                        text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         print("[relogin] 자격 저장에 실패했습니다.")
+        restore_previous(before)
         return 1
     if email and not want:
         print(f"[relogin] 참고: accounts.json 의 '{label}' 에 email 을 적어두면 다음부터 대조합니다.")
     print(f"[relogin] '{label}' 재로그인 완료.")
+    restore_previous(before)  # 만료 갱신하려다 한도 없는 계정으로 갈아타지 않게
     return 0
 
 
@@ -444,6 +484,8 @@ def main():
                 print(f"[relogin] 폴더를 다 못 지웠습니다({type(e).__name__}). 창이 아직 떠 있을 수 있습니다.")
         return 0
     label = args[0]
+    if "--stay" in args:  # 일부러 그 계정으로 갈아타고 싶을 때
+        return relogin(label, keep_current=False)
     if "--setup" in args:
         port = launch_chrome(label, open_login=True)
         mail = expected_email(label) or "(accounts.json 에 email 없음)"
