@@ -92,15 +92,24 @@ def claude_bin() -> str:
     raise RuntimeError("claude CLI 를 못 찾았습니다 (PATH 및 알려진 경로에 없음)")
 
 
-def _switch(label: str) -> bool:
-    """switch_account.py 를 그대로 재사용해 자격을 교체한다."""
+def _switch(label: str, leaving: str | None = None) -> bool:
+    """switch_account.py 를 그대로 재사용해 자격을 교체한다.
+
+    leaving 은 지금까지 쓰던 계정이다. 갈아타기 직전에 그 계정의 갱신된 자격을
+    creds/<라벨>.json 으로 되저장하라는 뜻(안 하면 그 계정 자격이 죽는다 — save_back 참조).
+    """
+    cmd = [sys.executable, str(BASE / "switch_account.py"), label]
+    if leaving:
+        cmd += ["--from", leaving]
     ret = subprocess.run(
-        [sys.executable, str(BASE / "switch_account.py"), label],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if ret.returncode != 0:
         log(f"자격 교체 실패({label}): {(ret.stderr or ret.stdout).strip()[:200]}")
         return False
+    for line in (ret.stdout or "").splitlines():
+        if line.startswith("[save-back]"):
+            log(line.strip())  # 되저장 결과는 남긴다(유실이 다시 생기면 여기서 보인다)
     return True
 
 
@@ -153,9 +162,9 @@ def use(label: str) -> int:
         print(f"'{label}' 자격 저장본이 없습니다. 저장된 계정: {', '.join(st.saved_labels()) or '(없음)'}")
         return 1
     with st.with_lock():
-        if not _switch(label):
-            return 1
         state = st.prune_blocked(st.load_state())
+        if not _switch(label, leaving=state.get("current")):
+            return 1
         st.clear_blocked_label(state, label)  # 손으로 고른 계정은 막힘 표시를 푼다(로컬+공유)
         # manual=True: 사람이 고른 계정은 그 계정이 막힐 때까지 되돌리기가 안 건드린다
         st.set_current(state, label, "수동 지정", manual=True)
@@ -182,7 +191,7 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN) -> int:
             print(f"쓸 수 있는 계정이 없습니다. 가장 빨리 풀리는 시각: {when}")
             print(st.describe(state))
             return 2
-        if not _switch(nxt):
+        if not _switch(nxt, leaving=cur):
             st.save_state(state)
             return 1
         st.set_current(state, nxt, f"{cur or '?'} → {nxt} (사람 지정)")
@@ -233,7 +242,7 @@ def ensure_usable() -> int:
                 print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진. 갈아탈 계정이 없습니다. "
                       f"가장 빨리 풀리는 시각: {when}")
                 return 2
-            if not _switch(nxt):
+            if not _switch(nxt, leaving=cur):
                 st.save_state(state)
                 return 1
             if started_from is None:
@@ -269,7 +278,7 @@ def _reclaim_locked(state: dict):
     if nxt is None:
         return None
     st.note_reclaim(state)  # 교체가 실패해도 기록해 재시도 폭주를 막는다
-    if not _switch(nxt):
+    if not _switch(nxt, leaving=cur):
         return None
     st.set_current(state, nxt, f"{cur} → {nxt} (앞순위 계정이 풀려 되돌림)")
     log(f"'{cur}' 에서 앞순위 '{nxt}' 로 되돌립니다(순차 소진)")
@@ -306,7 +315,7 @@ def _switch_if_blocked(state: dict):
         if not cur or not st.is_blocked(s, cur):
             return cur  # 그 사이 다른 프로세스가 바꿨다
         nxt = st.pick_next(s, exclude=cur)
-        if nxt is None or not _switch(nxt):
+        if nxt is None or not _switch(nxt, leaving=cur):
             return cur  # 갈아탈 데가 없으면 기존 흐름(거절 → 소진 알림)이 처리한다
         st.set_current(s, nxt, f"{cur} → {nxt} (이미 막힌 계정이라 미리 교체)")
         st.save_state(s)
@@ -367,7 +376,7 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
             # 실제 전송은 잠금 밖에서 한다. 통신이 잠금을 붙잡으면 뒤에 온 봇들이 대기하다 터진다.
             raise AllAccountsExhausted(msg, reset_at=reset_at, notify_message=msg if should_notify else None)
 
-        if not _switch(nxt):
+        if not _switch(nxt, leaving=current):
             st.save_state(state)
             raise AllAccountsExhausted(f"'{nxt}' 로 자격 교체에 실패했습니다.")
 

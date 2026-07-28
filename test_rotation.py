@@ -59,6 +59,7 @@ class Fake:
         self.switch_ok = switch_ok
         self.calls = []
         self.switches = []
+        self.leavings = []   # 갈아탈 때 '떠나는 계정'을 제대로 넘겼는지 확인용
         self.notices = []
 
     def run(self, args, **kwargs):
@@ -67,8 +68,9 @@ class Fake:
         rc, out, err = self.per_label.get(label, (1, "", "unknown account"))
         return subprocess.CompletedProcess(args, rc, out, err)
 
-    def switch(self, label):
+    def switch(self, label, leaving=None):
         self.switches.append(label)
+        self.leavings.append(leaving)
         return self.switch_ok
 
     def notify(self, message):
@@ -643,6 +645,71 @@ def case_shared_three_machines(tmp):
     check("A 막힌 뒤 세 머신 모두 B 로 수렴", picks == ["B", "B", "B"], f"골른 것={picks}")
 
 
+def case_save_back(tmp):
+    print("\n[23] 갈아탈 때 쓰던 계정의 갱신된 자격을 되저장한다")
+    import switch_account as sa
+
+    real_creds, real_live = sa.CREDS_DIR, sa.LIVE
+    root = Path(tmp) / "saveback"
+    (root / "creds").mkdir(parents=True, exist_ok=True)
+    (root / "home").mkdir(parents=True, exist_ok=True)
+    sa.CREDS_DIR = root / "creds"
+    sa.LIVE = root / "home" / ".credentials.json"
+
+    def write(path, token):
+        path.write_text(json.dumps({"claudeAiOauth": {"refreshToken": token, "expiresAt": 1}}),
+                        encoding="utf-8")
+
+    try:
+        a = sa.CREDS_DIR / "A.json"
+        write(a, "옛-A")
+        write(sa.CREDS_DIR / "B.json", "토큰-B")
+
+        # A 를 쓰는 동안 claude 가 자격을 갱신했다 → 떠날 때 A.json 이 최신으로 바뀌어야 한다
+        write(sa.LIVE, "새-A")
+        msg = sa.save_back("A")
+        check("갱신분을 되저장함", "되저장했습니다" in msg, msg)
+        check("A 저장본이 최신과 같아짐", sa._fingerprint(a) == sa._fingerprint(sa.LIVE))
+        check("한 세대 백업이 남음", (sa.CREDS_DIR / "prev" / "A.json").exists())
+
+        msg = sa.save_back("A")
+        check("변화 없으면 안 씀", "변화 없음" in msg, msg)
+
+        # 기록이 어긋나 실제로는 B 자격이 꽂혀 있을 때 A 를 덮어쓰면 계정 하나를 잃는다
+        write(sa.LIVE, "토큰-B")
+        before = sa._fingerprint(a)
+        msg = sa.save_back("A")
+        check("다른 계정 자격이면 안 덮어씀", "덮어쓰지 않고" in msg, msg)
+        check("A 저장본 그대로", sa._fingerprint(a) == before)
+
+        check("저장본 없는 라벨은 건너뜀", "저장본이 없어" in sa.save_back("Z"))
+        check("떠나는 계정을 모르면 건너뜀", "몰라" in sa.save_back(None))
+        check("백업 폴더가 라벨 목록에 안 섞임", sa.list_labels() == ["A", "B"], sa.list_labels())
+    finally:
+        sa.CREDS_DIR, sa.LIVE = real_creds, real_live
+
+
+def case_switch_passes_leaving(tmp):
+    print("\n[24] 계정을 바꿀 때 떠나는 계정을 함께 넘긴다")
+    setup(tmp, ["A", "B"], "A")
+    fake = Fake({"A": (1, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake)
+    claude_pool.run(["claude", "-p", "안녕"])
+    check("한도 교체 때 떠나는 계정 A 를 넘김", fake.leavings == ["A"], f"leavings={fake.leavings}")
+
+    setup(tmp, ["A", "B"], "A")
+    fake2 = Fake({})
+    install(fake2)
+    claude_pool.next_account()
+    check("수동 전환도 떠나는 계정을 넘김", fake2.leavings == ["A"], f"leavings={fake2.leavings}")
+
+    setup(tmp, ["A", "B"], "A")
+    fake3 = Fake({})
+    install(fake3)
+    claude_pool.use("B")
+    check("계정 지정도 떠나는 계정을 넘김", fake3.leavings == ["A"], f"leavings={fake3.leavings}")
+
+
 def case_shared_iso_roundtrip():
     print("\n[20] 공유 저장소 시각 변환 왕복")
     import shared_state as sh
@@ -693,7 +760,8 @@ def main():
                      case_sequential_lowest, case_reset_soonest_first,
                      case_skip_blocked_before_call, case_reclaim_when_freed,
                      case_manual_use_not_reverted, case_shared_merge,
-                     case_shared_three_machines):
+                     case_shared_three_machines, case_save_back,
+                     case_switch_passes_leaving):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
