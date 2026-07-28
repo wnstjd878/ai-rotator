@@ -330,12 +330,29 @@ def _cred_alive(label: str | None) -> bool:
     아니다 — 출입증(access token)은 8시간짜리라 저장본이 멀쩡해도 조회가 안 될 수 있다.
     그래서 확인 못 한 경우는 False 로 돌려 기존 판정(막고 넘김)을 그대로 따르게 한다.
     """
-    if not label or not usage_check:
+    if not label:
         return False
+    path = BASE / "creds" / f"{label}.json"
+    # 1순위: 서버가 답하면 확실히 살아 있다.
+    if usage_check:
+        try:
+            if usage_check.get_usage(path):
+                return True
+        except Exception:
+            pass
+    # 2순위: 서버가 안 답해도 **재발급 열쇠 만료일**이 남았으면 저장본은 멀쩡하다.
+    # 출입증은 8시간짜리라 자주 만료된다. 그걸 죽음으로 보면 멀쩡한 계정이 줄줄이 막힌다
+    # (2026-07-29 실사고: 1초 사이에 보호가 뚫려 네 계정이 다 막혔다).
     try:
-        return bool(usage_check.get_usage(BASE / "creds" / f"{label}.json"))
+        import json as _json
+        import time as _time
+        o = _json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth", {})
+        exp_ms = int(o.get("refreshTokenExpiresAt") or 0)
+        if exp_ms and exp_ms / 1000 > _time.time():
+            return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
