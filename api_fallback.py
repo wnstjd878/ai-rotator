@@ -35,10 +35,12 @@ DEFAULT_MODEL = os.environ.get("API_FALLBACK_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = int(os.environ.get("API_FALLBACK_MAX_TOKENS", "8000"))
 
 # 100만 토큰당 달러. 사용액을 어림해 상한을 지키려는 것이지 청구서가 아니다.
+# 100만 토큰당 (입력, 출력) 달러. 2026-07-29 실제 단가로 정정 —
+# opus 가 옛 값(15/75)이라 3배로 계산돼 상한이 1/3 지점에서 걸리고 누적이 부풀었다.
 PRICE = {
-    "opus": (15.0, 75.0),
+    "opus": (5.0, 25.0),
     "sonnet": (3.0, 15.0),
-    "haiku": (0.8, 4.0),
+    "haiku": (1.0, 5.0),
 }
 
 
