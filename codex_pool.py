@@ -438,6 +438,37 @@ def _finish(proc, args, want_check):
     return proc
 
 
+def _print_home() -> int:
+    """지금 써야 할 계정의 폴더 경로를 출력한다. 필요하면 계정을 갈아탄다.
+
+    래퍼(gcauto.ps1)가 codex 를 켜기 직전에 부른다. 여기서 갈아타면 사람이 gn 을
+    따로 칠 일이 없다. 갈아탄 사실은 기록에 남기되 알림은 안 보낸다
+    (막을 때 이미 한 번 나갔다).
+    """
+    state = st.prune_blocked(st.load_state())
+    cur = state.get("current")
+    need_switch = (not cur) or (not codex_home.is_logged_in(cur)) or st.is_blocked(state, cur)
+    if need_switch:
+        with st.with_lock():
+            s = st.prune_blocked(st.load_state())
+            c = s.get("current")
+            if (not c) or (not codex_home.is_logged_in(c)) or st.is_blocked(s, c):
+                nxt = st.pick_next(s, exclude=None)
+                if nxt is None:
+                    return 1  # 쓸 계정이 없다 — 래퍼가 안내를 띄운다
+                if nxt != c:
+                    st.set_current(s, nxt, f"{c or '?'} → {nxt} (켜기 전 자동 전환)")
+                    st.save_state(s)
+                    log(f"'{c or '?'}' 는 못 쓰는 상태라 켜기 전에 '{nxt}' 로 전환")
+                cur = nxt
+            else:
+                cur = c
+    if not cur:
+        return 1
+    print(str(codex_home.home_of(cur)))
+    return 0
+
+
 def run_codex(cli_args, **kwargs):
     """codex 실행 파일 경로를 알아서 붙여주는 짧은 형태. run() 과 동작 같음."""
     return run([codex_bin(), *cli_args], **kwargs)
@@ -481,14 +512,11 @@ def main():
         print(f"{cur} 여유 있음: {codex_usage.summarize(u)}")
         return 0
     if argv[0] == "--home":
-        # 지금 계정의 codex 폴더 경로만 출력한다(래퍼가 CODEX_HOME 으로 쓴다).
-        cur = (st.prune_blocked(st.load_state()) or {}).get("current")
-        if not cur or not codex_home.is_logged_in(cur):
-            cur = st.pick_next(st.prune_blocked(st.load_state())) or cur
-        if not cur:
-            return 1
-        print(str(codex_home.home_of(cur)))
-        return 0
+        # 지금 써야 할 계정의 codex 폴더 경로(래퍼가 CODEX_HOME 으로 쓴다).
+        # 지금 계정이 막혀 있거나 로그인이 없으면 여기서 갈아탄다 — 사람이 명령을
+        # 따로 칠 필요가 없게. 막힘은 머신들이 공유하므로 다른 머신이 한도로 막아둔
+        # 계정을 이 머신이 그대로 켜서 똑같이 거절받는 헛걸음도 여기서 막힌다.
+        return _print_home()
     if argv[0] == "--":
         try:
             proc = run_codex(argv[1:])

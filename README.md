@@ -140,16 +140,24 @@ python codex_home.py      # 계정별 폴더와 로그인 여부 확인
 ### 매일 사용
 
 ```
+codex                           평소대로 쓰면 된다. 계정 전환은 알아서 일어난다
 gs                              계정별 사용률 (주간/세션 남은 %, 초기화 시각)
-gc                              codex 를 감싸 실행 (한도로 끝나면 자동 전환 후 재시작)
-gn                              지금 계정을 한도로 보고 다음 계정으로
+gn                              지금 계정을 한도로 보고 다음 계정으로 (수동)
 python codex_pool.py --use B    B 계정으로 바로 지정
-python codex_pool.py --home     지금 계정의 codex 폴더 경로 (래퍼가 쓴다)
+python codex_pool.py --home     지금 써야 할 계정의 폴더 (래퍼가 쓴다. 필요하면 여기서 갈아탄다)
 python codex_alert.py --preview 알림 문구 미리보기
 ```
 
-**`codex` 를 그냥 치면 기본 폴더(계정 A)로 돈다.** 순환을 태우려면 `gc` 를 쓴다
-(클로드에서 `claude` 대신 `cc` 를 쓰는 것과 같다).
+**`codex` 자체가 감싸져 있다**(PowerShell 프로필의 `codex` 함수 → `gcauto.ps1`). 그래서 명령을
+따로 외울 필요가 없다. 켤 때마다 이 순서로 돈다.
+
+1. 켜기 전: 지금 계정이 막혔거나 한도면 다음 계정으로 바꿔서 켠다
+2. 그 계정의 폴더(`CODEX_HOME`)를 걸고 codex 를 실행
+3. 끝난 뒤: 한도에 걸렸으면 다음 계정으로 바꿔 다시 켠다
+
+`login` / `mcp` / `--version` 같은 관리·조회 명령은 순환을 안 태우고 그대로 넘긴다.
+`codex logout` 은 막는다 — 그 폴더의 자격을 지우기 때문이다.
+`gc` 는 `codex` 와 같은 것(클로드의 `cc` 자리).
 
 정기 알림: Windows 본체 작업 스케줄러 `ai-rotator-codex-alert` 가 10분마다
 `codex_alert.py` 를 돌린다. 주간/세션이 50·70·90% 를 넘을 때 그 구간에 한 번씩 알린다.

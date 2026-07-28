@@ -418,6 +418,29 @@ def case_revoked_first_call(tmp):
     check("멀쩡한 계정을 안 막음", not (st.load_state().get("blocked") or {}))
 
 
+def case_home_picks_usable(tmp):
+    print("\n[16] 켜기 직전에 못 쓰는 계정이면 알아서 갈아탄다 (--home)")
+    setup(tmp, ["A", "B"], "A")
+    check("평소엔 지금 계정 폴더", codex_pool._print_home() == 0 and
+          st.load_state()["current"] == "A")
+
+    # A 가 막혀 있으면(다른 머신이 한도로 막아둔 경우 포함) B 를 골라야 한다
+    with st.with_lock():
+        s = st.prune_blocked(st.load_state())
+        st.mark_blocked(s, "A", time.time() + 3600, "시험")
+        st.save_state(s)
+    rc = codex_pool._print_home()
+    check("막힌 계정이면 다음 계정으로", rc == 0 and st.load_state()["current"] == "B",
+          f"rc={rc} current={st.load_state().get('current')}")
+
+    # 둘 다 막히면 실패를 알려 래퍼가 안내를 띄우게 한다
+    with st.with_lock():
+        s = st.prune_blocked(st.load_state())
+        st.mark_blocked(s, "B", time.time() + 3600, "시험")
+        st.save_state(s)
+    check("전부 막히면 실패로 알림", codex_pool._print_home() == 1)
+
+
 def case_shared_namespace(tmp):
     print("\n[11] 공유 저장소에서 지피티와 클로드의 막힘이 안 섞인다")
     setup(tmp, ["A", "B"], "A")
@@ -472,7 +495,7 @@ def main():
              case_limit_text_but_server_ok, case_ignored_limits, case_all_exhausted,
              case_already_switched, case_auth_stops, case_reset_from_usage,
              case_folder_switch, case_revoked_copy, case_revoked_first_call,
-             case_not_logged_in_skipped, case_shared_namespace]
+             case_not_logged_in_skipped, case_home_picks_usable, case_shared_namespace]
     for fn in cases:
         with tempfile.TemporaryDirectory() as tmp:
             fn(tmp)
