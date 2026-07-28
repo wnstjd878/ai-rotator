@@ -429,7 +429,7 @@ def _warn_cred_place(label: str | None) -> bool:
     if not acct:
         return False
     why = "열쇠꾸러미에 옛 자격이 남아 있습니다"
-    log(f"로그인 거절. 그런데 {why} — 계정 문제가 아니라 자격을 읽는 자리 문제로 봅니다.")
+    log(f"로그인 거절. 그런데 {why}. 계정 문제가 아니라 자격을 읽는 자리 문제로 봅니다.")
     if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
         _notify_cred_place(why, [label] if label else [], acct)
     return True
@@ -441,7 +441,9 @@ def _notify_cred_place(why: str, labels: list, account: str | None = None) -> No
     account 는 열쇠꾸러미 항목에 걸린 계정 이름이다. 지우는 명령에 그 이름이 그대로 들어가야
     실제로 지워진다(찾을 때 쓴 조건과 지울 때 쓴 조건이 다르면 지워도 항목이 남는다).
     """
-    who = account or os.environ.get("USER") or "kwon"
+    import shlex
+    # 계정 이름에 공백이 있으면 인용 없이는 -a 값이 잘려 실제로 안 지워진다(코덱스 검수).
+    who = shlex.quote(account or os.environ.get("USER") or "kwon")
     notify(
         "클로드 로그인이 계정 문제가 아니라 이 컴퓨터에서 막혀 있습니다.\n\n"
         f"무슨 일: {why}. 그래서 어느 계정으로 바꿔도 로그인 거절만 돌아옵니다. "
@@ -494,7 +496,7 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                     # 계정이 죽은 게 아니라 이 컴퓨터가 자격을 읽는 자리가 깨진 경우다.
                     # 여기서 계정을 재우면 멀쩡한 계정이 줄줄이 잠기고(2026-07-29 B 가 그렇게
                     # 잠겼다), 봇들이 종량제로 넘어가 카드가 나간다. 막지 말고 사람에게 알린다.
-                    log(f"'{used_label}' 로그인 거절. 그런데 {place_why} — 계정 문제가 아니라 "
+                    log(f"'{used_label}' 로그인 거절. 그런데 {place_why}. 계정 문제가 아니라 "
                         f"자격을 읽는 자리 문제로 봅니다. 막지 않고 그대로 다시 시도합니다.")
                     # 알림은 시간당 한 건만. 봇 수십 곳이 각자 부르면 알림이 쏟아진다.
                     if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
