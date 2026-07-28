@@ -56,6 +56,29 @@ def find_real_codex() -> str | None:
 REAL_CODEX = find_real_codex()
 
 
+def _ensure_node_on_path() -> None:
+    """codex 가 부르는 node 를 찾을 수 있게 PATH 를 보강한다.
+
+    ssh 로 붙은 Mac 은 PATH 가 /usr/bin:/bin 뿐이라 그대로 넘기면 codex 가 127 로 죽는다.
+    순환기를 못 불러와도 이건 해 둬야 통과(passthrough)가 정상 동작한다.
+    """
+    try:
+        if ROTATOR_DIR not in sys.path:
+            sys.path.insert(0, ROTATOR_DIR)
+        import codex_home
+
+        codex_home.ensure_path()
+    except Exception:
+        if REAL_CODEX:  # 순환기를 못 불러와도 최소한 실행 파일 폴더는 붙인다
+            d = os.path.dirname(os.path.realpath(REAL_CODEX))
+            cur = os.environ.get("PATH", "")
+            if d not in cur.split(os.pathsep):
+                os.environ["PATH"] = f"{d}{os.pathsep}{cur}" if cur else d
+
+
+_ensure_node_on_path()
+
+
 def passthrough(argv):
     """진짜 codex 로 완전히 넘긴다.
 

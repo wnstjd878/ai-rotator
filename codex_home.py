@@ -114,6 +114,22 @@ def codex_bin() -> str:
     return "codex"
 
 
+def ensure_path() -> None:
+    """지금 프로세스의 PATH 에 codex 실행 파일 폴더를 붙인다.
+
+    가로채기(codex_shim)가 진짜 codex 를 그대로 실행할 때 쓴다. codex 는 node 로 도는데
+    ssh 비대화형 Mac 은 PATH 가 /usr/bin:/bin 뿐이라 node 를 못 찾고 죽는다.
+    """
+    import os
+
+    binpath = Path(codex_bin()).parent
+    if not binpath.exists():
+        return
+    cur = os.environ.get("PATH", "")
+    if str(binpath) not in cur.split(os.pathsep):
+        os.environ["PATH"] = f"{binpath}{os.pathsep}{cur}" if cur else str(binpath)
+
+
 def env_for(label: str, base_env: dict | None = None) -> dict:
     """그 계정으로 codex 를 실행할 때 쓸 환경. CODEX_HOME 을 바꾸고 PATH 를 보강한다."""
     import os
