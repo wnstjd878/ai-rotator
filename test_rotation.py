@@ -833,6 +833,41 @@ def case_shim_prompt_argument():
     check("대화형은 단발 아님", not claude_shim.is_single_shot(["--model", "opus"]))
 
 
+def case_ok_envelope_bad_exitcode(tmp):
+    print("\n[27] 껍데기가 성공이라 말하면 종료코드가 0 이 아니어도 계정을 막지 않는다")
+    # 2026-07-29 실제 사고. 봇이 어제 자격 사고 로그를 판정시키자 답변 본문에
+    # 'OAuth session expired' 가 들어왔고, 종료코드만 0 이 아니어서(끊긴 파이프 등)
+    # 그 답변을 오류로 읽어 계정 넷이 통째로 막혔다. 그 뒤 봇들이 종량제로 넘어가 카드가 나갔다.
+    answer = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": "로그를 보니 Failed to authenticate: OAuth session expired and "
+                  "could not be refreshed 와 usage limit reached 가 찍혀 있습니다",
+        "stop_reason": "stop_sequence",
+    }, ensure_ascii=False)
+    check("계정 죽음으로 안 봄", limit_detect.classify(1, answer, "") == "error",
+          f"실제={limit_detect.classify(1, answer, '')}")
+    check("사유에 답변 본문이 안 실림",
+          "OAuth session expired" not in limit_detect.short_reason(answer, ""))
+
+    # 진짜 실패는 그대로 잡아야 한다
+    dead = json.dumps({"type": "result", "subtype": "error_during_execution",
+                       "is_error": True,
+                       "result": "Failed to authenticate: OAuth session expired and "
+                                 "could not be refreshed"}, ensure_ascii=False)
+    check("진짜 자격 죽음은 여전히 dead", limit_detect.classify(1, dead, "") == "dead")
+    check("오류통로 문구는 여전히 limit",
+          limit_detect.classify(1, answer, "Claude usage limit reached") == "limit")
+
+    setup(tmp, ["A", "B", "C", "D"], "A")
+    fake = Fake({"A": (1, answer, "")})
+    install(fake)
+    claude_pool.run(["claude", "-p", "이 로그 판정해줘"])
+    check("계정 교체 없음", fake.switches == [], f"switches={fake.switches}")
+    check("계정을 막지 않음", st.load_state()["blocked"] == {},
+          f"blocked={st.load_state()['blocked']}")
+    check("전 계정 소진 알림 없음", fake.notices == [], f"notices={fake.notices}")
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -850,7 +885,7 @@ def main():
                      case_manual_use_not_reverted, case_shared_merge,
                      case_shared_three_machines, case_save_back,
                      case_save_back_live_label, case_live_label_source,
-                     case_switch_passes_leaving):
+                     case_switch_passes_leaving, case_ok_envelope_bad_exitcode):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

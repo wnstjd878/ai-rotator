@@ -10,9 +10,12 @@
       (1) 실패인지 판정할 때 claude 자신의 결과 껍데기(type=="result")만 인정한다.
           모델이 쓴 답변 안에 {"is_error": true} 같은 JSON 이 들어 있어도 실패로 보지 않는다.
           봇이 "이 로그를 JSON 으로 판정해줘" 같은 일을 시키면 실제로 그런 답변이 나온다.
-      (2) 한도 문구는 claude 가 낸 오류 자리(결과 껍데기의 result/error, 오류출력)에서만 찾는다.
+      (2) 한도 문구는 claude 가 낸 오류 자리(결과 껍데기의 error 자리, 오류출력)에서만 찾는다.
           모델 답변 본문이나 웹에서 가져온 글에 'rate limit' 이 있어도 넘어가지 않는다.
-      이 두 겹이 없으면 정상 응답 한 번으로 계정 네 개가 통째로 막힌다.
+      (3) 껍데기가 스스로 성공이라고 말하면(is_error 아님 + subtype=success) 그 안의
+          `result` 는 오류 메시지가 아니라 모델 답변 본문이므로 판정 자리에서 뺀다.
+          종료 코드만 0 이 아닌 경우(끊긴 파이프 등)에 답변 본문을 오류로 읽던 구멍이다.
+      이 세 겹이 없으면 정상 응답 한 번으로 계정 네 개가 통째로 막힌다.
 의도적 미구현: 남은 사용량을 미리 재서 선제 전환하지 않는다. 정확한 잔여량을 알 방법이
       없어 오차가 크고, 거절이 오면 그때 넘기는 쪽이 단순하고 확실하다.
 마지막 점검: 2026-07-22
@@ -123,10 +126,29 @@ def _result_envelope(stdout: str) -> dict | None:
     return None
 
 
+def envelope_says_ok(env: dict | None) -> bool:
+    """껍데기가 스스로 성공이라고 말하는지(is_error 아님 + subtype 이 success).
+
+    이때의 result 는 오류 메시지가 아니라 모델이 쓴 답변 본문이다.
+    """
+    if not isinstance(env, dict):
+        return False
+    return not env.get("is_error") and env.get("subtype") == "success"
+
+
 def _envelope_error_text(env: dict) -> str:
-    """결과 껍데기에서 오류 사유가 담기는 자리만 모은다. 모델 답변 본문은 안 쓴다."""
+    """결과 껍데기에서 오류 사유가 담기는 자리만 모은다. 모델 답변 본문은 안 쓴다.
+
+    `result` 는 실패일 때만 오류 메시지이고, 성공일 때는 모델이 쓴 답변 본문이다.
+    봇이 "이 오류 로그를 판정해줘" 같은 일을 시키면 그 답변에 'OAuth session expired'
+    같은 문구가 그대로 들어온다. 껍데기가 성공이라고 말하면 result 를 빼야
+    정상 응답 한 번으로 계정이 통째로 막히는 사고를 막는다(2026-07-29 실제 사고).
+    """
     parts = []
+    said_ok = envelope_says_ok(env)
     for key in ("result", "error", "error_message", "subtype", "api_error_status", "stop_reason"):
+        if key == "result" and said_ok:
+            continue
         val = env.get(key)
         if isinstance(val, str):
             parts.append(val)
