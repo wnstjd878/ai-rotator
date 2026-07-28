@@ -2,6 +2,7 @@
 creds/
 pw-profile/
 captured/
+chrome/
 *.credentials.json
 *.bak
 __pycache__/
