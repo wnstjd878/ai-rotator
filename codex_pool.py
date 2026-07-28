@@ -96,46 +96,20 @@ def codex_bin() -> str:
 
 
 def cred_path(label: str) -> Path:
-    return BASE / "creds" / "codex" / f"{label}.json"
+    """그 계정의 자격 파일 자리. 계정마다 폴더가 따로다(복사본이 아니라 원본)."""
+    return codex_home.auth_path(label)
 
 
-def _switch(label: str, current: str | None) -> bool:
-    """자격을 교체한다. 교체 전에 지금 쓰던 계정 자격을 그 라벨 자리에 되백업한다."""
-    try:
-        ok, note = codex_switch.switch_to(label, current)
-    except Exception as e:
-        log(f"자격 교체 실패({label}): {type(e).__name__}")
-        return False
-    if not ok:
-        log(f"자격 교체 실패({label}): {note}")
-        return False
-    if note:
-        log(note)
-    return True
+def _switch(label: str, current: str | None = None) -> bool:
+    """쓸 계정을 바꾼다. 파일은 건드리지 않는다 — 다음 실행에 그 폴더를 쓰게 할 뿐이다.
 
-
-def sync_current_cred(label: str | None = None) -> str:
-    """지금 쓰는 자격이 사본보다 새로우면 사본을 최신으로 맞춘다. 사유를 돌려준다.
-
-    왜 필요한가(2026-07-28 실측): codex 는 돌면서 자격을 갱신하고, 그때 갱신용 토큰도
-    함께 바뀔 수 있다. 낡은 사본을 나중에 꽂으면
-    "refresh token was revoked" 로 거절당해 그 계정이 통째로 못 쓰게 된다.
-    교체 직전에만 되백업하면, 교체 없이 며칠 쓰다 꺼진 경우의 사본이 낡은 채로 남는다.
-    그래서 실행이 끝날 때마다 값싸게(수정 시각 비교) 확인하고 달라졌을 때만 복사한다.
+    그 폴더에 로그인이 없으면 바꾸지 않는다(바꿔봐야 로그인 거절만 받는다).
     """
-    if label is None:
-        label = (st.load_state() or {}).get("current")
-    if not label:
-        return ""
-    try:
-        if not codex_switch.is_stale(label):
-            return ""
-        note = codex_switch.backup_current(label)
-    except Exception as e:
-        return f"자격 최신화 실패({type(e).__name__})"
-    if note:
-        log(note)
-    return note
+    if not codex_home.is_logged_in(label):
+        log(f"계정 교체 실패({label}): 그 폴더에 로그인이 없습니다 "
+            f"(python codex_login.py {label})")
+        return False
+    return True
 
 
 def notify(message: str) -> None:
@@ -160,7 +134,7 @@ def status_text() -> str:
         if label == cur:
             marks.append("현재 사용 중")
         if label not in saved:
-            marks.append("자격 없음")
+            marks.append(f"로그인 없음 (python codex_login.py {label})")
         until = (state.get("blocked") or {}).get(label)
         if until and float(until) > now:
             left = int(float(until) - now)
@@ -421,9 +395,9 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         state = st.prune_blocked(st.load_state())
         used_label = _switch_if_blocked(state)
 
-        proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)
-        # codex 가 자격을 갱신했으면 사본도 바로 맞춘다(낡은 사본은 나중에 거절당한다)
-        sync_current_cred(used_label)
+        # 지금 계정의 폴더를 쓰게 한다. 이게 곧 계정 전환이다(파일 복사 없음).
+        run_env = codex_home.env_for(used_label, env) if used_label else env
+        proc = subprocess.run(args, input=input, timeout=timeout, env=run_env, **kwargs)
         verdict = codex_limit.classify(proc.returncode, proc.stdout, proc.stderr)
         verdict = _verify_limit(used_label, verdict)
 
@@ -506,10 +480,14 @@ def main():
             return 3
         print(f"{cur} 여유 있음: {codex_usage.summarize(u)}")
         return 0
-    if argv[0] == "--sync":
-        # 대화형 codex 를 쓰고 난 뒤 부른다. 갱신된 자격을 사본에 반영해 둔다.
-        note = sync_current_cred()
-        print(note or "자격 사본이 이미 최신입니다.")
+    if argv[0] == "--home":
+        # 지금 계정의 codex 폴더 경로만 출력한다(래퍼가 CODEX_HOME 으로 쓴다).
+        cur = (st.prune_blocked(st.load_state()) or {}).get("current")
+        if not cur or not codex_home.is_logged_in(cur):
+            cur = st.pick_next(st.prune_blocked(st.load_state())) or cur
+        if not cur:
+            return 1
+        print(str(codex_home.home_of(cur)))
         return 0
     if argv[0] == "--":
         try:

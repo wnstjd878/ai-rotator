@@ -34,9 +34,9 @@ sys.path.insert(0, str(BASE))
 
 import pool_state as st  # noqa: E402
 import codex_pool  # noqa: E402  (불러오는 순간 st.use("codex") 가 걸린다)
+import codex_home  # noqa: E402
 import codex_limit  # noqa: E402
 import codex_usage  # noqa: E402
-import codex_switch  # noqa: E402
 
 LIMIT_ERR = "stream error: You've hit your usage limit. Upgrade to Pro"
 OK_OUT = "안녕하세요"
@@ -85,9 +85,10 @@ class Fake:
     def notify(self, message):
         self.notices.append(message)
 
-    # 사용량 조회 대역 — 라벨별로 정해둔 값을 돌려준다
+    # 사용량 조회 대역 — 라벨별로 정해둔 값을 돌려준다.
+    # 자격 파일은 <...>/codex-<라벨>/auth.json 이라 부모 폴더 이름에서 라벨을 뽑는다.
     def get_usage(self, cred_path, **kw):
-        label = Path(cred_path).stem
+        label = Path(cred_path).parent.name.replace("codex-", "")
         return self.per_label_usage.get(label)
 
     def get_usage_for(self, cred_path, is_current=False):
@@ -143,26 +144,35 @@ class FakeShared:
         return True
 
 
-def setup(tmp, labels, current):
-    """상태 파일·계정 목록·자격 저장본을 임시 폴더에 만든다."""
+def setup(tmp, labels, current, logged_in=None):
+    """상태 파일·계정 목록·계정별 codex 폴더를 임시 폴더에 만든다.
+
+    진짜 ~/.codex 는 절대 안 건드린다. codex_home 의 계정 목록 자리를 임시로 돌린다.
+    logged_in 을 주면 그 라벨만 로그인이 있는 것으로 만든다(나머지는 폴더만).
+    """
     tmp = Path(tmp)
-    creds = tmp / "creds" / "codex"
-    creds.mkdir(parents=True, exist_ok=True)
+    logged_in = labels if logged_in is None else logged_in
+    accounts = []
     for label in labels:
-        (creds / f"{label}.json").write_text("{}", encoding="utf-8")
-    (tmp / "codex_accounts.json").write_text(
-        json.dumps([{"label": x} for x in labels]), encoding="utf-8")
+        home = tmp / f"codex-{label}"
+        home.mkdir(parents=True, exist_ok=True)
+        if label in logged_in:
+            (home / "auth.json").write_text(
+                json.dumps({"tokens": {"account_id": f"acct-{label}",
+                                       "access_token": f"tok-{label}"}}), encoding="utf-8")
+        accounts.append({"label": label, "codex_home": str(home)})
+    (tmp / "codex_accounts.json").write_text(json.dumps(accounts), encoding="utf-8")
+
     st.use("codex")
     st.STATE_FILE = tmp / "codex_state.json"
     st.LOCK_FILE = tmp / "codex_state.lock"
     st.ACCOUNTS_FILE = tmp / "codex_accounts.json"
-    st.CREDS_DIR = creds
     st.shared_state = None  # 케이스마다 공유는 끈 채로 시작
-    codex_pool.BASE = tmp    # cred_path 가 임시 폴더를 보게
+    codex_home.ACCOUNTS_FILE = tmp / "codex_accounts.json"
+    codex_home.DEFAULT_HOME = tmp / "codex-default"
+    st.SAVED_LABELS_FN = codex_home.logged_in_labels
+    codex_pool.BASE = tmp
     codex_pool.LOG_FILE = tmp / "rotator.log"
-    # 되백업이 진짜 ~/.codex/auth.json 과 진짜 creds 를 건드리지 않게 임시로 돌린다
-    codex_switch.CREDS_DIR = creds
-    codex_switch.LIVE = tmp / "auth.json"
     codex_pool.codex_usage = None  # 기본은 사용량 조회 없음(쓰는 케이스만 따로 끼운다)
     state = st.load_state()
     st.set_current(state, current, "시험 준비")
@@ -337,36 +347,45 @@ def case_reset_from_usage(tmp):
     check("기본값(5시간)이 아님", until is not None and until > time.time() + 24 * 3600)
 
 
-def case_backup_before_switch(tmp):
-    print("\n[10] 교체 전에 지금 자격을 되백업한다")
-    tmp = Path(tmp)
-    creds = tmp / "creds" / "codex"
-    creds.mkdir(parents=True, exist_ok=True)
-    live = tmp / "auth.json"
+def case_folder_switch(tmp):
+    print("\n[10] 계정마다 다른 폴더를 쓴다 (전환 = CODEX_HOME 교체, 자격 복사 없음)")
+    setup(tmp, ["A", "B"], "A")
+    seen = []
 
-    def auth(acct, marker):
-        return json.dumps({"tokens": {"account_id": acct, "access_token": marker}})
+    fake = Fake({"A": (1, "", LIMIT_ERR), "B": (0, OK_OUT, "")},
+                per_label_usage={"A": usage(weekly=100, reached=True), "B": usage(weekly=5)})
+    install(fake, with_usage=True)
 
-    # 같은 계정: 되백업이 일어나야 한다 (codex 가 갱신한 최신 자격을 잃지 않게)
-    live.write_text(auth("acct-A", "new"), encoding="utf-8")
-    (creds / "A.json").write_text(auth("acct-A", "old"), encoding="utf-8")
-    (creds / "B.json").write_text(auth("acct-B", "b"), encoding="utf-8")
-    codex_switch.CREDS_DIR = creds
-    codex_switch.LIVE = live
+    real_run = fake.run
+    def run_record(args, **kwargs):
+        seen.append((kwargs.get("env") or {}).get("CODEX_HOME"))
+        return real_run(args, **kwargs)
+    codex_pool.subprocess.run = run_record
 
-    ok, note = codex_switch.switch_to("B", current="A")
-    saved_a = json.loads((creds / "A.json").read_text(encoding="utf-8"))
-    now_live = json.loads(live.read_text(encoding="utf-8"))
-    check("교체 성공", ok)
-    check("A 저장본이 최신으로 갱신됨", saved_a["tokens"]["access_token"] == "new", note)
-    check("지금 자격이 B 로 바뀜", now_live["tokens"]["account_id"] == "acct-B")
+    a_home, b_home = str(codex_home.home_of("A")), str(codex_home.home_of("B"))
+    codex_pool.run(["codex", "exec", "안녕"])
+    check("첫 시도는 A 폴더로", seen and seen[0] == a_home, f"seen={seen}")
+    check("전환 뒤에는 B 폴더로", len(seen) > 1 and seen[1] == b_home, f"seen={seen}")
+    check("두 폴더가 서로 다름", a_home != b_home)
 
-    # 라벨과 실제 로그인이 어긋난 경우: 남의 자리를 덮어쓰면 안 된다
-    live.write_text(auth("acct-C", "stranger"), encoding="utf-8")
-    ok2, note2 = codex_switch.switch_to("B", current="A")
-    saved_a2 = json.loads((creds / "A.json").read_text(encoding="utf-8"))
-    check("다른 계정이면 되백업 안 함", saved_a2["tokens"]["access_token"] == "new", note2)
-    check("그래도 교체는 됨", ok2)
+    # 자격 파일은 아무도 안 건드렸어야 한다(복사하면 서버가 이전 계정을 폐기한다)
+    a_auth = json.loads((Path(a_home) / "auth.json").read_text(encoding="utf-8"))
+    b_auth = json.loads((Path(b_home) / "auth.json").read_text(encoding="utf-8"))
+    check("A 자격 그대로", a_auth["tokens"]["access_token"] == "tok-A")
+    check("B 자격 그대로", b_auth["tokens"]["access_token"] == "tok-B")
+
+
+def case_not_logged_in_skipped(tmp):
+    print("\n[15] 로그인이 없는 계정은 후보에서 빠진다")
+    setup(tmp, ["A", "B", "C"], "A", logged_in=["A", "C"])  # B 는 폴더만 있고 로그인 없음
+    check("쓸 수 있는 계정은 A, C", st.saved_labels() == ["A", "C"], f"{st.saved_labels()}")
+
+    fake = Fake({"A": (1, "", LIMIT_ERR), "C": (0, OK_OUT, "")},
+                per_label_usage={"A": usage(weekly=100, reached=True), "C": usage(weekly=7)})
+    install(fake, with_usage=True)
+    proc = codex_pool.run(["codex", "exec", "안녕"])
+    check("B 를 건너뛰고 C 로", fake.switches == ["C"], f"switches={fake.switches}")
+    check("최종 성공", proc.returncode == 0)
 
 
 def case_revoked_copy(tmp):
@@ -397,34 +416,6 @@ def case_revoked_first_call(tmp):
     check("결과를 그대로 돌려줌", proc.returncode == 1)
     check("교체 안 함", fake.switches == [], f"switches={fake.switches}")
     check("멀쩡한 계정을 안 막음", not (st.load_state().get("blocked") or {}))
-
-
-def case_sync_cred(tmp):
-    print("\n[15] 실행 뒤 자격 사본을 최신으로 맞춘다")
-    setup(tmp, ["A", "B"], "A")
-    tmp = Path(tmp)
-    live = tmp / "auth.json"
-    same = {"tokens": {"account_id": "acct-A", "access_token": "old"}}
-    (tmp / "creds" / "codex" / "A.json").write_text(json.dumps(same), encoding="utf-8")
-    time.sleep(1.1)  # 수정 시각 비교가 1초 여유를 두므로
-    live.write_text(json.dumps({"tokens": {"account_id": "acct-A", "access_token": "renewed"}}),
-                    encoding="utf-8")
-
-    fake = Fake({"A": (0, OK_OUT, "")})
-    install(fake)
-    codex_pool.run(["codex", "exec", "안녕"])
-    saved = json.loads((tmp / "creds" / "codex" / "A.json").read_text(encoding="utf-8"))
-    check("사본이 갱신된 자격으로 바뀜", saved["tokens"]["access_token"] == "renewed",
-          f"saved={saved['tokens']['access_token']}")
-
-    # 다른 계정이 꽂혀 있으면 남의 자리를 덮어쓰지 않는다
-    time.sleep(1.1)
-    live.write_text(json.dumps({"tokens": {"account_id": "acct-X", "access_token": "stranger"}}),
-                    encoding="utf-8")
-    codex_pool.run(["codex", "exec", "안녕"])
-    saved2 = json.loads((tmp / "creds" / "codex" / "A.json").read_text(encoding="utf-8"))
-    check("계정이 다르면 사본을 안 건드림", saved2["tokens"]["access_token"] == "renewed",
-          f"saved={saved2['tokens']['access_token']}")
 
 
 def case_shared_namespace(tmp):

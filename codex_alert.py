@@ -30,11 +30,13 @@ import pool_state as st  # noqa: E402
 
 st.use("codex")
 
+import codex_home  # noqa: E402
 import codex_usage  # noqa: E402
 import notify  # noqa: E402
 
+st.SAVED_LABELS_FN = codex_home.logged_in_labels
+
 ALERT_STATE = BASE / "codex_alert_state.json"
-CREDS = BASE / "creds" / "codex"
 THRESHOLDS = [50, 70, 90]  # 넘을 때마다 알리는 단계
 SWITCH_SOON = 10           # 남은량이 이 % 이하면 첫 줄에 다음 계정을 붙인다
 HISTORY_KEEP = 80
@@ -45,7 +47,8 @@ _fmt_reset_full = codex_usage.fmt_reset_full
 
 
 def _cred(label: str) -> Path:
-    return CREDS / f"{label}.json"
+    """그 계정의 자격 파일. 계정마다 codex 폴더가 따로다."""
+    return codex_home.auth_path(label)
 
 
 def _load_alerted() -> dict:
