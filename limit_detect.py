@@ -61,6 +61,16 @@ AUTH_PATTERNS = [
     r"unauthorized",
 ]
 
+# 저장본이 죽은 경우(그 계정만 못 씀). 다른 계정으로 갈아타면 풀린다.
+# 위의 AUTH 와 갈라야 한다. AUTH 는 자격이 아예 없는 상태라 갈아타도 소용이 없다.
+DEAD_PATTERNS = [
+    r"oauth session (has )?expired",
+    r"could not be refreshed",
+    r"failed to authenticate",
+    r"invalid_grant",
+    r"refresh token (is )?(invalid|expired|revoked)",
+]
+
 # 계정을 바꿔도 안 풀리는 "한도" 들. 판정 전에 본문에서 지운다.
 # claude 실행 파일 안에 실제로 들어 있는 표기들이며, 그냥 두면 프롬프트가 길거나
 # 예산 상한에 걸렸을 때 멀쩡한 계정을 줄줄이 막아버린다.
@@ -83,6 +93,7 @@ IGNORE_PATTERNS = [
 
 _LIMIT_RE = [re.compile(p, re.I) for p in LIMIT_PATTERNS]
 _AUTH_RE = [re.compile(p, re.I) for p in AUTH_PATTERNS]
+_DEAD_RE = [re.compile(p, re.I) for p in DEAD_PATTERNS]
 _IGNORE_RE = re.compile("|".join(IGNORE_PATTERNS), re.I)
 
 
@@ -157,11 +168,19 @@ def strip_ignored(text: str) -> str:
 
 
 def classify(returncode: int, stdout: str = "", stderr: str = "") -> str:
-    """호출 결과를 ok / limit / auth / error 중 하나로 판정."""
+    """호출 결과를 ok / limit / dead / auth / error 중 하나로 판정.
+
+    dead = 그 계정 저장본이 죽음(갈아타면 풀린다)
+    auth = 로그인 자체가 안 된 상태(갈아타도 소용없다)
+    """
     if not is_failure(returncode, stdout):
         return "ok"
 
     text = failure_text(stdout, stderr)
+    # 죽은 저장본을 먼저 본다. auth 보다 좁고 뜻이 분명하다.
+    for rx in _DEAD_RE:
+        if rx.search(text):
+            return "dead"
     for rx in _AUTH_RE:
         if rx.search(text):
             return "auth"
