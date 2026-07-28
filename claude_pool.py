@@ -357,10 +357,11 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
                 left = int(until - time.time())
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
-            else:  # auth: 갈아끼운 저장본이 상한 경우에만 여기로 온다
+            else:  # dead(저장본이 죽음) 또는 갈아끼운 저장본이 상한 auth
                 st.mark_blocked(state, used_label, time.time() + BROKEN_CRED_COOLDOWN,
                                 limit_detect.short_reason(out, err))
-                log(f"'{used_label}' 저장본이 상했습니다(로그인 거절). "
+                _why = ("로그인이 만료됐습니다" if verdict == "dead" else "저장본이 상했습니다")
+                log(f"'{used_label}' {_why}(로그인 거절). "
                     f"{BROKEN_CRED_COOLDOWN // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
                     f"그 계정으로 다시 로그인해 save_account.py 로 저장하세요.")
 
