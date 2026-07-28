@@ -74,15 +74,34 @@ def chrome_bin():
     raise RuntimeError("크롬을 못 찾았습니다.")
 
 
-def launch_chrome(label):
-    """그 계정 전용 폴더로 크롬을 디버그 포트에 띄운다. 이미 떠 있으면 그대로 쓴다."""
+def launch_chrome(label, open_login=False):
+    """그 계정 전용 폴더로 크롬을 디버그 포트에 띄운다. 이미 떠 있으면 그대로 쓴다.
+
+    open_login 이면 로그인 화면을 띄운다(계정별 최초 1회 셋업용). 창이 여러 개 떴을 때
+    헷갈리지 않게 계정 순서대로 위치를 어긋나게 놓는다.
+    """
     import urllib.error
     import urllib.request
 
     port = port_for(label)
+    idx = labels().index(label) if label in labels() else 0
+    login_url = "https://claude.ai/login"
+
     try:  # 이미 떠 있는지 먼저 확인 (사람이 로그인해둔 창을 재사용)
         urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2)
         print(f"[relogin] '{label}' 전용 크롬이 이미 떠 있습니다(포트 {port}).")
+        if open_login:  # 떠 있는 창에 로그인 탭만 하나 연다
+            try:
+                from playwright.sync_api import sync_playwright
+
+                with sync_playwright() as pw:
+                    b = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+                    ctx = b.contexts[0] if b.contexts else b.new_context()
+                    pg = ctx.new_page()
+                    pg.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+                    pg.bring_to_front()
+            except Exception as e:
+                print(f"[relogin] 로그인 탭을 못 열었습니다({type(e).__name__}). 그 창에서 claude.ai 로 가세요.")
         return port
     except (urllib.error.URLError, OSError):
         pass
@@ -95,7 +114,9 @@ def launch_chrome(label):
          f"--user-data-dir={profile}",
          "--no-first-run", "--no-default-browser-check",
          "--disable-blink-features=AutomationControlled",  # 자동화 티 안 나게
-         "about:blank"],
+         f"--window-position={80 * idx},{60 * idx}",
+         "--window-size=1150,900",
+         login_url if open_login else "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(30):
@@ -358,9 +379,10 @@ def main():
         return 0
     label = args[0]
     if "--setup" in args:
-        launch_chrome(label)
-        print(f"[relogin] 뜬 창에서 '{label}' 계정으로 claude.com 에 로그인해 두세요.")
-        print("[relogin] 그 뒤부터는 python relogin.py " + label + " 이 사람 손 없이 끝납니다.")
+        port = launch_chrome(label, open_login=True)
+        mail = expected_email(label) or "(accounts.json 에 email 없음)"
+        print(f"[relogin] '{label}' 창(포트 {port})에서 {mail} 로 로그인해 두세요.")
+        print(f"[relogin] 그 뒤부터는 python relogin.py {label} 이 사람 손 없이 끝납니다.")
         return 0
     return relogin(label)
 
