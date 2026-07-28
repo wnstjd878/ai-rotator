@@ -1,4 +1,4 @@
-# == 운영 맥락 ==
+﻿# == 운영 맥락 ==
 # 용도: winserver(Windows)의 claude 실행 파일 자리에 순환 가로채기를 설치·해제한다.
 #       봇들이 claude 를 which/후보경로로 찾으면 전부 C:\Users\pc\.local\bin\claude.exe 로
 #       수렴하므로(조사 확인), 그 파일을 옆으로 밀고 그 자리에 래퍼를 둔다.

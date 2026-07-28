@@ -474,6 +474,12 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
     if "stdout" not in kwargs and "stderr" not in kwargs:
         kwargs.setdefault("capture_output", True)
     kwargs.setdefault("text", True)
+    # 글자 모드로 주고받을 땐 문자표를 utf-8 로 못박는다. 윈도우 기본(cp949)으로 두면
+    # 한글·이모지가 든 프롬프트나 답변에서 통째로 실패한다(2026-07-28 winserver 실측:
+    # viral-radar 이름 짓기가 UnicodeDecodeError 로 조용히 빈손이 됐다).
+    if kwargs.get("text") and "encoding" not in kwargs:
+        kwargs["encoding"] = "utf-8"
+        kwargs.setdefault("errors", "replace")
     if not kwargs.get("capture_output") and "stdout" not in kwargs:
         log("출력을 안 잡는 호출이라 한도 거절을 알아볼 수 없습니다. 계정 교체가 안 됩니다.")
 

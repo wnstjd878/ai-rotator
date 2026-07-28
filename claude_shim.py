@@ -25,6 +25,14 @@ from __future__ import annotations
 import os
 import sys
 
+# 부르는 쪽(봇)은 utf-8 로 읽는다. 이 파일이 윈도우 기본 문자표(cp949)로 내보내면
+# 한글·이모지가 든 답변에서 통째로 깨지거나 멈춘다(2026-07-28 winserver 실측).
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 GUARD_ENV = "CLAUDE_ROTATOR_ACTIVE"
 DISABLE_ENV = "CLAUDE_ROTATOR_DISABLED"
 FALLBACK_ENV = "CLAUDE_API_FALLBACK"   # 이 값이 "1" 인 호출만 직접 호출로 대체
@@ -202,7 +210,8 @@ def main():
         import subprocess
 
         proc = subprocess.run([REAL_CLAUDE, *argv], input=stdin_data,
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env=env)
 
     sys.stdout.write(proc.stdout or "")
     sys.stdout.flush()
