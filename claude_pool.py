@@ -323,6 +323,21 @@ def _switch_if_blocked(state: dict):
         return nxt
 
 
+def _cred_alive(label: str | None) -> bool:
+    """그 계정 저장본이 지금 살아 있는지 서버에 물어본다.
+
+    True 만 뜻이 있다(확실히 살아 있으니 막으면 안 된다). 조회가 실패했다고 죽은 것은
+    아니다 — 출입증(access token)은 8시간짜리라 저장본이 멀쩡해도 조회가 안 될 수 있다.
+    그래서 확인 못 한 경우는 False 로 돌려 기존 판정(막고 넘김)을 그대로 따르게 한다.
+    """
+    if not label or not usage_check:
+        return False
+    try:
+        return bool(usage_check.get_usage(BASE / "creds" / f"{label}.json"))
+    except Exception:
+        return False
+
+
 def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
     """실패한 계정을 쉬게 하고 다음 계정으로 교체. 교체된 라벨을 반환.
 
@@ -357,6 +372,14 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
                 left = int(until - time.time())
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
+            elif verdict == "dead" and _cred_alive(used_label):
+                # 저장본이 멀쩡한데 거절이 온 경우다. 자격 파일을 갈아끼우는 순간에
+                # 호출이 겹치면 남의 자격으로 나가 인증 실패가 난다. 이때 지금 계정을
+                # 죽었다고 막으면 멀쩡한 계정이 줄줄이 막히고, 봇들이 종량제로 넘어가
+                # 카드가 나간다(2026-07-29 실제 사고). 막지 말고 같은 계정으로 재시도한다.
+                log(f"'{used_label}' 저장본은 살아 있습니다(서버 확인). "
+                    f"계정을 막지 않고 그대로 다시 시도합니다.")
+                return used_label
             else:  # dead(저장본이 죽음) 또는 갈아끼운 저장본이 상한 auth
                 st.mark_blocked(state, used_label, time.time() + BROKEN_CRED_COOLDOWN,
                                 limit_detect.short_reason(out, err))

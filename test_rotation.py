@@ -868,6 +868,43 @@ def case_ok_envelope_bad_exitcode(tmp):
     check("전 계정 소진 알림 없음", fake.notices == [], f"notices={fake.notices}")
 
 
+def case_dead_but_cred_alive(tmp):
+    print("\n[28] 저장본이 살아 있으면 로그인 거절이 와도 계정을 막지 않는다")
+    # 자격 파일을 갈아끼우는 순간에 호출이 겹치면 남의 자격으로 나가 인증 실패가 난다.
+    # 그때 지금 계정을 죽었다고 막으면 멀쩡한 계정이 줄줄이 막히고, 봇들이 종량제로
+    # 넘어가 카드가 나간다(2026-07-29 실제 사고).
+    dead = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "api_error_status": 401, "stop_reason": "stop_sequence",
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }, ensure_ascii=False)
+
+    real_alive = claude_pool._cred_alive
+    try:
+        # (1) 저장본이 살아 있음 → 막지 않고 같은 계정으로 재시도
+        setup(tmp, ["A", "B", "C"], "A")
+        claude_pool._cred_alive = lambda label: True
+        fake = Fake({"A": (1, dead, "")})
+        install(fake)
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("계정 교체 없음", fake.switches == [], f"switches={fake.switches}")
+        check("계정을 막지 않음", st.load_state()["blocked"] == {},
+              f"blocked={st.load_state()['blocked']}")
+        check("전 계정 소진 알림 없음", fake.notices == [], f"notices={fake.notices}")
+
+        # (2) 저장본이 진짜 죽었으면(확인 불가 포함) 예전처럼 막고 넘긴다
+        claude_pool._cred_alive = lambda label: False
+        fake2 = Fake({"A": (1, dead, ""), "B": (0, OK_OUT, "")})
+        install(fake2)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("B 로 넘어가 성공", proc.returncode == 0 and fake2.switches == ["B"],
+              f"switches={fake2.switches}")
+        check("A 를 쉬게 기록", "A" in st.load_state()["blocked"],
+              f"blocked={list(st.load_state()['blocked'])}")
+    finally:
+        claude_pool._cred_alive = real_alive
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -885,7 +922,8 @@ def main():
                      case_manual_use_not_reverted, case_shared_merge,
                      case_shared_three_machines, case_save_back,
                      case_save_back_live_label, case_live_label_source,
-                     case_switch_passes_leaving, case_ok_envelope_bad_exitcode):
+                     case_switch_passes_leaving, case_ok_envelope_bad_exitcode,
+                     case_dead_but_cred_alive):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
