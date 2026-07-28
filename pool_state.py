@@ -190,8 +190,21 @@ def account_labels() -> list[str]:
     return [str(a["label"]).strip() for a in load_accounts()]
 
 
+SAVED_LABELS_FN = None  # 제공자가 "쓸 수 있는 계정"을 다르게 판단할 때 끼우는 자리
+
+
 def saved_labels() -> list[str]:
-    """자격 저장본(creds/<라벨>.json)이 실제로 있는 라벨만."""
+    """지금 쓸 수 있는 계정 라벨.
+
+    클로드는 자격 저장본(creds/<라벨>.json)이 있는 라벨.
+    지피티는 계정 폴더마다 로그인이 따로 살아 있어서 판단 기준이 다르다
+    (codex_pool 이 SAVED_LABELS_FN 을 끼워 자기 방식으로 판단한다).
+    """
+    if SAVED_LABELS_FN is not None:
+        try:
+            return SAVED_LABELS_FN()
+        except Exception:
+            return []
     if not CREDS_DIR.exists():
         return []
     return sorted(f.stem for f in CREDS_DIR.glob("*.json") if f.stat().st_size > 0)

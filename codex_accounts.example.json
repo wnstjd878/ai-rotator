@@ -1,4 +1,4 @@
 [
-  { "label": "A" },
-  { "label": "B" }
+  { "label": "A", "codex_home": "~/.codex" },
+  { "label": "B", "codex_home": "~/.codex-b" }
 ]
