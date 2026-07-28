@@ -77,9 +77,12 @@ def use(namespace: str) -> None:
     생기는 것보다 낫다.
     """
     global NAMESPACE, SHARED_PREFIX, STATE_FILE, LOCK_FILE, ACCOUNTS_FILE, CREDS_DIR
+    global SAVED_LABELS_FN
     layout = _LAYOUT.get(namespace)
     if not layout:
         return
+    if namespace != NAMESPACE:
+        SAVED_LABELS_FN = None  # 제공자가 바뀌면 남의 판단 기준을 물려받지 않는다
     NAMESPACE = namespace
     SHARED_PREFIX = layout["prefix"]
     STATE_FILE = BASE / layout["state"]
