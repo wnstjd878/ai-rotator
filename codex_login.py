@@ -2,7 +2,9 @@
 == 운영 맥락 ==
 용도: 계정 라벨을 주면 그 계정 폴더로 codex 로그인을 띄운다.
       폴더 준비(설정 복사) + CODEX_HOME 지정을 대신 해 준다.
-실행: python codex_login.py B     → 브라우저가 열리면 그 계정을 고른다
+실행: python codex_login.py B            → 브라우저가 열리면 그 계정을 고른다
+      python codex_login.py B --device  → 화면 없는 기기(ssh 로 붙은 Mac 등).
+                                          코드가 화면에 뜨면 다른 기기 브라우저에서 승인한다.
 왜 이 도구가 필요한가: 환경변수를 손으로 걸다 빠뜨리면 기본 폴더에 로그인되고,
       그 순간 원래 그 폴더에 있던 계정 자격이 서버에서 폐기된다(2026-07-28 실제로 두 번).
       셸마다 환경변수 문법이 달라서(PowerShell 은 $env:X="..", bash 는 X=".." 명령)
@@ -23,12 +25,36 @@ if str(BASE) not in sys.path:
 
 import codex_home  # noqa: E402
 
+# ssh 로 붙은 비대화형 셸에는 npm 전역 경로가 안 잡힌다. 알려진 자리도 같이 본다.
+CODEX_BINS = (
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+    str(Path.home() / ".local" / "bin" / "codex"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd"),
+)
+
+
+def _codex_bin() -> str:
+    import shutil
+
+    p = shutil.which("codex")
+    if p:
+        return p
+    for c in CODEX_BINS:
+        if Path(c).exists():
+            return c
+    return "codex"  # 못 찾으면 그대로 시도하고 오류를 보여준다
+
 
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    device = "--device" in sys.argv or "--device-auth" in sys.argv
+    sys.argv = [sys.argv[0], *args]  # 아래 라벨 해석은 옵션을 안 본다
 
     known = codex_home.labels()
     if len(sys.argv) < 2:
@@ -51,8 +77,11 @@ def main() -> int:
     print("[login] 브라우저가 열리면 이 계정으로 로그인하세요.")
 
     env = codex_home.env_for(label)
+    cmd = [_codex_bin(), "login"] + (["--device-auth"] if device else [])
+    if device:
+        print("[login] 화면 없는 기기 방식입니다. 아래 코드를 다른 기기 브라우저에서 넣으세요.")
     try:
-        proc = subprocess.run(["codex", "login"], env=env)
+        proc = subprocess.run(cmd, env=env)
     except FileNotFoundError:
         print("[login] codex 를 못 찾았습니다. PATH 를 확인하세요.")
         return 1
