@@ -8,6 +8,8 @@
       blocked      : {라벨: 한도가 풀리는 시각(epoch 초)} — 지금 못 쓰는 계정
       switched_at  : 마지막 교체 시각(epoch)
       history      : 최근 교체 기록 20건 (라벨, 시각, 사유)
+      manual       : 사람이 --use 로 직접 고른 계정 (있으면 되돌리기가 건드리지 않는다)
+      reclaim_at   : 마지막 되돌리기 시도 시각(epoch) — 잦은 왕복을 막는 간격 기준
 동시성: with_lock() 안에서만 상태를 바꾼다. 잠금은 state.lock 파일이며
       macOS/리눅스는 fcntl, Windows 는 msvcrt 로 건다.
 외부 의존: 없음 (표준 라이브러리만)
