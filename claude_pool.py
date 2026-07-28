@@ -48,6 +48,7 @@ except Exception:
 
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
+AUTH_FAIL_WINDOW = 10 * 60      # 이 시간 안에 서로 다른 계정이 거절받으면 자격 자리를 의심한다
 CLAUDE_BINS = (
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
@@ -355,6 +356,70 @@ def _cred_alive(label: str | None) -> bool:
     return False
 
 
+def _keychain_shadow() -> bool:
+    """맥 열쇠꾸러미에 클로드 자격 항목이 남아 있는지. **값은 읽지 않고 존재만** 본다.
+
+    순환기는 자격 파일(~/.claude/.credentials.json)을 갈아끼우는 설계인데, 화면 세션에서 도는
+    claude(=launchd 봇)는 열쇠꾸러미 값을 먼저 읽는다. 항목이 남아 있으면 계정을 아무리
+    갈아끼워도 봇 자리에는 그 값만 나가고, 그 값이 만료되는 순간 **모든 계정이 로그인 거절**을
+    받는다. 2026-07-29 실사고: Mac 봇 전부가 세 시간 반 멈췄고, 멀쩡한 B 계정이 만료로 오판됐다.
+    원격 접속 창에서는 열쇠꾸러미가 잠겨 파일 자격이 쓰이므로 손으로 부르면 멀쩡해 보인다.
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _note_auth_fail(state: dict, label: str | None, now: float | None = None) -> list:
+    """로그인 거절을 기록하고, 최근 창 안에서 거절받은 계정 라벨을 돌려준다."""
+    now = now or time.time()
+    fails = {
+        k: v for k, v in (state.get("auth_fails") or {}).items()
+        if isinstance(v, (int, float)) and now - v <= AUTH_FAIL_WINDOW
+    }
+    if label:
+        fails[label] = now
+    state["auth_fails"] = fails
+    return sorted(fails)
+
+
+def _cred_place_check(state: dict, label: str | None) -> tuple:
+    """이번 거절이 '계정이 죽어서'가 아니라 '자격 읽는 자리가 깨져서'인지 본다.
+
+    돌려주는 값: (사유 문장 또는 빈 문자열, 최근 거절받은 계정 라벨들).
+    사유가 있으면 그 계정을 재우면 안 된다 — 어느 계정으로 바꿔도 똑같이 거절받는 상태라
+    멀쩡한 계정까지 줄줄이 잠긴다.
+    """
+    recent = _note_auth_fail(state, label)
+    if _keychain_shadow():
+        return "열쇠꾸러미에 옛 자격이 남아 있습니다", recent
+    if len(recent) >= 2:
+        return f"짧은 시간에 계정 {len(recent)}개가 한꺼번에 거절받았습니다", recent
+    return "", recent
+
+
+def _notify_cred_place(why: str, labels: list) -> None:
+    """자격 읽는 자리가 깨졌을 때 사람에게 할 일을 알린다(계정 문제와 구분해서)."""
+    who = os.environ.get("USER") or "kwon"
+    notify(
+        "클로드 로그인이 계정 문제가 아니라 이 컴퓨터에서 막혀 있습니다.\n\n"
+        f"무슨 일: {why}. 그래서 어느 계정으로 바꿔도 로그인 거절만 돌아옵니다. "
+        f"거절받은 계정: {', '.join(labels) or '확인 안 됨'}. "
+        "이 상태면 표지 만들기·칼럼 초안·질문 답변 같은 Mac 봇이 다 멈춥니다.\n\n"
+        "할 일: Mac 에서 아래 한 줄을 실행하세요. 지워지는 건 이미 만료된 값이고, "
+        "계정 저장본은 그대로 남습니다.\n"
+        f'  security delete-generic-password -s "Claude Code-credentials" -a {who}\n\n'
+        "그래도 안 되면 개발 봇에 \"클로드 로그인 고쳐줘\" 라고 답장하세요."
+    )
+
+
 def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
     """실패한 계정을 쉬게 하고 다음 계정으로 교체. 교체된 라벨을 반환.
 
@@ -389,15 +454,28 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
                 left = int(until - time.time())
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
-            elif verdict == "dead" and _cred_alive(used_label):
-                # 저장본이 멀쩡한데 거절이 온 경우다. 자격 파일을 갈아끼우는 순간에
-                # 호출이 겹치면 남의 자격으로 나가 인증 실패가 난다. 이때 지금 계정을
-                # 죽었다고 막으면 멀쩡한 계정이 줄줄이 막히고, 봇들이 종량제로 넘어가
-                # 카드가 나간다(2026-07-29 실제 사고). 막지 말고 같은 계정으로 재시도한다.
-                log(f"'{used_label}' 저장본은 살아 있습니다(서버 확인). "
-                    f"계정을 막지 않고 그대로 다시 시도합니다.")
-                return used_label
-            else:  # dead(저장본이 죽음) 또는 갈아끼운 저장본이 상한 auth
+            else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
+                place_why, recent = _cred_place_check(state, used_label)
+                if place_why:
+                    # 계정이 죽은 게 아니라 이 컴퓨터가 자격을 읽는 자리가 깨진 경우다.
+                    # 여기서 계정을 재우면 멀쩡한 계정이 줄줄이 잠기고(2026-07-29 B 가 그렇게
+                    # 잠겼다), 봇들이 종량제로 넘어가 카드가 나간다. 막지 말고 사람에게 알린다.
+                    log(f"'{used_label}' 로그인 거절. 그런데 {place_why} — 계정 문제가 아니라 "
+                        f"자격을 읽는 자리 문제로 봅니다. 막지 않고 그대로 다시 시도합니다.")
+                    # 알림은 시간당 한 건만. 봇 수십 곳이 각자 부르면 알림이 쏟아진다.
+                    if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
+                        _notify_cred_place(place_why, recent)
+                    st.save_state(state)
+                    return used_label or current
+                if verdict == "dead" and _cred_alive(used_label):
+                    # 저장본이 멀쩡한데 거절이 온 경우다. 자격 파일을 갈아끼우는 순간에
+                    # 호출이 겹치면 남의 자격으로 나가 인증 실패가 난다. 이때 지금 계정을
+                    # 죽었다고 막으면 멀쩡한 계정이 줄줄이 막히고, 봇들이 종량제로 넘어가
+                    # 카드가 나간다(2026-07-29 실제 사고). 막지 말고 같은 계정으로 재시도한다.
+                    log(f"'{used_label}' 저장본은 살아 있습니다(서버 확인). "
+                        f"계정을 막지 않고 그대로 다시 시도합니다.")
+                    st.save_state(state)
+                    return used_label
                 st.mark_blocked(state, used_label, time.time() + BROKEN_CRED_COOLDOWN,
                                 limit_detect.short_reason(out, err))
                 _why = ("로그인이 만료됐습니다" if verdict == "dead" else "저장본이 상했습니다")
