@@ -11,8 +11,12 @@
       python codex_pool.py --use A         A 계정으로 지금 바로 교체
       python codex_pool.py -- exec "안녕"   codex 를 순환 보호 아래서 실행
 호출: from codex_pool import run;  proc = run([codex_bin, "exec", ...], timeout=600)
-전제: creds/codex/<라벨>.json 에 계정별 자격 저장본이 있어야 한다 (codex_save.py 로 저장).
-      각 머신에서 직접 codex login 해서 저장한다. codex logout 은 쓰지 않는다.
+전제: 계정마다 codex 설정 폴더가 따로 있어야 한다(codex_accounts.json 의 codex_home).
+      계정 추가는 `python codex_login.py <라벨>`. codex logout 은 쓰지 않는다.
+전환 방식(2026-07-28 변경): 자격 파일을 복사하지 않는다. 어느 폴더를 쓸지(CODEX_HOME)만
+      바꿔서 실행한다. 한 폴더에서 다른 계정으로 로그인하면 이전 계정 자격이 서버에서
+      폐기되기 때문이다(실측). 폴더가 갈려 있으면 두 계정이 공존한다.
+      그래서 자격이 낡거나 덮어써질 일이 없다 — 각 폴더의 codex 가 자기 자격을 갱신한다.
 의도적 미구현(2026-07-28 사용자 결정): 사용률을 미리 보고 넘기는 선제 전환 없음.
       거절을 받은 뒤에만 넘기고, 남은량은 codex_alert.py 가 알림으로만 알린다.
       실행 중인 codex 창의 실시간 교체 없음 — 껐다 다시 실행해야 새 계정이 붙는다.
@@ -36,12 +40,15 @@ import pool_state as st  # noqa: E402
 
 st.use("codex")  # 이 프로세스는 지피티 쪽 상태만 다룬다 (불러오는 즉시)
 
+import codex_home  # noqa: E402
 import codex_limit  # noqa: E402
-import codex_switch  # noqa: E402
 try:
     import codex_usage  # 계정별 사용률 (없어도 순환은 됨)
 except Exception:
     codex_usage = None
+
+# "쓸 수 있는 계정"은 자격 저장본이 아니라 폴더별 로그인 여부로 판단한다
+st.SAVED_LABELS_FN = codex_home.logged_in_labels
 
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)

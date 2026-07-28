@@ -139,16 +139,13 @@ def get_usage(cred_path) -> dict | None:
 
 
 def get_usage_for(cred_path, *, is_current: bool = False) -> dict | None:
-    """사용량을 읽되, 지금 쓰는 계정이면 살아있는 자격 파일로 한 번 더 시도한다.
+    """get_usage 와 같다.
 
-    creds 사본의 접근 토큰은 저장 시점에 멈춰 있다. codex 는 돌면서 auth.json 을 스스로
-    갱신하므로 지금 쓰는 계정은 그 파일이 최신이다.
-    현재 계정일 때만 쓴다. 다른 계정에 쓰면 남의 사용량을 그 계정 것으로 잘못 보여준다.
+    계정마다 폴더가 따로라(codex_home) 그 폴더의 auth.json 이 늘 최신이다. 예전처럼
+    "사본이 낡았으면 지금 쓰는 자격으로 한 번 더" 할 필요가 없어졌다.
+    부르는 쪽 모양을 안 바꾸려고 이름만 남겨 둔다.
     """
-    u = get_usage(cred_path)
-    if u or not is_current:
-        return u
-    return get_usage(LIVE_AUTH) if LIVE_AUTH.exists() else None
+    return get_usage(cred_path)
 
 
 def which_limit(usage: dict | None, threshold: float = 95.0) -> str | None:
@@ -199,11 +196,12 @@ def summarize(usage: dict | None) -> str:
 
 
 if __name__ == "__main__":
-    creds = BASE / "creds" / "codex"
-    files = sorted(creds.glob("*.json")) if creds.exists() else []
-    if not files and LIVE_AUTH.exists():
-        files = [LIVE_AUTH]  # 아직 저장본이 없으면 지금 로그인만이라도 보여준다
-    for f in files:
-        u = get_usage(f)
+    import codex_home
+
+    for label in codex_home.labels():
+        if not codex_home.is_logged_in(label):
+            print(label, "-> 로그인 없음")
+            continue
+        u = get_usage(codex_home.auth_path(label))
         who = f" [{u.get('email')} / {u.get('plan')}]" if u else ""
-        print(f.stem, "->", summarize(u) + who, "" if u else f"({last_error})")
+        print(label, "->", summarize(u) + who, "" if u else f"({last_error})")
