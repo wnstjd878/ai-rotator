@@ -40,7 +40,7 @@ CREDS_DIR = BASE / "creds"
 ACCOUNTS = BASE / "accounts.json"
 BASE_PORT = 9240                       # 기존 크롬들(9222~9233)과 안 겹치게
 CALLBACK_HOST = "platform.claude.com"
-LOGIN_TIMEOUT = 300                    # 사람이 로그인해야 할 때 기다리는 시간(초)
+LOGIN_TIMEOUT = 900                    # 사람이 로그인해야 할 때 기다리는 시간(초)
 
 CHROME_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -137,13 +137,21 @@ def start_login():
 
 
 def grab_code(page):
-    """승인 뒤 콜백 화면에서 인증 코드를 꺼낸다. 값은 화면에 찍지 않는다."""
-    # 주소에 code 가 붙어 돌아오는 경우가 정석
+    """승인 뒤 콜백 화면에서 인증 코드를 꺼낸다. 값은 화면에 찍지 않는다.
+
+    콜백 화면에 도착하기 전에는 아무것도 코드로 보지 않는다. 로그인 화면의 긴 문자열을
+    코드로 착각해 보내면 400 이 떨어진다(2026-07-28 실제로 겪음).
+    """
+    from urllib.parse import unquote
+
+    if CALLBACK_HOST not in page.url:
+        return None
     m = re.search(r"[?&]code=([^&#\s]+)", page.url)
     if m:
+        code = unquote(m.group(1))
         state = re.search(r"[?&]state=([^&#\s]+)", page.url)
-        return f"{m.group(1)}#{state.group(1)}" if state else m.group(1)
-    # 화면에 코드를 보여주는 경우 (사람이 복사하는 그 값)
+        return f"{code}#{unquote(state.group(1))}" if state else code
+    # 주소에 안 붙고 화면에 보여주는 경우 (사람이 복사하는 그 값)
     for sel in ("code", "pre", "input[readonly]", "[data-testid*='code']"):
         try:
             for el in page.query_selector_all(sel):
@@ -158,43 +166,49 @@ def grab_code(page):
 def approve(page, url):
     """인증 주소를 열고 승인 버튼을 누른다. 코드를 돌려준다(못 받으면 None)."""
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    try:
+        page.bring_to_front()  # 사람이 로그인해야 할 수 있으니 창을 앞으로
+    except Exception:
+        pass
     time.sleep(2)
 
-    # 로그인이 안 돼 있으면 사람이 한 번 해야 한다(계정 보호 — 자동 입력 안 함)
-    if "login" in page.url or "sign-in" in page.url:
-        print("[relogin] 이 계정은 전용 크롬에 아직 로그인이 안 돼 있습니다.")
-        print("[relogin] 방금 뜬 창에서 직접 로그인해 주세요. 끝나면 자동으로 이어집니다.")
-        deadline = time.time() + LOGIN_TIMEOUT
-        while time.time() < deadline:
-            time.sleep(3)
-            if CALLBACK_HOST in page.url or "authorize" in page.url:
-                break
-        time.sleep(2)
-
-    labels_to_click = ["Authorize", "승인", "Allow", "허용", "Continue", "계속"]
-    for _ in range(3):
+    told_login = False
+    labels_to_click = ["Authorize", "승인", "Allow", "허용", "Continue", "계속하기", "계속"]
+    deadline = time.time() + LOGIN_TIMEOUT
+    while time.time() < deadline:
         if CALLBACK_HOST in page.url:
             break
-        clicked = False
+        here = page.url
+
+        # 로그인·계정 선택 화면이면 사람이 한 번 해야 한다(계정 보호 — 자동 입력 안 함)
+        if "/login" in here or "sign-in" in here or "selectAccount" in here:
+            if not told_login:
+                print("[relogin] 이 전용 크롬에 아직 그 계정 로그인이 없습니다.")
+                print("[relogin] 떠 있는 창에서 직접 로그인해 주세요. 끝나면 자동으로 이어집니다.")
+                told_login = True
+            time.sleep(3)
+            continue
+
+        # 승인 화면이면 버튼을 누른다
         for name in labels_to_click:
             try:
                 btn = page.get_by_role("button", name=re.compile(name, re.I))
+                if btn.count() == 0:
+                    btn = page.get_by_role("link", name=re.compile(name, re.I))
                 if btn.count() > 0:
                     btn.first.click(timeout=5000)
-                    clicked = True
+                    time.sleep(3)
                     break
             except Exception:
                 continue
-        if not clicked:
-            break
-        time.sleep(3)
-
-    # 승인이 자동으로 안 눌렸으면 사람이 누를 때까지 기다린다(창은 떠 있다)
-    if CALLBACK_HOST not in page.url:
-        print("[relogin] 승인 버튼을 자동으로 못 눌렀습니다. 뜬 창에서 승인을 눌러 주세요.")
-        deadline = time.time() + LOGIN_TIMEOUT
-        while time.time() < deadline and CALLBACK_HOST not in page.url:
+        else:
             time.sleep(3)
+        if page.url == here:
+            time.sleep(2)
+
+    if CALLBACK_HOST not in page.url:
+        print("[relogin] 승인 화면까지 못 갔습니다. 뜬 창 상태를 확인해 주세요.")
+        return None
     time.sleep(2)
     return grab_code(page)
 
