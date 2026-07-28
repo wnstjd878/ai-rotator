@@ -25,27 +25,6 @@ if str(BASE) not in sys.path:
 
 import codex_home  # noqa: E402
 
-# ssh 로 붙은 비대화형 셸에는 npm 전역 경로가 안 잡힌다. 알려진 자리도 같이 본다.
-CODEX_BINS = (
-    "/opt/homebrew/bin/codex",
-    "/usr/local/bin/codex",
-    str(Path.home() / ".local" / "bin" / "codex"),
-    str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd"),
-)
-
-
-def _codex_bin() -> str:
-    import shutil
-
-    p = shutil.which("codex")
-    if p:
-        return p
-    for c in CODEX_BINS:
-        if Path(c).exists():
-            return c
-    return "codex"  # 못 찾으면 그대로 시도하고 오류를 보여준다
-
-
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -77,7 +56,7 @@ def main() -> int:
     print("[login] 브라우저가 열리면 이 계정으로 로그인하세요.")
 
     env = codex_home.env_for(label)
-    cmd = [_codex_bin(), "login"] + (["--device-auth"] if device else [])
+    cmd = [codex_home.codex_bin(), "login"] + (["--device-auth"] if device else [])
     if device:
         print("[login] 화면 없는 기기 방식입니다. 아래 코드를 다른 기기 브라우저에서 넣으세요.")
     try:

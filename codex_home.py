@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path  # noqa: F401  (아래 경로 계산에 쓴다)
 
 BASE = Path(__file__).resolve().parent
 ACCOUNTS_FILE = BASE / "codex_accounts.json"
@@ -93,12 +93,40 @@ def prepare(label: str) -> Path:
     return home
 
 
+# ssh 로 붙은 비대화형 셸에는 npm 전역 경로가 안 잡힌다(Mac 은 PATH 가 /usr/bin:/bin 뿐).
+# codex 실행 파일과 그것이 부르는 node 가 같은 폴더에 있으므로, 그 폴더를 PATH 앞에 붙인다.
+CODEX_BINS = (
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+    str(Path.home() / ".local" / "bin" / "codex"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd"),
+)
+
+
+def codex_bin() -> str:
+    """codex 실행 파일 경로. 못 찾으면 이름 그대로(오류를 보여주게)."""
+    p = shutil.which("codex")
+    if p:
+        return p
+    for c in CODEX_BINS:
+        if Path(c).exists():
+            return c
+    return "codex"
+
+
 def env_for(label: str, base_env: dict | None = None) -> dict:
-    """그 계정으로 codex 를 실행할 때 쓸 환경. CODEX_HOME 만 바꾼다."""
+    """그 계정으로 codex 를 실행할 때 쓸 환경. CODEX_HOME 을 바꾸고 PATH 를 보강한다."""
     import os
 
     env = dict(base_env if base_env is not None else os.environ)
     env["CODEX_HOME"] = str(home_of(label))
+
+    # codex 가 node 를 못 찾아 127 로 죽는 것을 막는다(ssh 비대화형 Mac 에서 실제로 겪음)
+    binpath = Path(codex_bin()).parent
+    if binpath.exists():
+        cur = env.get("PATH", "")
+        if str(binpath) not in cur.split(os.pathsep):
+            env["PATH"] = f"{binpath}{os.pathsep}{cur}" if cur else str(binpath)
     return env
 
 
