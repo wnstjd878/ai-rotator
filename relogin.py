@@ -186,13 +186,40 @@ def launch_chrome(label, open_login=False):
     raise RuntimeError(f"전용 크롬이 포트 {port} 로 안 떴습니다.")
 
 
+def claude_bin():
+    """claude 실행 파일 경로. ssh 비대화형은 PATH 가 /usr/bin:/bin 뿐이라 직접 찾는다."""
+    import shutil
+
+    found = shutil.which("claude") or shutil.which("claude.exe") or shutil.which("claude.cmd")
+    if found:
+        return found
+    for c in ("/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+              str(Path.home() / ".local/bin/claude"),
+              str(Path.home() / ".local/bin/claude.exe"),
+              str(Path.home() / ".local/bin/claude.cmd")):
+        if Path(c).is_file():
+            return c
+    raise RuntimeError("claude 실행 파일을 못 찾았습니다.")
+
+
+def claude_cmd(*args):
+    """claude 실행 명령. .cmd/.bat 은 그대로는 실행이 안 되므로 cmd /c 로 감싼다.
+
+    winserver 의 claude 는 가로채기(claude.CMD)라 이 처리가 없으면 실행 자체가 안 된다.
+    """
+    exe = claude_bin()
+    if sys.platform == "win32" and exe.lower().endswith((".cmd", ".bat")):
+        return ["cmd", "/c", exe, *args]
+    return [exe, *args]
+
+
 def start_login():
     """claude auth login 을 띄우고 (프로세스, 인증주소) 를 돌려준다."""
     p = subprocess.Popen(
-        ["claude", "auth", "login"],
+        claude_cmd("auth", "login"),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", bufsize=1,
-        cwd=str(BASE), shell=(sys.platform == "win32"),
+        cwd=str(BASE), shell=False,
     )
     url, deadline = None, time.time() + 60
     buf = ""
