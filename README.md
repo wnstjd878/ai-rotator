@@ -157,7 +157,9 @@ python codex_alert.py --preview 알림 문구 미리보기
 
 `login` / `mcp` / `--version` 같은 관리·조회 명령은 순환을 안 태우고 그대로 넘긴다.
 `codex logout` 은 막는다 — 그 폴더의 자격을 지우기 때문이다.
-`gc` 는 `codex` 와 같은 것(클로드의 `cc` 자리).
+
+`gc` 라는 짧은 명령은 두지 않았다. PowerShell 기본 별칭 `gc`(=`Get-Content`)가 함수보다
+먼저 잡혀서 엉뚱하게 동작한다. `codex` 를 그냥 쓰면 된다.
 
 정기 알림: Windows 본체 작업 스케줄러 `ai-rotator-codex-alert` 가 10분마다
 `codex_alert.py` 를 돌린다. 주간/세션이 50·70·90% 를 넘을 때 그 구간에 한 번씩 알린다.
