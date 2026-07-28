@@ -74,6 +74,58 @@ def chrome_bin():
     raise RuntimeError("크롬을 못 찾았습니다.")
 
 
+def close_chrome(label):
+    """그 계정 전용 크롬만 닫는다. 사용자가 쓰는 크롬은 절대 안 건드린다.
+
+    탭을 전부 닫으면 그 크롬이 스스로 종료된다. 프로세스 목록을 뒤지지 않는 이유는
+    명령줄 전체 조회를 안 하기 위해서다(CLAUDE.md 9.1).
+    """
+    import urllib.error
+    import urllib.request
+
+    port = port_for(label)
+    try:
+        raw = urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3).read()
+        targets = json.loads(raw.decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    for t in targets:
+        if t.get("type") == "page" and t.get("id"):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/json/close/{t['id']}", timeout=3)
+            except (urllib.error.URLError, OSError):
+                pass
+    time.sleep(2)
+    return True
+
+
+def guide_page(label):
+    """어느 창이 어느 계정인지 화면에 크게 띄우는 안내 쪽. 창이 여러 개일 때 안 헷갈리게."""
+    mail = expected_email(label) or "(accounts.json 에 email 없음)"
+    CHROME_DIR.mkdir(parents=True, exist_ok=True)
+    path = CHROME_DIR / f"_guide_{label}.html"
+    path.write_text(
+        "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
+        f"<title>{label} 계정 창</title>"
+        "<style>"
+        "body{margin:0;height:100vh;display:flex;flex-direction:column;"
+        "align-items:center;justify-content:center;background:#111;color:#f5f5f5;"
+        "font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif}"
+        ".label{font-size:180px;font-weight:800;line-height:1;color:#ffd400}"
+        ".mail{font-size:34px;margin-top:24px;letter-spacing:-0.5px}"
+        ".note{font-size:19px;margin-top:40px;color:#9a9a9a;text-align:center;line-height:1.7}"
+        "</style></head><body>"
+        f"<div class='label'>{label}</div>"
+        f"<div class='mail'>{mail}</div>"
+        "<div class='note'>이 창은 이 계정 전용입니다.<br>"
+        "옆 탭에서 위 주소로 로그인해 주세요.<br>"
+        "다른 창에 로그인해도 서로 밀어내지 않습니다.</div>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    return path.as_uri()
+
+
 def launch_chrome(label, open_login=False):
     """그 계정 전용 폴더로 크롬을 디버그 포트에 띄운다. 이미 떠 있으면 그대로 쓴다.
 
@@ -115,8 +167,8 @@ def launch_chrome(label, open_login=False):
          "--no-first-run", "--no-default-browser-check",
          "--disable-blink-features=AutomationControlled",  # 자동화 티 안 나게
          f"--window-position={80 * idx},{60 * idx}",
-         "--window-size=1150,900",
-         login_url if open_login else "about:blank"],
+         "--window-size=1150,900"]
+        + ([guide_page(label), login_url] if open_login else ["about:blank"]),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(30):
@@ -376,6 +428,20 @@ def main():
         return 1
     if args[0] == "--status":
         show_status()
+        return 0
+    if args[0] == "--reset":
+        import shutil as _sh
+
+        for lb in labels():
+            if close_chrome(lb):
+                print(f"[relogin] '{lb}' 전용 크롬을 닫았습니다.")
+        time.sleep(2)
+        if CHROME_DIR.exists():
+            try:
+                _sh.rmtree(CHROME_DIR)
+                print("[relogin] 전용 크롬 폴더를 비웠습니다(처음 상태).")
+            except Exception as e:
+                print(f"[relogin] 폴더를 다 못 지웠습니다({type(e).__name__}). 창이 아직 떠 있을 수 있습니다.")
         return 0
     label = args[0]
     if "--setup" in args:
