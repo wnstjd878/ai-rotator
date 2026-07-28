@@ -116,6 +116,39 @@ def _add_usage(usd: float) -> float:
     return data[today]
 
 
+
+# 검사와 누적이 떨어져 있으면 동시에 넘어온 호출이 전부 통과한다(2026-07-29: 상한 5달러인데
+# 64달러가 나갔다). 잠금으로 묶고, 부르기 전에 예상 비용을 미리 달아둔다.
+LOCK_PATH = os.path.join(HERE, ".api_fallback.lock")
+RESERVE_USD = float(os.environ.get("API_FALLBACK_RESERVE_USD", "0.5"))
+
+
+def _reserve_usage(cap: float):
+    """상한 안이면 예상 비용을 미리 달고 True. 넘었으면 (False, 지금 사용액)."""
+    import fcntl
+    with open(LOCK_PATH, "a+") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+        except Exception:
+            pass
+        used = _usage_today()
+        if used >= cap:
+            return False, used
+        _add_usage(RESERVE_USD)      # 선반영 — 뒤따라온 호출은 이 값을 보고 멈춘다
+        return True, used
+
+
+def _settle_usage(actual_usd: float):
+    """실제 비용으로 보정한다(미리 단 값을 빼고 실제를 더한다)."""
+    import fcntl
+    with open(LOCK_PATH, "a+") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+        except Exception:
+            pass
+        return _add_usage(actual_usd - RESERVE_USD)
+
+
 def _price_of(model: str) -> tuple[float, float]:
     m = (model or "").lower()
     for key, pair in PRICE.items():
@@ -182,8 +215,8 @@ def run(argv: list[str], prompt: str | None, timeout: int = 180) -> tuple[int, s
     if not text.strip():
         return 1, "", "[API 대체] 보낼 내용이 없습니다.\n"
 
-    used = _usage_today()
-    if used >= DAILY_USD_CAP:
+    ok, used = _reserve_usage(DAILY_USD_CAP)
+    if not ok:
         return 1, "", (f"[API 대체] 오늘 사용액이 상한({DAILY_USD_CAP}달러)에 닿아 "
                        f"대체하지 않습니다(현재 {used:.2f}달러).\n")
 
@@ -222,7 +255,7 @@ def run(argv: list[str], prompt: str | None, timeout: int = 180) -> tuple[int, s
     out_tok = int(u.get("output_tokens") or 0)
     p_in, p_out = _price_of(model)
     cost = in_tok / 1_000_000 * p_in + out_tok / 1_000_000 * p_out
-    total = _add_usage(cost)
+    total = _settle_usage(cost)
     log(f"구독 대신 API 로 답했습니다. 모델 {model}, "
         f"들어간 토큰 {in_tok}, 나온 토큰 {out_tok}, 이번 {cost:.4f}달러, 오늘 누적 {total:.2f}달러")
 
