@@ -113,17 +113,29 @@ python claude_pool.py --use B      B 계정으로 바로 지정
 클로드와 규칙은 같다. 거절을 받은 뒤에만 계정을 바꾸고, 남은량은 알림으로만 알린다
 (2026-07-28 사용자 결정 — 사용률을 보고 미리 넘기지 않는다).
 
+### 계정마다 codex 폴더가 따로다 (이게 핵심)
+
+**한 폴더 안에서 다른 계정으로 로그인하면 이전 계정 자격이 서버에서 폐기된다**(2026-07-28
+실측, 두 번 당함). 그래서 클로드처럼 자격 파일을 백업해 두고 갈아끼우는 방식이 지피티에서는
+성립하지 않는다. 폴더를 나누면 서로 다른 설치로 취급돼 두 계정이 공존한다.
+
+```
+codex_accounts.json
+[ { "label": "A", "codex_home": "~/.codex" },
+  { "label": "B", "codex_home": "~/.codex-b" } ]
+```
+
 ### 셋업
 
 ```
-codex login              # 계정 1로 로그인 (codex logout 은 절대 쓰지 말 것)
-python codex_save.py A   # → creds/codex/A.json
-codex login              # 계정 2로 로그인 (logout 없이 바로 login)
-python codex_save.py B   # → creds/codex/B.json
+python codex_login.py A   # 폴더 준비 + CODEX_HOME 지정까지 알아서 하고 브라우저를 띄운다
+python codex_login.py B
+python codex_home.py      # 계정별 폴더와 로그인 여부 확인
 ```
 
-`codex_save.py` 는 저장한 자격으로 서버에 한 번 물어 계정 주소와 요금제를 보여준다.
-그게 안 뜨면 저장이 안 된 것이다. 저장본이 2개 이상이어야 순환이 켜진다.
+`codex login` 을 직접 치지 말 것. 환경변수를 빠뜨리면 기본 폴더에 로그인되고
+그 순간 원래 그 폴더의 계정이 죽는다(셸마다 문법이 달라 실제로 두 번 그랬다).
+로그인이 2개 이상이어야 순환이 켜진다.
 
 ### 매일 사용
 
@@ -132,22 +144,25 @@ gs                              계정별 사용률 (주간/세션 남은 %, 초
 gc                              codex 를 감싸 실행 (한도로 끝나면 자동 전환 후 재시작)
 gn                              지금 계정을 한도로 보고 다음 계정으로
 python codex_pool.py --use B    B 계정으로 바로 지정
-python codex_pool.py --sync     지금 자격을 사본에 반영(대화형으로 쓴 뒤)
+python codex_pool.py --home     지금 계정의 codex 폴더 경로 (래퍼가 쓴다)
 python codex_alert.py --preview 알림 문구 미리보기
 ```
+
+**`codex` 를 그냥 치면 기본 폴더(계정 A)로 돈다.** 순환을 태우려면 `gc` 를 쓴다
+(클로드에서 `claude` 대신 `cc` 를 쓰는 것과 같다).
 
 정기 알림: Windows 본체 작업 스케줄러 `ai-rotator-codex-alert` 가 10분마다
 `codex_alert.py` 를 돌린다. 주간/세션이 50·70·90% 를 넘을 때 그 구간에 한 번씩 알린다.
 
 ### 지피티에서 특히 조심할 것 (실측)
 
-1. **`codex logout` 금지.** 저장된 자격을 지운다. 계정을 바꿔 로그인할 땐 `codex login` 만.
-2. **같은 계정으로 다시 로그인하면 그 전에 저장한 사본이 죽는다.** 옛 사본을 꽂으면
-   `refresh token was revoked` 로 거절당한다(2026-07-28 실측). 로그인했으면 바로
-   `codex_save.py` 로 다시 저장한다.
-3. **자격 사본은 저절로 낡는다.** codex 는 돌면서 `auth.json` 을 갱신한다. 그래서 순환기가
-   ① 교체 직전 ② 실행이 끝날 때마다 사본을 최신으로 맞춘다(`sync_current_cred`).
-   계정 번호가 다르면 되백업하지 않는다(남의 자리를 덮어쓰지 않게).
+1. **한 폴더에 계정 하나.** 같은 폴더에서 다른 계정으로 로그인하면 이전 계정 자격이
+   서버에서 폐기된다 — `Your access token could not be refreshed because you have since
+   logged out or signed in to another account`. 자격 파일을 복사해 갈아끼우는 방식도
+   같은 이유로 안 된다(복사본은 이미 폐기된 자격이다).
+2. **`codex logout` 금지.** 그 폴더의 자격을 지운다. 계정 추가는 `codex_login.py` 로만.
+3. **다른 기기끼리는 공존한다.** Mac 로그인은 Windows 에서 계정을 여러 번 갈아끼워도
+   살아 있었다. 폐기는 "같은 설치 안에서 갈아치울 때" 일어난다 — 폴더 분리가 통하는 이유다.
 4. **한도 판정은 서버에 한 번 더 물어 확증한다.** codex 는 모델 답변을 표준출력에 그대로
    흘려서 문구만 믿으면 답변 내용에 넘어간다. 사용량 조회에 여유가 있으면 계정을 안 막는다.
 5. **Mac 에서는 사용량 조회가 403(HTML)** 으로 막힌다(2026-07-28 확인). 조회가 안 되면
@@ -156,14 +171,15 @@ python codex_alert.py --preview 알림 문구 미리보기
 ## 파일
 
 ### 지피티(Codex) 쪽
-- `codex_pool.py`: 실행 래퍼 + 명령줄 도구(`--status/--next/--use/--limited/--sync`)
+- `codex_pool.py`: 실행 래퍼 + 명령줄 도구(`--status/--next/--use/--limited/--home`)
+- `codex_home.py`: 계정↔폴더 해석, 폴더 준비, 로그인 여부
+- `codex_login.py`: 그 계정 폴더로 로그인(폴더·환경변수 자동)
 - `codex_limit.py`: 한도 판정(무시 문구 + 서버 확증)
 - `codex_usage.py`: 계정별 사용률 조회(주간/세션은 창 길이로 가름)
-- `codex_switch.py` / `codex_save.py`: 자격 되백업·교체 / 저장
 - `codex_alert.py`: 사용률 단계 알림(50/70/90%)
 - `codex_shim.py` / `install_codex_shim.sh`: `codex exec`·`codex review` 가로채기
 - `gcauto.ps1`: 본체 대화형 래퍼(`gc`)
-- `test_codex_rotation.py`: 가짜 호출로 15가지 상황 재현
+- `test_codex_rotation.py`: 가짜 호출로 15가지 상황 재현(폴더 전환·자격 무손상 포함)
 
 ### 클로드 쪽
 - `claude_pool.py`: 실행 래퍼 + 명령줄 도구
