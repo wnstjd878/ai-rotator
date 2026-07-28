@@ -1,1 +1,1 @@
-﻿sync 시험용 파일 (Windows에서 만듦, 곧 지움)
+﻿WINDOWS 쪽 내용 (충돌 유발)
