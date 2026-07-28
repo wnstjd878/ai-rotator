@@ -3,11 +3,14 @@
 # 사용: cc   (PowerShell 프로필에 등록된 짧은 명령. claude 대신 이걸 쓴다)
 $POOL = "C:\Users\JUNSEONG\ai-rotator\claude_pool.py"
 $fails = 0
+# 첫 실행은 사용자가 준 인자 그대로. 한도로 갈아탄 뒤 다시 켤 때만 --continue 를 붙여
+# 직전 대화를 이어받는다. (처음부터 --continue 를 박으면 새 대화를 못 연다)
+$runArgs = @($args)
 while ($true) {
     # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
-    # (래퍼는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
+    # (감싸는 코드는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
     python $POOL --ensure
-    claude @args
+    claude @runArgs
 
     # claude 가 끝났다. 지금 계정이 한도/만료인지 조용히 확인(haiku ping, 소비 미미)
     $j = (("ping" | claude -p --model claude-haiku-4-5-20251001 --output-format json 2>&1) | Out-String)
@@ -17,6 +20,12 @@ while ($true) {
         Write-Host ""
         Write-Host "[자동순환] 한도 도달 감지 -> 다음 계정으로 전환합니다..." -ForegroundColor Yellow
         python $POOL --next
+        # 이어받기 인자가 아직 없고, 사용자가 --resume 으로 특정 대화를 고른 게 아니면 붙인다
+        $hasResume = ($runArgs -contains "--continue") -or ($runArgs -contains "-c") -or ($runArgs -contains "--resume") -or ($runArgs -contains "-r")
+        if (-not $hasResume) {
+            $runArgs = @("--continue") + $runArgs
+            Write-Host "[자동순환] 직전 대화를 이어받아 다시 켭니다 (--continue)." -ForegroundColor Green
+        }
         Write-Host "[자동순환] 새 계정으로 claude 를 다시 시작합니다." -ForegroundColor Green
         Write-Host ""
         Start-Sleep -Milliseconds 400
