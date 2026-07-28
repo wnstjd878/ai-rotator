@@ -37,7 +37,6 @@ UA = "codex_cli_rs/0.144.6 (Windows 11; x86_64) WindowsTerminal"
 TIMEOUT = 12
 WEEKLY_MIN_WINDOW = 86400  # 이보다 긴 창은 주간으로 본다 (5시간=18000, 주간=604800)
 
-LIVE_AUTH = Path.home() / ".codex" / "auth.json"
 last_error = None  # 마지막 조회 실패 사유(종류만, 자격 값은 절대 안 담는다)
 
 # 표기 한 벌 (클로드 쪽과 같은 문구를 쓴다)
