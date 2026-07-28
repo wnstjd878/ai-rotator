@@ -136,18 +136,33 @@ def start_login():
     return p, url
 
 
-def grab_code(page):
-    """승인 뒤 콜백 화면에서 인증 코드를 꺼낸다. 값은 화면에 찍지 않는다.
+def on_callback(page):
+    """승인이 끝나고 되돌아오는 화면에 실제로 도착했는지.
 
-    콜백 화면에 도착하기 전에는 아무것도 코드로 보지 않는다. 로그인 화면의 긴 문자열을
-    코드로 착각해 보내면 400 이 떨어진다(2026-07-28 실제로 겪음).
+    주소에 문자열이 들어있는지로 보면 안 된다. 로그인 화면 주소(claude.ai/login)의
+    returnTo 안에 되돌아올 주소가 통째로 들어있어서 로그인 화면을 완료로 오인한다
+    (2026-07-28 실제로 겪음). 반드시 주소의 호스트 이름으로 판정한다.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(page.url).netloc.lower() == CALLBACK_HOST
+    except Exception:
+        return False
+
+
+def grab_code(page):
+    """되돌아온 화면에서 인증 코드를 꺼낸다. 값은 화면에 찍지 않는다.
+
+    도착 전에는 아무것도 코드로 보지 않는다. 인증 주소 자체에 code=true 라는 항목이
+    있어서, 도착 판정을 느슨하게 하면 'true#상태값' 을 코드로 보내고 400 을 받는다.
     """
     from urllib.parse import unquote
 
-    if CALLBACK_HOST not in page.url:
+    if not on_callback(page):
         return None
     m = re.search(r"[?&]code=([^&#\s]+)", page.url)
-    if m:
+    if m and m.group(1) not in ("true", "false"):
         code = unquote(m.group(1))
         state = re.search(r"[?&]state=([^&#\s]+)", page.url)
         return f"{code}#{unquote(state.group(1))}" if state else code
@@ -163,8 +178,12 @@ def grab_code(page):
     return None
 
 
-def approve(page, url):
-    """인증 주소를 열고 승인 버튼을 누른다. 코드를 돌려준다(못 받으면 None)."""
+def approve(page, url, proc=None):
+    """인증 주소를 열고 승인 버튼을 누른다. 코드를 돌려준다(못 받으면 None).
+
+    claude auth login 은 기본 브라우저를 자동으로 열어 내 컴퓨터 안 주소로 결과를 받는
+    길도 같이 연다. 그쪽이 먼저 끝나면 코드를 넣을 필요가 없으므로 "DONE" 을 돌려준다.
+    """
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     try:
         page.bring_to_front()  # 사람이 로그인해야 할 수 있으니 창을 앞으로
@@ -176,7 +195,9 @@ def approve(page, url):
     labels_to_click = ["Authorize", "승인", "Allow", "허용", "Continue", "계속하기", "계속"]
     deadline = time.time() + LOGIN_TIMEOUT
     while time.time() < deadline:
-        if CALLBACK_HOST in page.url:
+        if proc is not None and proc.poll() is not None:
+            return "DONE"  # 자동으로 열린 브라우저가 먼저 끝냈다
+        if on_callback(page):
             break
         here = page.url
 
@@ -206,7 +227,9 @@ def approve(page, url):
         if page.url == here:
             time.sleep(2)
 
-    if CALLBACK_HOST not in page.url:
+    if proc is not None and proc.poll() is not None:
+        return "DONE"
+    if not on_callback(page):
         print("[relogin] 승인 화면까지 못 갔습니다. 뜬 창 상태를 확인해 주세요.")
         return None
     time.sleep(2)
@@ -263,20 +286,27 @@ def relogin(label):
             browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
             page = ctx.new_page()
-            code = approve(page, url)
+            code = approve(page, url, p)
     except Exception as e:
         p.kill()
         print(f"[relogin] 브라우저 단계에서 막혔습니다: {type(e).__name__}: {e}")
         return 1
-    if not code:
+
+    if code == "DONE":
+        print("[relogin] 자동으로 열린 브라우저에서 로그인이 먼저 끝났습니다.")
+        try:
+            p.wait(timeout=30)
+        except Exception:
+            pass
+    elif code:
+        print(f"[relogin] 인증 코드를 받았습니다(길이 {len(code)}). 로그인을 마칩니다...")
+        ok, tail = finish_login(p, code)
+        if not ok:
+            print(f"[relogin] 로그인이 끝나지 않았습니다: {tail}")
+            return 1
+    else:
         p.kill()
         print("[relogin] 인증 코드를 못 받았습니다.")
-        return 1
-    print(f"[relogin] 인증 코드를 받았습니다(길이 {len(code)}). 로그인을 마칩니다...")
-
-    ok, tail = finish_login(p, code)
-    if not ok:
-        print(f"[relogin] 로그인이 끝나지 않았습니다: {tail}")
         return 1
 
     email = current_email()
