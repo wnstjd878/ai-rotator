@@ -15,6 +15,10 @@
       python relogin.py <라벨> --setup      전용 크롬만 띄운다(그 계정으로 1회 로그인해둘 때)
       python relogin.py --status            계정별 재발급 열쇠 만료일 보기
       python relogin.py --reset             전용 크롬을 전부 닫고 폴더를 비운다(처음부터 다시)
+      python relogin.py --remote <머신> <라벨>  원격 머신(macmini/winserver) 자격을 갱신.
+                                            그쪽 CLI 를 ssh 로 띄우고 승인은 이 PC 크롬이
+                                            한다. 원격 데스크톱 접속 없이 여기서 끝난다.
+      python relogin.py --serve <라벨>       원격에서 불리는 쪽(사람이 직접 칠 일 없음)
 전제: 계정별 전용 크롬 폴더(chrome/<라벨>)에 그 계정이 한 번 로그인돼 있어야 자동으로 끝난다.
       비어 있으면 창을 띄운 채 기다리므로 그 창에서 사람이 한 번 로그인하면 된다(그 뒤론 자동).
       사용자가 쓰는 크롬은 건드리지 않는다(전용 폴더 + 전용 포트).
@@ -26,6 +30,7 @@
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -40,11 +45,18 @@ BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 
 CHROME_DIR = BASE / "chrome"          # 계정별 전용 크롬 폴더 (git 제외)
+LIVE_BACKUP = BASE / "creds" / "prev" / "_before_relogin.json"  # 되돌릴 자격 임시 보관
 CREDS_DIR = BASE / "creds"
 ACCOUNTS = BASE / "accounts.json"
 BASE_PORT = 9240                       # 기존 크롬들(9222~9233)과 안 겹치게
 CALLBACK_HOST = "platform.claude.com"
 LOGIN_TIMEOUT = 900                    # 사람이 로그인해야 할 때 기다리는 시간(초)
+
+# 원격 머신: 이름 → (그쪽 작업 폴더, 파이썬 명령). ssh 설정에 그 이름이 있어야 한다.
+REMOTES = {
+    "macmini": ("projects/ai-rotator", "python3"),
+    "winserver": (r"C:\Users\pc\projects\ai-rotator", "python"),
+}
 
 CHROME_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -377,16 +389,34 @@ def expected_email(label):
     return None
 
 
-def restore_previous(before):
+def restore_previous(before, keep=None):
     """재로그인 전에 쓰던 계정으로 되돌린다.
 
     claude auth login 은 그 계정을 지금 쓰는 자격 자리에 꽂아버린다. 만료 갱신만 하려고
     부른 건데 한도가 0% 인 계정으로 갈아타지면 곤란하다(2026-07-28 실제로 그랬음).
     그래서 갱신이 끝나면 원래 쓰던 계정으로 되돌려 놓는다.
+
+    keep 은 시작 때 떠둔 원래 자격이다. 그걸로 되돌리면 방금 갱신된 최신 자격이
+    그대로 살아난다. 없으면 creds 저장본으로 되돌린다.
     """
     if not before:
         return
     import switch_account as sa
+
+    live = Path.home() / ".claude" / ".credentials.json"
+    if keep and Path(keep).exists():
+        try:
+            # 순서가 중요하다. --use 가 creds 저장본을 자격 자리에 꽂으므로 그걸 먼저 부르고
+            # (기록도 같이 맞춰진다), 그 위에 시작 때 떠둔 최신본을 얹는다.
+            subprocess.run([sys.executable, str(BASE / "claude_pool.py"), "--use", before],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+            shutil.copy2(keep, live)
+            shutil.copy2(keep, CREDS_DIR / f"{before}.json")  # 저장본도 최신으로
+            Path(keep).unlink(missing_ok=True)
+            print(f"[relogin] 쓰던 계정 '{before}' 로 되돌렸습니다.")
+            return
+        except Exception as e:
+            print(f"[relogin] 떠둔 자격으로 못 되돌렸습니다({type(e).__name__}). 저장본으로 시도합니다.")
 
     if sa.live_label() == before:
         return  # 이미 그 계정이면 할 일 없음
@@ -400,6 +430,167 @@ def restore_previous(before):
         print(f"[relogin] 쓰던 계정 '{before}' 로 되돌렸습니다.")
     else:
         print(f"[relogin] '{before}' 로 못 되돌렸습니다: {(r.stderr or r.stdout).strip()[:200]}")
+
+
+def finish_common(p, code, label, before):
+    """로그인 마무리 + 계정 대조 + 저장 + 되돌리기. 이 PC용과 원격용이 함께 쓴다.
+
+    되돌리기 전까지 몇 초간은 새로 로그인한 계정이 꽂혀 있다. 그 사이에 봇이나 사람이
+    claude 를 켜면 한도 없는 계정을 물어 "주간 한도 도달" 을 본다(2026-07-28 실제로 겪음).
+    그래서 원래 자격을 미리 떠놨다가 저장이 끝나는 즉시 제자리로 돌린다.
+    """
+    keep = None
+    if before:
+        try:  # 되돌릴 자격을 미리 확보(파일이 곧 덮어써지므로 지금 떠둔다)
+            keep = LIVE_BACKUP
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path.home() / ".claude" / ".credentials.json", keep)
+        except Exception:
+            keep = None
+
+    if code == "DONE":
+        print("[relogin] 자동으로 열린 브라우저에서 로그인이 먼저 끝났습니다.")
+        try:
+            p.wait(timeout=30)
+        except Exception:
+            pass
+    else:
+        ok, tail = finish_login(p, code)
+        if not ok:
+            print(f"[relogin] 로그인이 끝나지 않았습니다: {tail}")
+            restore_previous(before)
+            return 1
+
+    email = current_email()
+    want = expected_email(label)
+    print(f"[relogin] 로그인된 계정: {email or '(못 읽음)'}")
+    if want and email and want.lower() != email.lower():
+        print(f"[relogin] 경고: '{label}' 는 {want} 여야 하는데 {email} 로 로그인됐습니다.")
+        print("[relogin] 저장하지 않고 멈춥니다(라벨이 섞이면 계정을 잃습니다).")
+        restore_previous(before, keep)
+        return 1
+
+    r = subprocess.run([sys.executable, str(BASE / "save_account.py"), label],
+                       text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        print("[relogin] 자격 저장에 실패했습니다.")
+        restore_previous(before, keep)
+        return 1
+    print(f"[relogin] '{label}' 재로그인 완료.")
+    restore_previous(before, keep)
+    return 0
+
+
+URL_MARK = "__RELOGIN_URL__"
+
+
+def serve(label):
+    """원격에서 불리는 쪽. 인증 주소를 표준출력으로 내고 인증 코드를 표준입력으로 받는다.
+
+    브라우저가 없는 머신(ssh 로 붙은 Mac·winserver)을 위한 방식이다. 승인은 부르는 쪽
+    PC 의 전용 크롬이 하고, 받은 코드만 이 통로로 넘어온다(값이 명령 인자에 안 실림).
+    """
+    if label not in labels():
+        print(f"[relogin] '{label}' 은 accounts.json 에 없는 라벨입니다.", flush=True)
+        return 1
+    import switch_account as sa
+
+    before = sa.live_label()
+    print(f"[relogin] 쓰던 계정: {before or '(모름)'}", flush=True)
+    try:
+        p, url = start_login()
+    except Exception as e:
+        print(f"[relogin] 로그인 절차를 못 띄웠습니다: {type(e).__name__}: {e}", flush=True)
+        return 1
+    print(f"{URL_MARK} {url}", flush=True)
+
+    code = (sys.stdin.readline() or "").strip()
+    if not code or code == "__ABORT__":
+        p.kill()
+        print("[relogin] 부르는 쪽에서 중단했습니다.", flush=True)
+        restore_previous(before, keep)
+        return 1
+    return finish_common(p, "DONE" if code == "__DONE__" else code, label, before)
+
+
+def remote(host, label):
+    """이 PC 의 전용 크롬으로 승인하고, 원격 머신의 자격을 갱신한다."""
+    from playwright.sync_api import sync_playwright
+
+    if host not in REMOTES:
+        print(f"[relogin] 모르는 머신 '{host}'. 쓸 수 있는 것: {', '.join(REMOTES)}")
+        return 1
+    workdir, py = REMOTES[host]
+    if py == "python3":  # 유닉스 셸
+        remote_cmd = f"cd {workdir} && {py} relogin.py --serve {label}"
+    else:                # winserver 는 PowerShell
+        remote_cmd = f"cd {workdir}; {py} relogin.py --serve {label}"
+
+    p = subprocess.Popen(
+        ["ssh", host, remote_cmd],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    )
+
+    url, deadline = None, time.time() + 120
+    while time.time() < deadline:
+        line = p.stdout.readline()
+        if not line:
+            if p.poll() is not None:
+                break
+            continue
+        if line.startswith(URL_MARK):
+            url = line[len(URL_MARK):].strip()
+            break
+        if line.strip():
+            print(f"  [{host}] {line.rstrip()}")
+    if not url:
+        p.kill()
+        print(f"[relogin] {host} 에서 인증 주소를 못 받았습니다.")
+        return 1
+
+    print(f"[relogin] {host} 의 인증 주소를 받았습니다. 이 PC 크롬에서 승인합니다...")
+    try:
+        port = launch_chrome(label)
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = ctx.new_page()
+            code = approve(page, url)  # 원격이라 '자동 브라우저' 길은 안 쓴다
+    except Exception as e:
+        try:
+            p.stdin.write("__ABORT__\n")
+            p.stdin.flush()
+        except Exception:
+            pass
+        p.kill()
+        print(f"[relogin] 브라우저 단계에서 막혔습니다: {type(e).__name__}: {e}")
+        return 1
+
+    if not code or code == "DONE":
+        try:
+            p.stdin.write("__ABORT__\n")
+            p.stdin.flush()
+        except Exception:
+            pass
+        p.kill()
+        print("[relogin] 인증 코드를 못 받았습니다.")
+        return 1
+
+    print(f"[relogin] 인증 코드를 받았습니다(길이 {len(code)}). {host} 로 넘깁니다...")
+    try:
+        p.stdin.write(code + "\n")   # 값은 통로로만 넘어간다(명령 인자에 안 실림)
+        p.stdin.flush()
+    except Exception as e:
+        p.kill()
+        print(f"[relogin] 코드 전달 실패: {type(e).__name__}")
+        return 1
+
+    for line in p.stdout:
+        if line.strip():
+            print(f"  [{host}] {line.rstrip()}")
+    p.wait(timeout=120)
+    return p.returncode
 
 
 def relogin(label, keep_current=True):
@@ -424,48 +615,17 @@ def relogin(label, keep_current=True):
     except Exception as e:
         p.kill()
         print(f"[relogin] 브라우저 단계에서 막혔습니다: {type(e).__name__}: {e}")
-        restore_previous(before)
+        restore_previous(before, keep)
         return 1
 
-    if code == "DONE":
-        print("[relogin] 자동으로 열린 브라우저에서 로그인이 먼저 끝났습니다.")
-        try:
-            p.wait(timeout=30)
-        except Exception:
-            pass
-    elif code:
-        print(f"[relogin] 인증 코드를 받았습니다(길이 {len(code)}). 로그인을 마칩니다...")
-        ok, tail = finish_login(p, code)
-        if not ok:
-            print(f"[relogin] 로그인이 끝나지 않았습니다: {tail}")
-            restore_previous(before)
-            return 1
-    else:
+    if not code:
         p.kill()
         print("[relogin] 인증 코드를 못 받았습니다.")
-        restore_previous(before)
+        restore_previous(before, keep)
         return 1
-
-    email = current_email()
-    want = expected_email(label)
-    print(f"[relogin] 로그인된 계정: {email or '(못 읽음)'}")
-    if want and email and want.lower() != email.lower():
-        print(f"[relogin] 경고: '{label}' 는 {want} 여야 하는데 {email} 로 로그인됐습니다.")
-        print("[relogin] 저장하지 않고 멈춥니다(라벨이 섞이면 계정을 잃습니다).")
-        restore_previous(before)
-        return 1
-
-    r = subprocess.run([sys.executable, str(BASE / "save_account.py"), label],
-                       text=True, encoding="utf-8", errors="replace")
-    if r.returncode != 0:
-        print("[relogin] 자격 저장에 실패했습니다.")
-        restore_previous(before)
-        return 1
-    if email and not want:
-        print(f"[relogin] 참고: accounts.json 의 '{label}' 에 email 을 적어두면 다음부터 대조합니다.")
-    print(f"[relogin] '{label}' 재로그인 완료.")
-    restore_previous(before)  # 만료 갱신하려다 한도 없는 계정으로 갈아타지 않게
-    return 0
+    if code != "DONE":
+        print(f"[relogin] 인증 코드를 받았습니다(길이 {len(code)}). 로그인을 마칩니다...")
+    return finish_common(p, code, label, before)
 
 
 def show_status():
@@ -496,6 +656,13 @@ def main():
     if args[0] == "--status":
         show_status()
         return 0
+    if args[0] == "--serve":  # 원격에서 불리는 쪽
+        return serve(args[1]) if len(args) > 1 else 1
+    if args[0] == "--remote":  # 이 PC 크롬으로 원격 머신 자격을 갱신
+        if len(args) < 3:
+            print(f"사용법: python relogin.py --remote <{'|'.join(REMOTES)}> <라벨>")
+            return 1
+        return remote(args[1], args[2])
     if args[0] == "--reset":
         import shutil as _sh
 
