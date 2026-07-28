@@ -13,7 +13,8 @@
       6. 해제 시각을 문구에서 읽는다 (숫자형 / 시계형 / 못 읽으면 5시간)
       7. 로그인 문제는 짧게 쉬게 하고 넘긴다
       8. 원인 모를 실패는 계정을 안 바꾸고 한 번만 더 시도한다
-마지막 점검: 2026-07-22
+      9. 세션 한도로 비켜났던 앞순위 계정이 풀리면 되돌린다 (사람이 고른 계정은 예외)
+마지막 점검: 2026-07-28
 """
 
 from __future__ import annotations
@@ -522,6 +523,68 @@ def case_skip_blocked_before_call(tmp):
           f"현재={st.prune_blocked(st.load_state()).get('current')}")
 
 
+def case_reclaim_when_freed(tmp):
+    print("\n[17-4] 세션 한도로 비켜났던 앞순위 계정이 풀리면 되돌린다")
+    setup(tmp, ["A", "B"], "A")
+    fake = Fake({"A": (1, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake)
+    claude_pool.run(["claude", "-p", "안녕"])
+    check("A 한도 → B 로 이동", st.load_state()["current"] == "B",
+          f"현재={st.load_state()['current']}")
+
+    # 5시간이 지나 A 의 막힘이 풀린 상황
+    state = st.load_state()
+    state["blocked"]["A"] = time.time() - 10
+    st.save_state(state)
+
+    fake2 = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake2)
+    proc = claude_pool.run(["claude", "-p", "안녕"])
+    check("성공", proc.returncode == 0)
+    check("앞순위 A 로 되돌림", st.load_state()["current"] == "A",
+          f"현재={st.load_state()['current']}")
+    check("되돌린 계정으로 부름", fake2.calls == ["A"], f"부른 계정={fake2.calls}")
+    check("교체는 A 한 번만", fake2.switches == ["A"], f"switches={fake2.switches}")
+
+    # 되돌린 직후에는 또 시도하지 않는다 (왕복 방지)
+    state = st.load_state()
+    check("되돌린 시각이 기록됨", state.get("reclaim_at"), f"reclaim_at={state.get('reclaim_at')}")
+    check("간격 안에는 재시도 안 함", not st.may_reclaim(state))
+
+    # 뒷순위에 앉아 있어도 앞순위가 막혀 있으면 되돌리지 않는다
+    state["reclaim_at"] = None
+    st.set_current(state, "B", "시험")
+    st.mark_blocked(state, "A", time.time() + 3600)
+    check("앞순위가 막혔으면 후보 없음", st.better_candidate(state, "B") is None,
+          f"고른 것={st.better_candidate(state, 'B')}")
+
+
+def case_manual_use_not_reverted(tmp):
+    print("\n[17-5] 사람이 --use 로 고른 계정은 되돌리기가 안 뒤집는다")
+    setup(tmp, ["A", "B"], "A")
+    fake = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake)
+    claude_pool.use("B")  # 사람이 직접 B 를 고름 (A 는 멀쩡한 상태)
+    state = st.load_state()
+    check("현재 계정이 B", state["current"] == "B", f"현재={state['current']}")
+    check("되돌리기 후보 없음(사람 지정 존중)", st.better_candidate(state, "B") is None,
+          f"고른 것={st.better_candidate(state, 'B')}")
+
+    proc = claude_pool.run(["claude", "-p", "안녕"])
+    check("성공", proc.returncode == 0)
+    check("B 를 그대로 씀", st.load_state()["current"] == "B",
+          f"현재={st.load_state()['current']}")
+    check("A 로 부르지 않음", fake.calls == ["B"], f"부른 계정={fake.calls}")
+
+    # 자동 교체가 한 번 일어나면 사람 지정 표시가 풀려 다시 순서 규칙대로 돈다
+    state = st.load_state()
+    st.set_current(state, "B", "자동 교체")
+    st.save_state(state)
+    check("표시가 풀리면 앞순위 A 가 후보",
+          st.better_candidate(st.load_state(), "B") == "A",
+          f"고른 것={st.better_candidate(st.load_state(), 'B')}")
+
+
 def case_shared_merge(tmp):
     print("\n[18] 공유 저장소: 다른 머신 막힘이 병합돼 같은 계정에 수렴")
     setup(tmp, ["A", "B", "C"], "A")
@@ -628,7 +691,8 @@ def main():
                      case_broken_cred_after_switch, case_notice_once,
                      case_broken_state_file, case_subprocess_compat,
                      case_sequential_lowest, case_reset_soonest_first,
-                     case_skip_blocked_before_call, case_shared_merge,
+                     case_skip_blocked_before_call, case_reclaim_when_freed,
+                     case_manual_use_not_reverted, case_shared_merge,
                      case_shared_three_machines):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)

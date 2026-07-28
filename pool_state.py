@@ -107,6 +107,7 @@ def _from_shared(key: str):
 
 HISTORY_MAX = 20
 LOCK_TIMEOUT = 60  # 잠금 대기 상한(초). 넘으면 예외로 알린다.
+RECLAIM_MIN_GAP = 10 * 60  # 앞순위 계정으로 되돌리는 시도의 최소 간격(초)
 
 
 class LockTimeout(RuntimeError):
@@ -198,7 +199,8 @@ def saved_labels() -> list[str]:
 
 def _blank_state() -> dict:
     return {"current": None, "blocked": {}, "switched_at": None, "history": [],
-            "notified_for": None, "notified_at": None}
+            "notified_for": None, "notified_at": None,
+            "manual": None, "reclaim_at": None}
 
 
 def load_state() -> dict:
@@ -331,9 +333,16 @@ def clear_blocked_label(state: dict, label: str) -> dict:
     return state
 
 
-def set_current(state: dict, label: str, reason: str = "") -> dict:
+def set_current(state: dict, label: str, reason: str = "", manual: bool = False) -> dict:
+    """지금 쓸 계정을 정한다.
+
+    manual=True 는 사람이 --use 로 직접 고른 경우다. 그 표시가 남아 있는 동안은
+    되돌리기(better_candidate)가 그 계정을 뒤집지 않는다. 자동 교체가 한 번이라도
+    일어나면 표시가 지워져 다시 순서 규칙대로 돈다.
+    """
     state["current"] = label
     state["switched_at"] = time.time()
+    state["manual"] = label if manual else None
     _push_history(state, label, "switched", reason)
     return state
 
@@ -425,6 +434,44 @@ def priority_order(state: dict, labels=None, now: float | None = None) -> list:
         return (0, r, idx)
 
     return sorted(labels, key=key)
+
+
+def better_candidate(state: dict, cur: str | None, now: float | None = None):
+    """지금 쓰는 계정보다 순서가 앞선 계정. 없으면 None.
+
+    세션(5시간) 한도로 잠깐 비켜났던 앞순위 계정이 풀렸을 때 그쪽으로 되돌리기 위한 것.
+    되돌리지 않으면 뒷순위 계정의 주간 잔여를 먼저 깎게 되고, 앞순위 계정의 남은 양은
+    안 쓰인 채 초기화되어 사라진다(순차 소진의 목적과 반대).
+    사람이 --use 로 고른 계정은 그 계정이 막힐 때까지 존중한다.
+    """
+    now = time.time() if now is None else now
+    if not cur or state.get("manual") == cur:
+        return None
+    saved = set(saved_labels())
+    if cur not in saved or is_blocked(state, label=cur, now=now):
+        return None  # 지금 계정이 막혔으면 되돌리기가 아니라 일반 교체가 처리한다
+    candidates = [l for l in account_labels()
+                  if l in saved and not is_blocked(state, label=l, now=now)]
+    order = priority_order(state, candidates, now)
+    if not order or order[0] == cur:
+        return None
+    return order[0]
+
+
+def may_reclaim(state: dict, now: float | None = None) -> bool:
+    """되돌리기를 시도해도 되는 때인지. 잦은 왕복과 헛걸음 반복을 막는다."""
+    now = time.time() if now is None else now
+    try:
+        last = float(state.get("reclaim_at") or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    return (now - last) >= RECLAIM_MIN_GAP
+
+
+def note_reclaim(state: dict, now: float | None = None) -> dict:
+    """되돌리기를 시도했다고 기록한다. 교체가 실패해도 기록한다(재시도 폭주 방지)."""
+    state["reclaim_at"] = time.time() if now is None else now
+    return state
 
 
 def earliest_reset(state: dict) -> float | None:

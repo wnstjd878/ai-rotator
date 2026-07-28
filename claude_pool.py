@@ -6,6 +6,8 @@
 흐름: (1) claude 실행 → (2) 결과 판정(limit_detect) → (3) 한도면 그 계정을 해제 시각까지
       쉬게 표시하고 다음 계정으로 자격 교체(switch_account) → (4) 같은 요청 재시도 →
       (5) 쓸 계정이 하나도 없으면 AllAccountsExhausted 를 올리고 텔레그램으로 알림.
+      (6) 세션(5시간)으로 잠깐 비켜났던 앞순위 계정이 풀리면 부르기 전에 되돌린다
+          (_reclaim_locked). 안 그러면 뒷순위 계정 주간이 먼저 깎인다.
 실행: python claude_pool.py --status          지금 계정 상태 보기
       python claude_pool.py --next            지금 계정을 한도로 보고 다음 계정으로 넘김
       python claude_pool.py --use A           A 계정으로 지금 바로 교체
@@ -19,6 +21,7 @@
       계정을 바꿨으면 교체 없이 바로 재시도한다.
 의도적 미구현: 여유 있는 계정을 미리 바꾸는 선제 전환 없음(limit_detect 참고).
       --ensure 는 선제 전환이 아니다 — 이미 100% 다 찬 계정만 켜기 전에 건너뛴다.
+      되돌리기도 선제 전환이 아니다 — 사용량을 보지 않고 막힘이 풀렸는지만 본다.
       대화형 claude 세션의 실시간 교체 없음 — 이미 떠 있는 세션은 재시작해야 새 계정이 붙는다.
 마지막 점검: 2026-07-27
 """
@@ -154,7 +157,8 @@ def use(label: str) -> int:
             return 1
         state = st.prune_blocked(st.load_state())
         st.clear_blocked_label(state, label)  # 손으로 고른 계정은 막힘 표시를 푼다(로컬+공유)
-        st.set_current(state, label, "수동 지정")
+        # manual=True: 사람이 고른 계정은 그 계정이 막힐 때까지 되돌리기가 안 건드린다
+        st.set_current(state, label, "수동 지정", manual=True)
         st.save_state(state)
     print(f"'{label}' 계정으로 교체했습니다.")
     return 0
@@ -202,6 +206,9 @@ def ensure_usable() -> int:
     landed = None         # 최종으로 고른 계정
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
+        # 앞순위 계정이 풀렸으면 먼저 되돌린다(대화형 cc 도 이 경로로 켜진다).
+        # 되돌린 계정이 아직 다 찬 상태면 바로 아래 확인이 다시 넘겨준다.
+        reclaimed = _reclaim_locked(state)
         # 다음 계정도 이미 소진돼 있을 수 있다. 쓸 만한 계정이 나올 때까지 이어서 건너뛴다.
         for _ in range(len(st.account_labels()) + 1):
             cur = state.get("current")
@@ -236,10 +243,48 @@ def ensure_usable() -> int:
             log(f"켜기 전 확인: '{cur}' {kind_txt} 소진 → '{nxt}' 로 교체")
         st.save_state(state)
     if not started_from:
+        if reclaimed:
+            print(f"[켜기 전 확인] 앞순위 '{reclaimed}' 계정이 풀려 그쪽으로 되돌렸습니다.")
         return 0
     print(f"[켜기 전 확인] '{started_from}' {first_kind} 한도 소진 → '{landed}' 계정으로 바꿔서 켭니다.")
     _notify_switch(started_from, landed, "limit", state)  # 전송은 잠금 밖에서
     return 0
+
+
+def _reclaim_locked(state: dict):
+    """(잠금 안에서) 앞순위 계정이 풀렸으면 그쪽으로 되돌린다. 바꿨으면 새 라벨, 아니면 None.
+
+    세션(5시간) 한도로 잠깐 비켜났던 계정은 5시간 뒤 막힘이 저절로 풀리는데, 예전에는
+    지금 계정이 막힐 때까지 안 돌아왔다. 그 동안 뒷순위 계정의 주간 잔여가 깎이고
+    앞순위 계정의 남은 양은 안 쓰인 채 초기화되어 사라졌다(순차 소진의 목적과 반대).
+    사용량 조회는 하지 않는다 — 잦으면 429 가 난다. 막힘 목록만 보고 정한다.
+    되돌린 계정이 사실 아직 소진 상태여도 손해는 헛걸음 한 번이고, 그 거절이 정확한
+    해제 시각으로 다시 막아준다. 그 반복은 RECLAIM_MIN_GAP 간격이 막는다.
+    상태 저장은 부르는 쪽이 한다(이미 잠금을 쥐고 있는 흐름에서 쓰라고 나눠둔 함수다).
+    """
+    cur = state.get("current")
+    if not st.may_reclaim(state):
+        return None
+    nxt = st.better_candidate(state, cur)
+    if nxt is None:
+        return None
+    st.note_reclaim(state)  # 교체가 실패해도 기록해 재시도 폭주를 막는다
+    if not _switch(nxt):
+        return None
+    st.set_current(state, nxt, f"{cur} → {nxt} (앞순위 계정이 풀려 되돌림)")
+    log(f"'{cur}' 에서 앞순위 '{nxt}' 로 되돌립니다(순차 소진)")
+    return nxt
+
+
+def _reclaim_if_better(state: dict, cur: str):
+    """지금 계정이 안 막혔어도 순서상 앞선 계정이 풀려 있으면 그쪽으로 되돌린다."""
+    if not st.may_reclaim(state) or st.better_candidate(state, cur) is None:
+        return cur  # 잠금을 잡기 전 값싼 확인. 평소에는 여기서 끝난다
+    with st.with_lock():
+        s = st.prune_blocked(st.load_state())
+        nxt = _reclaim_locked(s)
+        st.save_state(s)
+        return nxt or s.get("current") or cur
 
 
 def _switch_if_blocked(state: dict):
@@ -248,10 +293,13 @@ def _switch_if_blocked(state: dict):
     막힘은 세 머신이 공유하므로, 다른 머신이 한도로 막아둔 계정을 이 머신이 그대로 쓰다가
     똑같이 거절받는 헛걸음을 없앤다. 사용량 조회를 하지 않아 값싸고, 알림도 안 보낸다
     (막을 때 이미 한 번 나갔다).
+    막히지 않았으면 그 다음으로, 앞순위 계정이 풀렸는지만 보고 되돌린다.
     """
     cur = state.get("current")
-    if not cur or not st.is_blocked(state, cur):
+    if not cur:
         return cur
+    if not st.is_blocked(state, cur):
+        return _reclaim_if_better(state, cur)
     with st.with_lock():
         s = st.prune_blocked(st.load_state())
         cur = s.get("current")
