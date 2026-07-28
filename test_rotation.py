@@ -63,6 +63,10 @@ class Fake:
         self.notices = []
 
     def run(self, args, **kwargs):
+        # 열쇠꾸러미 조회는 claude 호출이 아니다. 세지 않고 '항목 없음'으로 답한다
+        # (있는 경우를 보는 시험은 _keychain_account 를 직접 바꿔 쓴다).
+        if args and str(args[0]).endswith("security"):
+            return subprocess.CompletedProcess(args, 1, "", "not found")
         label = st.load_state().get("current")
         self.calls.append(label)
         rc, out, err = self.per_label.get(label, (1, "", "unknown account"))
@@ -905,6 +909,62 @@ def case_dead_but_cred_alive(tmp):
         claude_pool._cred_alive = real_alive
 
 
+def case_keychain_shadow(tmp):
+    print("\n[29] 자격 읽는 자리가 깨졌으면 멀쩡한 계정을 재우지 않고 사람에게 알린다")
+    # 2026-07-29 실사고: 맥 열쇠꾸러미에 옛 자격이 남아 봇 자리에서만 모든 계정이 거절받았다.
+    # 그때 계정을 재우면 멀쩡한 B 까지 잠긴다(실제로 잠겼다). 알림도 안 가 세 시간 반 방치됐다.
+    dead = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "api_error_status": 401, "stop_reason": "stop_sequence",
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }, ensure_ascii=False)
+    not_logged_in = json.dumps({
+        "type": "result", "is_error": True,
+        "result": "Not logged in · Please run /login",
+    }, ensure_ascii=False)
+
+    real_acct = claude_pool._keychain_account
+    real_alive = claude_pool._cred_alive
+    try:
+        # (1) 로그인 거절 + 열쇠꾸러미에 옛 자격이 남음 → 막지 않고 알림
+        setup(tmp, ["A", "B", "C"], "A")
+        claude_pool._keychain_account = lambda: "kwon"
+        claude_pool._cred_alive = lambda label: False   # 저장본 보호가 없어도 막히면 안 된다
+        fake = Fake({"A": (1, dead, "")})
+        install(fake)
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("계정 교체 없음", fake.switches == [], f"switches={fake.switches}")
+        check("계정을 막지 않음", st.load_state()["blocked"] == {},
+              f"blocked={st.load_state()['blocked']}")
+        check("사람에게 알림", any("열쇠꾸러미" in m for m in fake.notices),
+              f"notices={len(fake.notices)}")
+        check("지울 계정 이름이 안내에 들어감",
+              any('-a kwon' in m for m in fake.notices))
+
+        # (2) '로그인 안 됨' 문구(auth)로 와서 계정 교체 경로를 안 타도 알린다
+        setup(tmp, ["A", "B"], "A")
+        fake2 = Fake({"A": (1, not_logged_in, "")})
+        install(fake2)
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("교체 안 함", fake2.switches == [], f"switches={fake2.switches}")
+        check("이 경로에서도 알림", any("열쇠꾸러미" in m for m in fake2.notices),
+              f"notices={len(fake2.notices)}")
+
+        # (3) 열쇠꾸러미가 깨끗하면 예전대로 막고 넘어간다
+        setup(tmp, ["A", "B"], "A")
+        claude_pool._keychain_account = lambda: None
+        fake3 = Fake({"A": (1, dead, ""), "B": (0, OK_OUT, "")})
+        install(fake3)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("B 로 넘어가 성공", proc.returncode == 0 and fake3.switches == ["B"],
+              f"switches={fake3.switches}")
+        check("A 를 쉬게 기록", "A" in st.load_state()["blocked"],
+              f"blocked={list(st.load_state()['blocked'])}")
+    finally:
+        claude_pool._keychain_account = real_acct
+        claude_pool._cred_alive = real_alive
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -923,7 +983,7 @@ def main():
                      case_shared_three_machines, case_save_back,
                      case_save_back_live_label, case_live_label_source,
                      case_switch_passes_leaving, case_ok_envelope_bad_exitcode,
-                     case_dead_but_cred_alive):
+                     case_dead_but_cred_alive, case_keychain_shadow):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

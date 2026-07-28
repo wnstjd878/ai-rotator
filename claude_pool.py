@@ -356,8 +356,13 @@ def _cred_alive(label: str | None) -> bool:
     return False
 
 
-def _keychain_shadow() -> bool:
-    """맥 열쇠꾸러미에 클로드 자격 항목이 남아 있는지. **값은 읽지 않고 존재만** 본다.
+def _keychain_account() -> str | None:
+    """맥 열쇠꾸러미에 남아 있는 클로드 자격 항목의 **계정 이름**. 없으면 None.
+
+    **자격 값은 읽지 않는다** — 항목이 있는지와 어느 계정 이름으로 걸려 있는지만 본다
+    (값 읽기는 화면 잠금해제가 필요하고, 읽으면 그 값이 기록에 남는다).
+    계정 이름을 같이 보는 이유: 지울 때 쓰는 명령에 그 이름이 들어가야 실제로 지워진다.
+    이름을 못 읽으면 로그인 사용자 이름으로 떨어진다.
 
     순환기는 자격 파일(~/.claude/.credentials.json)을 갈아끼우는 설계인데, 화면 세션에서 도는
     claude(=launchd 봇)는 열쇠꾸러미 값을 먼저 읽는다. 항목이 남아 있으면 계정을 아무리
@@ -366,15 +371,22 @@ def _keychain_shadow() -> bool:
     원격 접속 창에서는 열쇠꾸러미가 잠겨 파일 자격이 쓰이므로 손으로 부르면 멀쩡해 보인다.
     """
     if sys.platform != "darwin":
-        return False
+        return None
     try:
         r = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials"],
             capture_output=True, text=True, timeout=10,
         )
-        return r.returncode == 0
+        if r.returncode != 0:
+            return None
+        for line in (r.stdout or "").splitlines():
+            if '"acct"' in line and '=' in line:
+                name = line.split("=", 1)[1].strip().strip('"')
+                if name:
+                    return name
+        return os.environ.get("USER") or "kwon"
     except Exception:
-        return False
+        return None
 
 
 def _note_auth_fail(state: dict, label: str | None, now: float | None = None) -> list:
@@ -393,21 +405,43 @@ def _note_auth_fail(state: dict, label: str | None, now: float | None = None) ->
 def _cred_place_check(state: dict, label: str | None) -> tuple:
     """이번 거절이 '계정이 죽어서'가 아니라 '자격 읽는 자리가 깨져서'인지 본다.
 
-    돌려주는 값: (사유 문장 또는 빈 문자열, 최근 거절받은 계정 라벨들).
+    돌려주는 값: (사유 문장 또는 빈 문자열, 최근 거절받은 계정 라벨들, 열쇠꾸러미 계정 이름).
     사유가 있으면 그 계정을 재우면 안 된다 — 어느 계정으로 바꿔도 똑같이 거절받는 상태라
     멀쩡한 계정까지 줄줄이 잠긴다.
     """
     recent = _note_auth_fail(state, label)
-    if _keychain_shadow():
-        return "열쇠꾸러미에 옛 자격이 남아 있습니다", recent
+    acct = _keychain_account()
+    if acct:
+        return "열쇠꾸러미에 옛 자격이 남아 있습니다", recent, acct
     if len(recent) >= 2:
-        return f"짧은 시간에 계정 {len(recent)}개가 한꺼번에 거절받았습니다", recent
-    return "", recent
+        return f"짧은 시간에 계정 {len(recent)}개가 한꺼번에 거절받았습니다", recent, None
+    return "", recent, None
 
 
-def _notify_cred_place(why: str, labels: list) -> None:
-    """자격 읽는 자리가 깨졌을 때 사람에게 할 일을 알린다(계정 문제와 구분해서)."""
-    who = os.environ.get("USER") or "kwon"
+def _warn_cred_place(label: str | None) -> bool:
+    """계정을 갈아타기 전 단계에서도 열쇠꾸러미 그림자를 잡아 알린다.
+
+    로그인 거절 문구가 'auth'(로그인 자체가 안 됨)로 분류되면 계정 교체 경로를 안 타서
+    _cred_place_check 가 아예 안 돌고, 봇은 조용히 실패한 채 사람도 모른다(코덱스 검수 2026-07-29).
+    여기서는 잠금을 잡지 않으므로 거절 기록은 남기지 않고 열쇠꾸러미만 본다.
+    """
+    acct = _keychain_account()
+    if not acct:
+        return False
+    why = "열쇠꾸러미에 옛 자격이 남아 있습니다"
+    log(f"로그인 거절. 그런데 {why} — 계정 문제가 아니라 자격을 읽는 자리 문제로 봅니다.")
+    if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
+        _notify_cred_place(why, [label] if label else [], acct)
+    return True
+
+
+def _notify_cred_place(why: str, labels: list, account: str | None = None) -> None:
+    """자격 읽는 자리가 깨졌을 때 사람에게 할 일을 알린다(계정 문제와 구분해서).
+
+    account 는 열쇠꾸러미 항목에 걸린 계정 이름이다. 지우는 명령에 그 이름이 그대로 들어가야
+    실제로 지워진다(찾을 때 쓴 조건과 지울 때 쓴 조건이 다르면 지워도 항목이 남는다).
+    """
+    who = account or os.environ.get("USER") or "kwon"
     notify(
         "클로드 로그인이 계정 문제가 아니라 이 컴퓨터에서 막혀 있습니다.\n\n"
         f"무슨 일: {why}. 그래서 어느 계정으로 바꿔도 로그인 거절만 돌아옵니다. "
@@ -455,7 +489,7 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 left = int(until - time.time())
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
-                place_why, recent = _cred_place_check(state, used_label)
+                place_why, recent, acct = _cred_place_check(state, used_label)
                 if place_why:
                     # 계정이 죽은 게 아니라 이 컴퓨터가 자격을 읽는 자리가 깨진 경우다.
                     # 여기서 계정을 재우면 멀쩡한 계정이 줄줄이 잠기고(2026-07-29 B 가 그렇게
@@ -464,7 +498,7 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                         f"자격을 읽는 자리 문제로 봅니다. 막지 않고 그대로 다시 시도합니다.")
                     # 알림은 시간당 한 건만. 봇 수십 곳이 각자 부르면 알림이 쏟아진다.
                     if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
-                        _notify_cred_place(place_why, recent)
+                        _notify_cred_place(place_why, recent, acct)
                     st.save_state(state)
                     return used_label or current
                 if verdict == "dead" and _cred_alive(used_label):
@@ -634,8 +668,11 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         if verdict == "auth" and not switched_here:
             # 계정을 바꿔도 안 풀린다. ssh 비대화형처럼 자격을 아예 못 읽는 환경에서 나오는데,
             # 이때 계정을 돌리면 멀쩡한 계정들이 줄줄이 막힌 것으로 잘못 기록된다.
-            log("로그인이 안 된 상태입니다. 계정을 바꾸지 않습니다. "
-                "화면 세션에서 claude /login 을 했는지 확인하세요.")
+            # 다만 봇 자리(launchd)에서 이 문구가 나오면 열쇠꾸러미에 남은 옛 자격이 원인일 수
+            # 있다. 그 경우 사람이 지워줘야 풀리므로 여기서도 한 번 알린다.
+            if not _warn_cred_place(used_label):
+                log("로그인이 안 된 상태입니다. 계정을 바꾸지 않습니다. "
+                    "화면 세션에서 claude /login 을 했는지 확인하세요.")
             return _finish(proc, args, want_check)
 
         if verdict == "error":
