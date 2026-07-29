@@ -54,6 +54,12 @@ def check(name, cond, detail=""):
 class Fake:
     """가짜 claude 실행기. 계정 라벨별로 결과를 정해둔다."""
 
+    # 열쇠꾸러미 안에 들어 있다고 칠 값. 지우기 전 백업이 되는지 보는 데 쓴다(가짜 값).
+    keychain_value = json.dumps({"claudeAiOauth": {
+        "refreshToken": "test-refresh", "accessToken": "test-access",
+        "expiresAt": 9999999999000, "refreshTokenExpiresAt": 9999999999000,
+    }}, ensure_ascii=False)
+
     def __init__(self, per_label, switch_ok=True, keychain=None, keychain_out=None):
         self.per_label = per_label
         self.switch_ok = switch_ok
@@ -71,6 +77,15 @@ class Fake:
     def run(self, args, **kwargs):
         # 열쇠꾸러미 조회·삭제는 claude 호출이 아니다. 세지 않는다.
         if args and str(args[0]).endswith("security"):
+            if "find-generic-password" in args and "-w" in args:
+                # 값 읽기. 실제 코드는 화면 대신 파일로 받아간다.
+                if not self.keychain or not self.keychain_value:
+                    return subprocess.CompletedProcess(args, 1, "", "locked")
+                fh = kwargs.get("stdout")
+                if hasattr(fh, "write"):
+                    fh.write(self.keychain_value)
+                    fh.flush()
+                return subprocess.CompletedProcess(args, 0, "", "")
             if "find-generic-password" in args:
                 if self.keychain:
                     body = ('    "acct"<blob>="%s"\n    "svce"<blob>="Claude Code-credentials"\n'
@@ -1012,8 +1027,10 @@ def case_keychain_self_fix(tmp):
         install(fake)
         proc = claude_pool.run(["claude", "-p", "안녕"])
         check("옛 자격을 지움", fake.keychain_deleted == ["kwon"], f"{fake.keychain_deleted}")
+        check("지우기 전에 저장본으로 백업", "test-refresh" in
+              (Path(tmp) / "creds" / "A.json").read_text(encoding="utf-8"))
         check("지운 뒤 같은 계정으로 성공", proc.returncode == 0, f"rc={proc.returncode}")
-        check("계정 교체 없음", fake.switches == [], f"switches={fake.switches}")
+        check("다른 계정으로 안 넘어감", set(fake.switches) <= {"A"}, f"switches={fake.switches}")
         check("계정을 막지 않음", st.load_state()["blocked"] == {},
               f"blocked={st.load_state()['blocked']}")
         check("스스로 풀렸다고 알림", any("스스로 풀렸습니다" in m for m in fake.notices),
@@ -1030,7 +1047,19 @@ def case_keychain_self_fix(tmp):
         check("이 경로에서도 지움", fake2.keychain_deleted == ["kwon"], f"{fake2.keychain_deleted}")
         check("지운 뒤 성공", proc2.returncode == 0, f"rc={proc2.returncode}")
 
-        # (3) 방금 지웠는데 또 걸리면 손대지 않고 사람에게 넘긴다
+        # (3) 값을 못 읽으면(화면 잠금 등) 지우지 않는다 — 최신 재발급 열쇠를 잃지 않기 위해
+        claude_pool.KEYCHAIN_STAMP.unlink(missing_ok=True)
+        setup(tmp, ["A", "B"], "A")
+        fake_locked = Fake({"A": (1, dead, "")}, keychain="kwon", keychain_out=dead)
+        fake_locked.keychain_value = ""      # 잠겨서 값이 안 읽히는 상황
+        install(fake_locked)
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("값을 못 읽으면 안 지움", fake_locked.keychain_deleted == [],
+              f"{fake_locked.keychain_deleted}")
+        check("대신 사람에게 안내", any("security delete" in m for m in fake_locked.notices),
+              f"notices={len(fake_locked.notices)}")
+
+        # (4) 방금 지웠는데 또 걸리면 손대지 않고 사람에게 넘긴다
         setup(tmp, ["A", "B"], "A")
         claude_pool.KEYCHAIN_STAMP.write_text(str(int(time.time())), encoding="utf-8")
         fake3 = Fake({"A": (1, dead, "")}, keychain="kwon", keychain_out=dead)
