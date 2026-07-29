@@ -100,35 +100,40 @@ def keychain_account() -> str | None:
 
 
 def read_keychain(account: str):
-    """열쇠꾸러미 값을 파일 통로로만 읽어 온다. 못 읽으면 None."""
-    tmp = Path("/tmp/.cred_mirror_read.json")
+    """열쇠꾸러미 값을 이 프로세스 안으로만 읽어 온다. 못 읽으면 None.
+
+    **디스크에 쓰지 않는다.** 예전에는 /tmp 파일로 받았는데, 그 파일이 기본 권한(0644)으로
+    만들어져 같은 컴퓨터의 다른 프로그램이 재발급 열쇠 원문을 읽을 수 있었다
+    (코덱스 검수 2026-07-30, 재현됨). 화면·명령 인자에도 값이 안 실린다(9.1).
+    """
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            r = subprocess.run(
-                ["security", "find-generic-password", "-s", SERVICE, "-a", account, "-w"],
-                stdout=fh, stderr=subprocess.DEVNULL, timeout=20,
-            )
-        if r.returncode != 0:
-            return None
-        obj = read_json(tmp)
-        if not obj or not fingerprint(obj):
-            return None
-        return obj
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", SERVICE, "-a", account, "-w"],
+            capture_output=True, text=True, timeout=20,
+        )
     except Exception:
         return None
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+    if r.returncode != 0:
+        return None
+    try:
+        obj = json.loads((r.stdout or "").strip())
+    except Exception:
+        return None
+    if not isinstance(obj, dict) or not fingerprint(obj):
+        return None
+    return obj
 
 
 def write_atomic(dest: Path, obj) -> None:
+    # 자격이 담기므로 만들 때부터 소유자 전용(0600). 내용을 쓴 뒤에 권한을 조이면
+    # 그 사이에 다른 프로그램이 읽을 수 있다(코덱스 지적과 같은 틈).
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.parent / ("." + dest.name + ".tmp")
-    tmp.write_text(json.dumps(obj), encoding="utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj))
     try:
-        os.chmod(tmp, 0o600)
+        os.chmod(tmp, 0o600)  # 남아 있던 파일을 다시 쓴 경우 대비
     except Exception:
         pass
     os.replace(tmp, dest)
@@ -206,24 +211,27 @@ def mirror_store(obj, fp: str, label: str) -> bool:
     return True
 
 
-def apply_pending() -> bool:
+def apply_pending() -> str:
     """원격 접속 자리에서 예약해 둔 계정 전환을 화면 세션에서 마무리한다.
 
+    돌려주는 값: "none"(예약 없음) / "done"(마무리함) / "blocked"(예약은 있는데 아직 못 함).
+
     되비추기(열쇠꾸러미 → 파일)와 계정 전환(파일 → 열쇠꾸러미)은 방향이 반대다.
-    예약을 먼저 처리하지 않으면, 원격 접속에서 갈아끼운 파일을 다음 회차의 되비추기가
-    옛 계정 값으로 되돌려 버린다. 그래서 이게 sync 의 첫 번째 일이다.
+    그래서 이게 sync 의 첫 번째 일이고, **"blocked" 면 되비추기로 내려가면 안 된다.**
+    내려가면 열쇠꾸러미에 남아 있는 옛 계정 값이 방금 갈아끼운 파일을 덮어써서 전환이
+    소리 없이 취소된다(코덱스 검수 2026-07-30).
     """
     p = creds_dir() / ".pending-switch"
     try:
         label = p.read_text(encoding="utf-8").strip()
     except Exception:
-        return False
+        return "none"
     if not label:
         try:
             p.unlink(missing_ok=True)
         except Exception:
             pass
-        return False
+        return "none"
 
     src = creds_dir() / (label + ".json")
     if not src.exists():
@@ -232,16 +240,16 @@ def apply_pending() -> bool:
             p.unlink(missing_ok=True)
         except Exception:
             pass
-        return False
+        return "none"
 
     try:
         import switch_account as sw
 
         note = sw.switch_keychain(src)
     except Exception:
-        return False
+        return "blocked"
     if not note.startswith("열쇠꾸러미도"):
-        return False   # 아직 화면 세션이 아니다. 다음 회차에 다시 해 본다.
+        return "blocked"   # 아직 화면 세션이 아니다. 다음 회차에 다시 해 본다.
 
     obj = read_json(src)
     if obj:
@@ -251,7 +259,7 @@ def apply_pending() -> bool:
     except Exception:
         pass
     log("예약돼 있던 '%s' 계정 전환을 열쇠꾸러미까지 마무리했습니다." % label)
-    return True
+    return "done"
 
 
 def sync(quiet: bool = False) -> bool:
@@ -263,9 +271,14 @@ def sync(quiet: bool = False) -> bool:
     if sys.platform != "darwin":
         return False
 
-    if apply_pending():
+    pending = apply_pending()
+    if pending == "done":
         # 방금 넣은 값이 최신이다. 되비추기는 다음 회차에 자연히 맞는다.
         return True
+    if pending == "blocked":
+        # 갈아끼우기를 아직 못 끝냈다. 여기서 되비추면 옛 계정 값이 새 파일을 덮어
+        # 전환이 취소된다. 아무것도 하지 않고 다음 회차를 기다린다.
+        return False
 
     account = keychain_account()
     if not account:

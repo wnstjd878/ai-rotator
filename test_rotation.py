@@ -91,9 +91,13 @@ class Fake:
                     return subprocess.CompletedProcess(args, 1, "", "locked")
                 fh = kwargs.get("stdout")
                 if hasattr(fh, "write"):
+                    # 보관용 읽기는 값을 파일로 받는다(_keychain_rescue)
                     fh.write(self.keychain_value)
                     fh.flush()
-                return subprocess.CompletedProcess(args, 0, "", "")
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                # 낡았는지만 보는 읽기는 디스크를 안 거치고 이 프로세스 안으로 받는다
+                # (2026-07-30: /tmp 파일이 0644 로 남던 것을 고침)
+                return subprocess.CompletedProcess(args, 0, self.keychain_value, "")
             if "find-generic-password" in args:
                 if self.keychain:
                     body = ('    "acct"<blob>="%s"\n    "svce"<blob>="Claude Code-credentials"\n'

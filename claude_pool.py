@@ -520,31 +520,29 @@ def _keychain_account() -> str | None:
 
 
 def _read_keychain_cred(account: str):
-    """열쇠꾸러미 값을 파일 통로로만 읽어 온다. 못 읽으면 None.
+    """열쇠꾸러미 값을 이 프로세스 안으로만 읽어 온다. 못 읽으면 None.
 
     못 읽는 것은 고장이 아니다 — 원격 접속 창이나 화면 잠금 상태의 정상 결과다.
-    값은 화면·명령 인자를 거치지 않는다(9.1).
+    값은 화면·명령 인자를 거치지 않고, **디스크에도 남기지 않는다**. /tmp 파일로 받던
+    옛 방식은 그 파일이 기본 권한(0644)이라 다른 프로그램이 읽을 수 있었다
+    (코덱스 검수 2026-07-30, 재현됨). 낡았는지만 보면 되므로 보관할 이유도 없다.
     """
     import json as _json
 
-    tmp = Path("/tmp/.pool_keychain_read.json")
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            r = subprocess.run(
-                ["security", "find-generic-password", "-s", "Claude Code-credentials",
-                 "-a", account, "-w"],
-                stdout=fh, stderr=subprocess.DEVNULL, timeout=20,
-            )
-        if r.returncode != 0:
-            return None
-        return _json.loads(tmp.read_text(encoding="utf-8").strip())
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials",
+             "-a", account, "-w"],
+            capture_output=True, text=True, timeout=20,
+        )
     except Exception:
         return None
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+    if r.returncode != 0:
+        return None
+    try:
+        return _json.loads((r.stdout or "").strip())
+    except Exception:
+        return None
 
 
 def _keychain_verdict(account: str | None) -> str:

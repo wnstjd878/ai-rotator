@@ -199,6 +199,27 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 PENDING = CREDS_DIR / ".pending-switch"
 
 
+def keychain_account():
+    """이미 걸려 있는 열쇠꾸러미 항목의 계정 이름. 없으면 None. 값은 안 읽는다."""
+    import subprocess
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    for line in (r.stdout or "").splitlines():
+        if '"acct"' in line and "=" in line:
+            name = line.split("=", 1)[1].strip().strip('"')
+            if name:
+                return name
+    return None
+
+
 def switch_keychain(src: Path) -> str:
     """맥 열쇠꾸러미 항목도 같은 값으로 덮어쓴다. 결과를 한 줄로 돌려준다.
 
@@ -213,7 +234,10 @@ def switch_keychain(src: Path) -> str:
 
     if sys.platform != "darwin":
         return "맥이 아니라 열쇠꾸러미는 건너뜁니다"
-    acct = os.environ.get("USER") or "kwon"
+    # **이미 있는 항목의 계정 이름을 그대로 써야 한다.** 로그인 사용자 이름으로 새로 쓰면
+    # 이름이 다를 때 항목이 하나 더 생기고, 클로드는 먼저 걸린 옛 항목을 계속 읽는다.
+    # 그러면 "바꿨습니다"라고 말해 놓고 봇 자리는 안 바뀐 상태가 된다(코덱스 검수 2026-07-30).
+    acct = keychain_account() or os.environ.get("USER") or "kwon"
     try:
         payload = src.read_bytes()
         cmd = 'add-generic-password -U -a "%s" -s "%s" -X "%s"\n' % (
