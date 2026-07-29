@@ -435,11 +435,13 @@ def _warn_cred_place(label: str | None) -> str:
     why = "열쇠꾸러미에 옛 자격이 남아 있습니다"
     log(f"로그인 거절. 그런데 {why}. 계정 문제가 아니라 자격을 읽는 자리 문제로 봅니다.")
     labels = [label] if label else []
-    if _keychain_fix(acct, label):
+    res = _keychain_fix(acct, label)
+    if res == "fixed":
         if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
             _notify_cred_fixed(labels)
         return "fixed"
-    if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
+    # "half" 면 이미 저장본 재설치 안내를 보냈다. 열쇠꾸러미를 또 지우라고 하면 안 된다.
+    if res != "half" and st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
         _notify_cred_place(why, labels, acct)
     return "warned"
 
@@ -465,12 +467,15 @@ def _keychain_rescue(account: str, label: str | None) -> bool:
 
     # 보관 자리는 pool_state 가 정한 곳을 따른다. BASE 를 그대로 쓰면 시험이 운영 폴더에
     # 파일을 만든다(2026-07-29 실사고: 시험이 A 저장본을 가짜 값으로 밀었다).
+    # 계정 저장본 폴더 **바로 밑에 두면 안 된다** — 여러 코드가 그 폴더의 *.json 을
+    # 계정 목록으로 훑기 때문에 보관 파일이 계정 하나로 잡힌다(코덱스 검수 2026-07-29).
     creds = Path(getattr(st, "CREDS_DIR", BASE / "creds"))
+    keep = creds / "rescued"
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = creds / f"_keychain-rescued-{stamp}.json"
-    tmp = creds / f".keychain-{stamp}.tmp"
+    dest = keep / f"keychain-{stamp}.json"
+    tmp = keep / f".keychain-{stamp}.tmp"
     try:
-        creds.mkdir(parents=True, exist_ok=True)
+        keep.mkdir(parents=True, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as fh:
             r = subprocess.run(
                 ["security", "find-generic-password", "-s", "Claude Code-credentials",
@@ -492,7 +497,7 @@ def _keychain_rescue(account: str, label: str | None) -> bool:
             os.chmod(dest, 0o600)
         except Exception:
             pass
-        log(f"열쇠꾸러미에 있던 자격을 {dest.name} 으로 따로 보관했습니다"
+        log(f"열쇠꾸러미에 있던 자격을 creds/rescued/{dest.name} 으로 따로 보관했습니다"
             f"(어느 계정 것인지는 사람이 확인). 지금 계정 저장본은 건드리지 않았습니다.")
         return True
     except Exception as e:
@@ -504,8 +509,11 @@ def _keychain_rescue(account: str, label: str | None) -> bool:
         return False
 
 
-def _keychain_fix(account: str | None, label: str | None = None) -> bool:
-    """열쇠꾸러미에 남은 클로드 자격을 저장본으로 옮긴 뒤 지운다. 지웠으면 True.
+def _keychain_fix(account: str | None, label: str | None = None) -> str:
+    """열쇠꾸러미에 남은 클로드 자격을 따로 보관한 뒤 지운다.
+
+    돌려주는 값: "fixed"(지우고 자격 파일까지 다시 깔았다) / "half"(지우긴 했는데 다시 깔기
+    실패, 사람이 저장본을 깔아야 한다) / ""(아무것도 안 했다).
 
     **옮기기에 실패하면 지우지 않는다** — 최신 재발급 열쇠를 잃는 사고를 막는 핵심 규칙이다.
     지우는 건 열쇠꾸러미 항목 하나뿐이고, 자격 파일은 지운 뒤 저장본으로 다시 채운다.
@@ -514,15 +522,15 @@ def _keychain_fix(account: str | None, label: str | None = None) -> bool:
     손대지 않고 사람에게 넘긴다(지우고 다시 생기고를 반복하는 것을 막는다).
     """
     if not account or sys.platform != "darwin":
-        return False
+        return ""
     try:
         if KEYCHAIN_STAMP.exists() and time.time() - KEYCHAIN_STAMP.stat().st_mtime < KEYCHAIN_FIX_COOLDOWN:
-            return False
+            return ""
     except Exception:
         pass
-    # 지우기 전에 값을 저장본으로 옮긴다. 못 옮기면 지우지 않는다.
+    # 지우기 전에 값을 따로 보관한다. 못 보관하면 지우지 않는다.
     if not _keychain_rescue(account, label):
-        return False
+        return ""
     try:
         r = subprocess.run(
             ["security", "delete-generic-password", "-s", "Claude Code-credentials", "-a", account],
@@ -530,10 +538,10 @@ def _keychain_fix(account: str | None, label: str | None = None) -> bool:
         )
         if r.returncode != 0:
             log("열쇠꾸러미의 옛 자격을 지우지 못했습니다. 사람이 지워야 합니다.")
-            return False
+            return ""
     except Exception as e:
         log(f"열쇠꾸러미 정리 실패({type(e).__name__}). 사람이 지워야 합니다.")
-        return False
+        return ""
     try:
         KEYCHAIN_STAMP.write_text(str(int(time.time())), encoding="utf-8")
     except Exception:
@@ -543,9 +551,24 @@ def _keychain_fix(account: str | None, label: str | None = None) -> bool:
     # 다시 깔기에 실패하면 고쳐진 게 아니다. 성공했다고 알리면 안 된다(코덱스 검수).
     if label and not _switch(label):
         log("자격 파일을 저장본으로 다시 깔지 못했습니다. 사람 손이 필요합니다.")
-        return False
+        if st.claim_notice(f"cred-restore:{int(time.time() // 3600)}"):
+            _notify_restore_failed(label)
+        return "half"   # 지우기는 됐다. 열쇠꾸러미를 또 지우라고 안내하면 안 된다
     log("열쇠꾸러미에 남아 있던 옛 자격을 지웠습니다. 이제 계정 저장본으로 나갑니다.")
-    return True
+    return "fixed"
+
+
+def _notify_restore_failed(label: str) -> None:
+    """열쇠꾸러미는 정리했는데 저장본을 자격 자리에 다시 깔지 못했을 때."""
+    notify(
+        "클로드 로그인을 반쯤 고쳤습니다. 마지막 한 걸음이 사람 손을 기다립니다.\n\n"
+        "무슨 일: 이 컴퓨터 열쇠꾸러미에 남아 거절을 부르던 옛 자격은 치웠습니다. "
+        f"그런데 '{label}' 계정 저장본을 쓰는 자리에 다시 깔지 못했습니다. "
+        "그래서 봇들이 아직 로그인 거절을 받습니다.\n\n"
+        "할 일: Mac 에서 아래 한 줄을 실행하세요.\n"
+        f"  python3 ~/projects/ai-rotator/switch_account.py {label}\n\n"
+        "그래도 안 되면 개발 봇에 \"클로드 로그인 고쳐줘\" 라고 답장하세요."
+    )
 
 
 def _notify_cred_fixed(labels: list) -> None:
@@ -618,7 +641,8 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
                 place_why, recent, acct = _cred_place_check(state, used_label)
-                if place_why and acct and _keychain_fix(acct, used_label):
+                fix = _keychain_fix(acct, used_label) if (place_why and acct) else ""
+                if fix == "fixed":
                     # 옛 자격을 스스로 지웠다. 계정은 그대로 두고 다시 시도하면 통과한다.
                     log(f"'{used_label}' 계정은 그대로 두고 다시 시도합니다.")
                     if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
@@ -626,6 +650,10 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                     st.save_state(state)
                     return used_label or current
                 if place_why:
+                    # "half" 면 저장본 재설치 안내가 이미 나갔다. 같은 일로 두 번 알리지 않는다.
+                    if fix == "half":
+                        st.save_state(state)
+                        return used_label or current
                     # 계정이 죽은 게 아니라 이 컴퓨터가 자격을 읽는 자리가 깨진 경우다.
                     # 여기서 계정을 재우면 멀쩡한 계정이 줄줄이 잠기고(2026-07-29 B 가 그렇게
                     # 잠겼다), 봇들이 종량제로 넘어가 카드가 나간다. 막지 말고 사람에게 알린다.

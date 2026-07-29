@@ -1027,11 +1027,14 @@ def case_keychain_self_fix(tmp):
         install(fake)
         proc = claude_pool.run(["claude", "-p", "안녕"])
         check("옛 자격을 지움", fake.keychain_deleted == ["kwon"], f"{fake.keychain_deleted}")
-        rescued = list((Path(tmp) / "creds").glob("_keychain-rescued-*.json"))
+        rescued = list((Path(tmp) / "creds" / "rescued").glob("keychain-*.json"))
         check("지우기 전에 값을 따로 보관", len(rescued) == 1 and
               "test-refresh" in rescued[0].read_text(encoding="utf-8"), f"{rescued}")
         check("계정 저장본은 안 덮음",
               (Path(tmp) / "creds" / "A.json").read_text(encoding="utf-8").strip() == "{}")
+        check("보관 파일이 계정 목록에 안 섞임", "rescued" not in st.saved_labels()
+              and not any("keychain" in x for x in st.saved_labels()),
+              f"labels={st.saved_labels()}")
         check("지운 뒤 같은 계정으로 성공", proc.returncode == 0, f"rc={proc.returncode}")
         check("다른 계정으로 안 넘어감", set(fake.switches) <= {"A"}, f"switches={fake.switches}")
         check("계정을 막지 않음", st.load_state()["blocked"] == {},
@@ -1075,6 +1078,10 @@ def case_keychain_self_fix(tmp):
         check("고쳐졌다고 알리지 않음",
               not any("스스로 풀렸습니다" in m for m in fake_noswitch.notices),
               f"notices={fake_noswitch.notices[:1]}")
+        check("저장본을 다시 깔라고 안내", any("switch_account.py" in m
+                                       for m in fake_noswitch.notices))
+        check("이미 지운 열쇠꾸러미를 또 지우라고 하지 않음",
+              not any("security delete" in m for m in fake_noswitch.notices))
 
         # (5) 방금 지웠는데 또 걸리면 손대지 않고 사람에게 넘긴다
         # 앞 케이스가 남긴 막힘 기록이 넘어오지 않게 상태 파일부터 지운다(같은 임시 폴더를 쓴다).
