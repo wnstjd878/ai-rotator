@@ -445,7 +445,12 @@ def _warn_cred_place(label: str | None) -> str:
 
 
 def _keychain_rescue(account: str, label: str | None) -> bool:
-    """열쇠꾸러미 값을 계정 저장본으로 옮겨 담는다. 옮겼으면 True.
+    """열쇠꾸러미 값을 따로 보관해 둔다. 보관했으면 True.
+
+    **계정 저장본(creds/<라벨>.json)은 절대 덮지 않는다.** 열쇠꾸러미 값이 어느 계정 것인지
+    알 수 없기 때문이다. 지금 라벨이 A 여도 열쇠꾸러미에는 B 로 로그인한 값이 들어 있을 수
+    있고, 그걸 A 저장본에 쓰면 멀쩡한 A 를 잃는다(코덱스 검수 2026-07-29).
+    그래서 `creds/_keychain-rescued-<시각>.json` 으로 따로 남기고, 쓸지 말지는 사람이 정한다.
 
     **지우기 전에 반드시 이걸 먼저 한다.** 클로드는 자격을 새로 받을 때마다 재발급 열쇠를
     한 번 쓰고 버리는데(회전), 화면 세션에서는 그 최신 값이 열쇠꾸러미에 저장된다.
@@ -458,13 +463,12 @@ def _keychain_rescue(account: str, label: str | None) -> bool:
     """
     import json as _json
 
-    if not label:
-        return False
-    # 저장본을 **쓰는** 경로는 pool_state 가 정한 자리를 따른다. BASE 를 그대로 쓰면
-    # 시험이 운영 저장본을 덮어쓴다(2026-07-29 실사고: 시험이 A 저장본을 가짜 값으로 밀었다).
+    # 보관 자리는 pool_state 가 정한 곳을 따른다. BASE 를 그대로 쓰면 시험이 운영 폴더에
+    # 파일을 만든다(2026-07-29 실사고: 시험이 A 저장본을 가짜 값으로 밀었다).
     creds = Path(getattr(st, "CREDS_DIR", BASE / "creds"))
-    dest = creds / f"{label}.json"
-    tmp = creds / f".{label}.keychain.tmp"
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = creds / f"_keychain-rescued-{stamp}.json"
+    tmp = creds / f".keychain-{stamp}.tmp"
     try:
         creds.mkdir(parents=True, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -483,24 +487,20 @@ def _keychain_rescue(account: str, label: str | None) -> bool:
             tmp.unlink(missing_ok=True)
             log("열쇠꾸러미 값에 재발급 열쇠가 없어 지우기를 취소합니다.")
             return False
-        # 저장본보다 새 것일 때만 덮는다(옛 값으로 최신 저장본을 밀지 않게).
+        os.replace(tmp, dest)
         try:
-            cur = _json.loads(dest.read_text(encoding="utf-8")).get("claudeAiOauth", {})
-            if int(o.get("expiresAt") or 0) < int(cur.get("expiresAt") or 0):
-                tmp.unlink(missing_ok=True)
-                log(f"열쇠꾸러미 값이 '{label}' 저장본보다 오래돼 그대로 둡니다.")
-                return True   # 최신은 이미 저장본에 있으니 지워도 잃을 게 없다
+            os.chmod(dest, 0o600)
         except Exception:
             pass
-        os.replace(tmp, dest)
-        log(f"열쇠꾸러미에 있던 최신 자격을 '{label}' 저장본으로 옮겼습니다.")
+        log(f"열쇠꾸러미에 있던 자격을 {dest.name} 으로 따로 보관했습니다"
+            f"(어느 계정 것인지는 사람이 확인). 지금 계정 저장본은 건드리지 않았습니다.")
         return True
     except Exception as e:
         try:
             tmp.unlink(missing_ok=True)
         except Exception:
             pass
-        log(f"열쇠꾸러미 값 옮기기 실패({type(e).__name__}). 지우기를 취소합니다.")
+        log(f"열쇠꾸러미 값 보관 실패({type(e).__name__}). 지우기를 취소합니다.")
         return False
 
 
@@ -538,10 +538,12 @@ def _keychain_fix(account: str | None, label: str | None = None) -> bool:
         KEYCHAIN_STAMP.write_text(str(int(time.time())), encoding="utf-8")
     except Exception:
         pass
-    # 저장본을 자격 파일 자리에 다시 깔아 준다(떠나는 계정은 주지 않는다 — 망가진 값을
-    # 저장본에 되저장하면 방금 살려낸 자격을 다시 덮어쓴다).
-    if label:
-        _switch(label)
+    # 저장본을 자격 파일 자리에 다시 깔아 준다(떠나는 계정은 주지 않는다. 망가진 값을
+    # 저장본에 되저장하면 멀쩡한 자격을 덮어쓴다).
+    # 다시 깔기에 실패하면 고쳐진 게 아니다. 성공했다고 알리면 안 된다(코덱스 검수).
+    if label and not _switch(label):
+        log("자격 파일을 저장본으로 다시 깔지 못했습니다. 사람 손이 필요합니다.")
+        return False
     log("열쇠꾸러미에 남아 있던 옛 자격을 지웠습니다. 이제 계정 저장본으로 나갑니다.")
     return True
 
@@ -554,6 +556,7 @@ def _notify_cred_fixed(labels: list) -> None:
         f"받던 상태였습니다. 거절받은 계정: {', '.join(labels) or '확인 안 됨'}. "
         "그 옛 자격만 지우고 계정 저장본으로 다시 연결했습니다.\n\n"
         "하실 일: 없습니다. 표지 만들기·칼럼 초안 같은 봇은 그대로 돌아갑니다. "
+        "지운 값은 ai-rotator/creds/_keychain-rescued-*.json 에 그대로 남겨 뒀습니다.\n\n"
         "혹시 같은 알림이 자꾸 오면 개발 봇에 \"클로드 로그인 자꾸 끊겨\" 라고 답장하세요."
     )
 

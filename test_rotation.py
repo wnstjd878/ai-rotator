@@ -1027,8 +1027,11 @@ def case_keychain_self_fix(tmp):
         install(fake)
         proc = claude_pool.run(["claude", "-p", "안녕"])
         check("옛 자격을 지움", fake.keychain_deleted == ["kwon"], f"{fake.keychain_deleted}")
-        check("지우기 전에 저장본으로 백업", "test-refresh" in
-              (Path(tmp) / "creds" / "A.json").read_text(encoding="utf-8"))
+        rescued = list((Path(tmp) / "creds").glob("_keychain-rescued-*.json"))
+        check("지우기 전에 값을 따로 보관", len(rescued) == 1 and
+              "test-refresh" in rescued[0].read_text(encoding="utf-8"), f"{rescued}")
+        check("계정 저장본은 안 덮음",
+              (Path(tmp) / "creds" / "A.json").read_text(encoding="utf-8").strip() == "{}")
         check("지운 뒤 같은 계정으로 성공", proc.returncode == 0, f"rc={proc.returncode}")
         check("다른 계정으로 안 넘어감", set(fake.switches) <= {"A"}, f"switches={fake.switches}")
         check("계정을 막지 않음", st.load_state()["blocked"] == {},
@@ -1059,7 +1062,23 @@ def case_keychain_self_fix(tmp):
         check("대신 사람에게 안내", any("security delete" in m for m in fake_locked.notices),
               f"notices={len(fake_locked.notices)}")
 
-        # (4) 방금 지웠는데 또 걸리면 손대지 않고 사람에게 넘긴다
+        # (4) 지웠는데 자격 파일 다시 깔기가 실패하면 고쳐졌다고 하지 않는다
+        claude_pool.KEYCHAIN_STAMP.unlink(missing_ok=True)
+        setup(tmp, ["A", "B"], "A")
+        fake_noswitch = Fake({"A": (1, dead, "")}, switch_ok=False,
+                             keychain="kwon", keychain_out=dead)
+        install(fake_noswitch)
+        try:
+            claude_pool.run(["claude", "-p", "안녕"])
+        except claude_pool.AllAccountsExhausted:
+            pass   # 다시 깔기도 실패하고 갈아탈 데도 없으면 소진으로 끝난다(예상된 길)
+        check("고쳐졌다고 알리지 않음",
+              not any("스스로 풀렸습니다" in m for m in fake_noswitch.notices),
+              f"notices={fake_noswitch.notices[:1]}")
+
+        # (5) 방금 지웠는데 또 걸리면 손대지 않고 사람에게 넘긴다
+        # 앞 케이스가 남긴 막힘 기록이 넘어오지 않게 상태 파일부터 지운다(같은 임시 폴더를 쓴다).
+        (Path(tmp) / "state.json").unlink(missing_ok=True)
         setup(tmp, ["A", "B"], "A")
         claude_pool.KEYCHAIN_STAMP.write_text(str(int(time.time())), encoding="utf-8")
         fake3 = Fake({"A": (1, dead, "")}, keychain="kwon", keychain_out=dead)
