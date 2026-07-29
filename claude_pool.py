@@ -49,6 +49,8 @@ except Exception:
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
 AUTH_FAIL_WINDOW = 10 * 60      # 이 시간 안에 서로 다른 계정이 거절받으면 자격 자리를 의심한다
+KEYCHAIN_FIX_COOLDOWN = 60 * 60  # 열쇠꾸러미를 스스로 지운 뒤, 다시 지우기까지 두는 시간
+KEYCHAIN_STAMP = BASE / ".keychain-cleared"  # 마지막으로 스스로 지운 시각
 CLAUDE_BINS = (
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
@@ -418,21 +420,75 @@ def _cred_place_check(state: dict, label: str | None) -> tuple:
     return "", recent, None
 
 
-def _warn_cred_place(label: str | None) -> bool:
-    """계정을 갈아타기 전 단계에서도 열쇠꾸러미 그림자를 잡아 알린다.
+def _warn_cred_place(label: str | None) -> str:
+    """계정을 갈아타기 전 단계에서도 열쇠꾸러미 그림자를 잡아 고치거나 알린다.
 
     로그인 거절 문구가 'auth'(로그인 자체가 안 됨)로 분류되면 계정 교체 경로를 안 타서
     _cred_place_check 가 아예 안 돌고, 봇은 조용히 실패한 채 사람도 모른다(코덱스 검수 2026-07-29).
     여기서는 잠금을 잡지 않으므로 거절 기록은 남기지 않고 열쇠꾸러미만 본다.
+
+    돌려주는 값: "fixed"(스스로 지웠으니 다시 해보라) / "warned"(사람이 지워야 한다) / ""(해당 없음).
     """
     acct = _keychain_account()
     if not acct:
-        return False
+        return ""
     why = "열쇠꾸러미에 옛 자격이 남아 있습니다"
     log(f"로그인 거절. 그런데 {why}. 계정 문제가 아니라 자격을 읽는 자리 문제로 봅니다.")
+    labels = [label] if label else []
+    if _keychain_fix(acct):
+        if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
+            _notify_cred_fixed(labels)
+        return "fixed"
     if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
-        _notify_cred_place(why, [label] if label else [], acct)
+        _notify_cred_place(why, labels, acct)
+    return "warned"
+
+
+def _keychain_fix(account: str | None) -> bool:
+    """열쇠꾸러미에 남은 옛 클로드 자격을 스스로 지운다. 지웠으면 True.
+
+    **지우는 건 열쇠꾸러미 항목 하나뿐이다.** 계정 저장본(creds/*.json)과 자격 파일은 안 건드린다.
+    값도 읽지 않는다(읽으면 그 값이 기록에 남는다).
+    로그인 거절을 실제로 받은 뒤에만 부른다 — 잘 돌 때는 절대 지우지 않는다.
+    한 시간에 한 번만 지운다. 지운 직후 또 걸리면 원인이 다른 데 있다는 뜻이라, 그때는
+    손대지 않고 사람에게 넘긴다(지우고 다시 생기고를 반복하는 것을 막는다).
+    """
+    if not account or sys.platform != "darwin":
+        return False
+    try:
+        if KEYCHAIN_STAMP.exists() and time.time() - KEYCHAIN_STAMP.stat().st_mtime < KEYCHAIN_FIX_COOLDOWN:
+            return False
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ["security", "delete-generic-password", "-s", "Claude Code-credentials", "-a", account],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            log("열쇠꾸러미의 옛 자격을 지우지 못했습니다. 사람이 지워야 합니다.")
+            return False
+    except Exception as e:
+        log(f"열쇠꾸러미 정리 실패({type(e).__name__}). 사람이 지워야 합니다.")
+        return False
+    try:
+        KEYCHAIN_STAMP.write_text(str(int(time.time())), encoding="utf-8")
+    except Exception:
+        pass
+    log("열쇠꾸러미에 남아 있던 옛 자격을 지웠습니다. 이제 계정 저장본으로 나갑니다.")
     return True
+
+
+def _notify_cred_fixed(labels: list) -> None:
+    """스스로 고쳤을 때 결과만 알린다. 사람이 할 일은 없다."""
+    notify(
+        "클로드 로그인이 잠깐 막혔다가 스스로 풀렸습니다.\n\n"
+        "무슨 일: 이 컴퓨터 열쇠꾸러미에 옛 자격이 남아 있어 어느 계정으로 바꿔도 거절을 "
+        f"받던 상태였습니다. 거절받은 계정: {', '.join(labels) or '확인 안 됨'}. "
+        "그 옛 자격만 지우고 계정 저장본으로 다시 연결했습니다.\n\n"
+        "하실 일: 없습니다. 표지 만들기·칼럼 초안 같은 봇은 그대로 돌아갑니다. "
+        "혹시 같은 알림이 자꾸 오면 개발 봇에 \"클로드 로그인 자꾸 끊겨\" 라고 답장하세요."
+    )
 
 
 def _notify_cred_place(why: str, labels: list, account: str | None = None) -> None:
@@ -492,6 +548,13 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
                 place_why, recent, acct = _cred_place_check(state, used_label)
+                if place_why and acct and _keychain_fix(acct):
+                    # 옛 자격을 스스로 지웠다. 계정은 그대로 두고 다시 시도하면 통과한다.
+                    log(f"'{used_label}' 계정은 그대로 두고 다시 시도합니다.")
+                    if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
+                        _notify_cred_fixed(recent)
+                    st.save_state(state)
+                    return used_label or current
                 if place_why:
                     # 계정이 죽은 게 아니라 이 컴퓨터가 자격을 읽는 자리가 깨진 경우다.
                     # 여기서 계정을 재우면 멀쩡한 계정이 줄줄이 잠기고(2026-07-29 B 가 그렇게
@@ -672,7 +735,10 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
             # 이때 계정을 돌리면 멀쩡한 계정들이 줄줄이 막힌 것으로 잘못 기록된다.
             # 다만 봇 자리(launchd)에서 이 문구가 나오면 열쇠꾸러미에 남은 옛 자격이 원인일 수
             # 있다. 그 경우 사람이 지워줘야 풀리므로 여기서도 한 번 알린다.
-            if not _warn_cred_place(used_label):
+            place = _warn_cred_place(used_label)
+            if place == "fixed":
+                continue  # 옛 자격을 지웠으니 같은 계정으로 한 번 더 해본다
+            if not place:
                 log("로그인이 안 된 상태입니다. 계정을 바꾸지 않습니다. "
                     "화면 세션에서 claude /login 을 했는지 확인하세요.")
             return _finish(proc, args, want_check)

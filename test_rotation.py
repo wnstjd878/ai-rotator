@@ -54,21 +54,40 @@ def check(name, cond, detail=""):
 class Fake:
     """가짜 claude 실행기. 계정 라벨별로 결과를 정해둔다."""
 
-    def __init__(self, per_label, switch_ok=True):
+    def __init__(self, per_label, switch_ok=True, keychain=None, keychain_out=None):
         self.per_label = per_label
         self.switch_ok = switch_ok
         self.calls = []
         self.switches = []
         self.leavings = []   # 갈아탈 때 '떠나는 계정'을 제대로 넘겼는지 확인용
         self.notices = []
+        # 맥 열쇠꾸러미 흉내. keychain 은 항목에 걸린 계정 이름(없으면 None).
+        # keychain_out 을 주면 그 항목이 남아 있는 동안 claude 가 그 응답으로 거절한다
+        # (열쇠꾸러미 값이 계정 저장본을 가로채는 실제 상황).
+        self.keychain = keychain
+        self.keychain_out = keychain_out
+        self.keychain_deleted = []
 
     def run(self, args, **kwargs):
-        # 열쇠꾸러미 조회는 claude 호출이 아니다. 세지 않고 '항목 없음'으로 답한다
-        # (있는 경우를 보는 시험은 _keychain_account 를 직접 바꿔 쓴다).
+        # 열쇠꾸러미 조회·삭제는 claude 호출이 아니다. 세지 않는다.
         if args and str(args[0]).endswith("security"):
-            return subprocess.CompletedProcess(args, 1, "", "not found")
+            if "find-generic-password" in args:
+                if self.keychain:
+                    body = ('    "acct"<blob>="%s"\n    "svce"<blob>="Claude Code-credentials"\n'
+                            % self.keychain)
+                    return subprocess.CompletedProcess(args, 0, body, "")
+                return subprocess.CompletedProcess(args, 1, "", "not found")
+            if "delete-generic-password" in args:
+                if self.keychain and self.keychain in args:
+                    self.keychain_deleted.append(self.keychain)
+                    self.keychain = None
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 1, "", "not found")
+            return subprocess.CompletedProcess(args, 1, "", "unsupported")
         label = st.load_state().get("current")
         self.calls.append(label)
+        if self.keychain and self.keychain_out:
+            return subprocess.CompletedProcess(args, 1, self.keychain_out, "")
         rc, out, err = self.per_label.get(label, (1, "", "unknown account"))
         return subprocess.CompletedProcess(args, rc, out, err)
 
@@ -965,6 +984,69 @@ def case_keychain_shadow(tmp):
         claude_pool._cred_alive = real_alive
 
 
+def case_keychain_self_fix(tmp):
+    print("\n[30] 열쇠꾸러미에 남은 옛 자격은 스스로 지우고 다시 시도한다")
+    # 2026-07-29 사고를 사람 손 없이 풀기 위한 자동 복구. 지우는 건 열쇠꾸러미 항목 하나뿐이고
+    # 계정 저장본은 건드리지 않는다. 한 시간에 한 번만 지운다(지우고 또 생기는 반복 방지).
+    dead = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "api_error_status": 401, "stop_reason": "stop_sequence",
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }, ensure_ascii=False)
+    not_logged_in = json.dumps({
+        "type": "result", "is_error": True,
+        "result": "Not logged in · Please run /login",
+    }, ensure_ascii=False)
+
+    real_stamp = claude_pool.KEYCHAIN_STAMP
+    real_platform = claude_pool.sys.platform
+    real_alive = claude_pool._cred_alive
+    try:
+        claude_pool.KEYCHAIN_STAMP = Path(tmp) / ".keychain-cleared"
+        claude_pool.sys.platform = "darwin"   # 리눅스·윈도우에서 시험해도 같은 길을 보게
+        claude_pool._cred_alive = lambda label: False
+
+        # (1) 로그인 거절 + 열쇠꾸러미 항목 있음 → 스스로 지우고 같은 계정으로 성공
+        setup(tmp, ["A", "B"], "A")
+        fake = Fake({"A": (0, OK_OUT, "")}, keychain="kwon", keychain_out=dead)
+        install(fake)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("옛 자격을 지움", fake.keychain_deleted == ["kwon"], f"{fake.keychain_deleted}")
+        check("지운 뒤 같은 계정으로 성공", proc.returncode == 0, f"rc={proc.returncode}")
+        check("계정 교체 없음", fake.switches == [], f"switches={fake.switches}")
+        check("계정을 막지 않음", st.load_state()["blocked"] == {},
+              f"blocked={st.load_state()['blocked']}")
+        check("스스로 풀렸다고 알림", any("스스로 풀렸습니다" in m for m in fake.notices),
+              f"notices={fake.notices[:1]}")
+        check("사람이 지우라는 안내는 안 감",
+              not any("security delete" in m for m in fake.notices))
+
+        # (2) '로그인 안 됨' 문구로 와도 지우고 다시 시도한다
+        claude_pool.KEYCHAIN_STAMP.unlink(missing_ok=True)
+        setup(tmp, ["A", "B"], "A")
+        fake2 = Fake({"A": (0, OK_OUT, "")}, keychain="kwon", keychain_out=not_logged_in)
+        install(fake2)
+        proc2 = claude_pool.run(["claude", "-p", "안녕"])
+        check("이 경로에서도 지움", fake2.keychain_deleted == ["kwon"], f"{fake2.keychain_deleted}")
+        check("지운 뒤 성공", proc2.returncode == 0, f"rc={proc2.returncode}")
+
+        # (3) 방금 지웠는데 또 걸리면 손대지 않고 사람에게 넘긴다
+        setup(tmp, ["A", "B"], "A")
+        claude_pool.KEYCHAIN_STAMP.write_text(str(int(time.time())), encoding="utf-8")
+        fake3 = Fake({"A": (1, dead, "")}, keychain="kwon", keychain_out=dead)
+        install(fake3)
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("다시 지우지 않음", fake3.keychain_deleted == [], f"{fake3.keychain_deleted}")
+        check("사람이 지울 명령을 안내", any("security delete" in m for m in fake3.notices),
+              f"notices={len(fake3.notices)}")
+        check("그래도 계정은 안 막음", st.load_state()["blocked"] == {},
+              f"blocked={st.load_state()['blocked']}")
+    finally:
+        claude_pool.KEYCHAIN_STAMP = real_stamp
+        claude_pool.sys.platform = real_platform
+        claude_pool._cred_alive = real_alive
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -983,7 +1065,8 @@ def main():
                      case_shared_three_machines, case_save_back,
                      case_save_back_live_label, case_live_label_source,
                      case_switch_passes_leaving, case_ok_envelope_bad_exitcode,
-                     case_dead_but_cred_alive, case_keychain_shadow):
+                     case_dead_but_cred_alive, case_keychain_shadow,
+                     case_keychain_self_fix):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
