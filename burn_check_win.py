@@ -144,11 +144,12 @@ def save_refreshed(box_file: Path, label: str) -> str:
     return "주인 확인 실패(%r) — 저장본 안 덮고 %s 에 보관" % (owner, dst.name)
 
 
-def burn(label: str, current: str | None):
+def burn(label: str, current: str | None) -> bool:
+    """라벨 하나를 확인한다. 이상이 없으면 True."""
     store = CREDS / (label + ".json")
     if not store.exists():
         print("%s: 저장본 없음" % label)
-        return
+        return False
     if label == current:
         live_fp, store_fp = fp(LIVE), fp(store)
         state = "저장본=자격 자리 일치" if live_fp == store_fp else \
@@ -157,7 +158,7 @@ def burn(label: str, current: str | None):
         if live_fp != store_fp:
             # 자격 자리가 살아 있는 최신이므로, 주인만 맞으면 저장본을 그 값으로 맞춘다
             print("  " + save_refreshed(LIVE, label))
-        return
+        return True
 
     live_before = fp(LIVE)
     box = Path(tempfile.mkdtemp(prefix="claude-burn-%s-" % label))
@@ -167,13 +168,15 @@ def burn(label: str, current: str | None):
         rc, out = run_claude(box)
         after = fp(box / ".credentials.json")
         refreshed = after is not None and after != before
+        v = verdict_of(rc, out)
         print("%s: %s / 종료코드 %s / 재발급 %s / 응답 앞부분: %r"
-              % (label, verdict_of(rc, out), rc,
-                 "일어남" if refreshed else "없음", out[:80]))
+              % (label, v, rc, "일어남" if refreshed else "없음", out[:80]))
         if refreshed:
             print("  " + save_refreshed(box / ".credentials.json", label))
         if fp(LIVE) != live_before:
             print("  경고: 자격 자리 파일이 바뀌었습니다. 격리가 샌 것 — 즉시 확인 필요!")
+            return False
+        return "살아 있음" in v
     finally:
         shutil.rmtree(box, ignore_errors=True)
 
@@ -189,9 +192,11 @@ def main() -> int:
         print("격리 검사 실패 — CLAUDE_CONFIG_DIR 가 안 먹는 환경입니다. 전부 중단.")
         return 1
     print("격리 검사 통과(가짜 자격이 정상적으로 거절됨)")
+    bad = 0
     for label in ("A", "B", "C", "D"):
-        burn(label, current)
-    return 0
+        if not burn(label, current):
+            bad += 1
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
