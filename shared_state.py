@@ -204,6 +204,15 @@ def claim_once(key: str) -> bool:
 
 
 USAGE_KEY_PREFIX = "usage:"
+CURRENT_KEY_PREFIX = "current:"
+CURRENT_STALE = 6 * 3600  # 이 시간 넘게 소식 없는 머신은 그 계정을 쓴다고 보지 않는다
+
+# 기계 이름은 사람이 알아보기 어렵다. 화면에 찍을 때만 바꿔 쓴다(값 자체는 기계 이름 그대로).
+HOST_ALIAS = {
+    "DESKTOP-LR51NVM": "본체",
+    "DESKTOP-FIVP2HL": "winserver",
+    "gwon-ui-Macmini": "Mac",
+}
 
 
 def _hostname() -> str:
@@ -212,6 +221,11 @@ def _hostname() -> str:
         return socket.gethostname().split(".")[0]
     except Exception:
         return "?"
+
+
+def host_label(host: str) -> str:
+    """기계 이름을 화면용 이름으로. 모르는 이름은 그대로 둔다."""
+    return HOST_ALIAS.get(str(host or ""), str(host or "?"))
 
 
 def put_usage(label: str, usage: dict, host: str | None = None) -> bool:
@@ -260,6 +274,54 @@ def get_usage_all() -> dict | None:
             continue
         if isinstance(val, dict):
             out[key[len(USAGE_KEY_PREFIX):]] = val
+    return out
+
+
+def put_current(label: str, host: str | None = None) -> bool:
+    """이 머신이 지금 어느 계정에 물려 있는지 공유 칠판에 적는다.
+
+    자격은 머신마다 따로라, 세 머신이 서로 다른 계정에 앉아 있는 게 정상이다. 그런데
+    한 화면에서는 자기 계정만 보여서 "지금 누가 어디에 붙어 있나" 를 알 수 없었다.
+    머신당 한 줄(`current:<기계이름>`)만 쓰므로 행이 늘지 않는다.
+    """
+    if not label:
+        return False
+    body = [{
+        "key": CURRENT_KEY_PREFIX + (host or _hostname()),
+        "value": json.dumps({"label": label, "at": round(time.time())}, ensure_ascii=False),
+        "updated_at": _to_iso(time.time()),
+    }]
+    res = _request("POST", META_TABLE, body=body,
+                   headers={"Prefer": "resolution=merge-duplicates"})
+    return res is not None
+
+
+def get_current_all(now: float | None = None) -> dict | None:
+    """{라벨: [머신 이름...]} 지금 그 계정에 물려 있는 머신들. 읽기 실패면 None.
+
+    오래된 기록은 뺀다. 꺼진 머신이 몇 달 전 계정을 아직 쓰는 것처럼 보이면 안 된다.
+    """
+    now = time.time() if now is None else now
+    rows = _request("GET", META_TABLE, params="select=key,value")
+    if rows is None:
+        return None
+    out = {}
+    for r in rows:
+        key = str(r.get("key") or "")
+        if not key.startswith(CURRENT_KEY_PREFIX):
+            continue
+        try:
+            val = json.loads(r.get("value") or "")
+            at = float(val.get("at") or 0)
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not isinstance(val, dict) or not val.get("label"):
+            continue
+        if at and now - at > CURRENT_STALE:
+            continue
+        out.setdefault(str(val["label"]), []).append(host_label(key[len(CURRENT_KEY_PREFIX):]))
+    for labels in out.values():
+        labels.sort()
     return out
 
 

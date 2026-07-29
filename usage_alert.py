@@ -62,6 +62,17 @@ def _share_usage(label: str, usage: dict) -> None:
         pass
 
 
+def _share_current(label: str) -> None:
+    """이 머신이 지금 물려 있는 계정을 공유 칠판에 적는다(어느 화면에서나 보이게)."""
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_current(label)
+    except Exception:
+        pass
+
+
 def _load_alerted() -> dict:
     if not ALERT_STATE.exists():
         return {}
@@ -169,6 +180,8 @@ def refresh_order() -> int:
     """
     state = st.prune_blocked(st.load_state())
     cur = state.get("current")
+    if cur:
+        _share_current(cur)
     seen = []
     for l in st.account_labels():
         cred = BASE / "creds" / f"{l}.json"
@@ -207,6 +220,7 @@ def main() -> int:
     # 이 머신이 쓰는 계정의 잔여량을 공유 칠판에 올린다. 다른 머신은 이 계정의 출입증이
     # 만료돼 직접 못 읽으므로, 이게 있어야 어느 화면에서나 계정 넷이 다 보인다.
     _share_usage(label, u)
+    _share_current(label)
 
     if preview:  # 단계를 안 넘었어도 지금 값으로 문구를 만들어 보여준다
         hits = [(k, max(0.0, 100 - float(u[p])), u[r])

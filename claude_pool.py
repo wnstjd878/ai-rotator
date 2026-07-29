@@ -141,6 +141,16 @@ def _ago_text(sec: float) -> str:
     return f"{int(sec // 86400)}일 전"
 
 
+def _host_label(host) -> str:
+    """기계 이름을 사람이 알아보는 이름으로(본체/Mac/winserver). 못 바꾸면 원래 이름."""
+    try:
+        import shared_state
+
+        return shared_state.host_label(host)
+    except Exception:
+        return str(host or "다른 기기")
+
+
 def _usage_line(entry: dict, now: float) -> str:
     """기록해둔 사용량 한 줄. 초기화 시각이 지난 값은 낡은 것이라 뺀다. 없으면 빈 글."""
     parts = []
@@ -172,7 +182,7 @@ def _last_seen_usage(state: dict, shared: dict | None, label: str, now: float) -
         cands.append(("이 기기", local))
     remote = (shared or {}).get(label)
     if remote:
-        cands.append((str(remote.get("host") or "다른 기기"), remote))
+        cands.append((_host_label(remote.get("host")), remote))
     if not cands:
         return "사용량 못 읽음"
 
@@ -213,18 +223,48 @@ def _shared_usage() -> dict | None:
         return None
 
 
+def _share_current(label: str | None) -> None:
+    """이 머신이 지금 물려 있는 계정을 공유 칠판에 적는다. 실패해도 조용히 넘어간다."""
+    if not label:
+        return
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_current(label)
+    except Exception:
+        pass
+
+
+def _shared_current() -> dict | None:
+    """{라벨: [그 계정에 물려 있는 머신...]}. 못 읽으면 None."""
+    try:
+        import shared_state
+
+        if not shared_state.enabled():
+            return None
+        return shared_state.get_current_all()
+    except Exception:
+        return None
+
+
 def status_text() -> str:
     state = st.prune_blocked(st.load_state())
     cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
     now = time.time()
     saved = set(st.saved_labels())
     lines = [f"현재 계정: {cur}"]
-    shared = _shared_usage()  # 다른 머신이 자기 계정에서 읽어 올린 값
+    _share_current(state.get("current"))  # 이 머신이 어디 물려 있는지 먼저 올린다
+    shared = _shared_usage()   # 다른 머신이 자기 계정에서 읽어 올린 값
+    holders = _shared_current() or {}  # 어느 머신이 어느 계정에 물려 있는지
     seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
     for label in st.account_labels():
         marks = []
+        who = holders.get(label) or []
         if label == cur:
-            marks.append("현재 사용 중")
+            marks.append("현재 사용 중" + (f"({', '.join(who)})" if who else ""))
+        elif who:
+            marks.append(f"{', '.join(who)} 사용 중")
         if label not in saved:
             marks.append("자격 없음")
         until = (state.get("blocked") or {}).get(label)
