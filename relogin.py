@@ -294,6 +294,31 @@ def grab_code(page):
     return None
 
 
+def pump_wait(page, ms):
+    """브라우저 이벤트를 소화하면서 기다린다.
+
+    time.sleep 으로 기다리면 새 탭 열림·주소 변경 알림이 파이썬 쪽에 반영되지 않아
+    page.url 과 탭 목록이 낡은 채 멈춘다(2026-07-30 A·C·D 로그인 대기에서 실제로 겪음 —
+    사람이 로그인을 끝냈는데 절차가 낡은 화면만 보다 제한 시간까지 헛돌았다).
+    브라우저에 말을 거는 대기(wait_for_timeout)여야 알림이 소화된다.
+    """
+    try:
+        page.wait_for_timeout(ms)
+        return
+    except Exception:
+        pass
+    try:
+        for pg in list(page.context.pages):
+            try:
+                pg.wait_for_timeout(ms)
+                return
+            except Exception:
+                continue
+    except Exception:
+        pass
+    time.sleep(ms / 1000)
+
+
 def find_arrival(page):
     """같은 창의 모든 탭에서 도착 화면을 찾는다. 없으면 None.
 
@@ -346,7 +371,7 @@ def approve(page, url, proc=None):
             here = page.url
         except Exception:
             # 처음 탭이 닫혔다. 남은 탭들에서 도착을 계속 찾는다.
-            time.sleep(3)
+            pump_wait(page, 3000)
             continue
 
         # 로그인·계정 선택 화면이면 사람이 한 번 해야 한다(계정 보호 — 자동 입력 안 함)
@@ -355,7 +380,7 @@ def approve(page, url, proc=None):
                 print("[relogin] 이 전용 크롬에 아직 그 계정 로그인이 없습니다.")
                 print("[relogin] 떠 있는 창에서 직접 로그인해 주세요. 끝나면 자동으로 이어집니다.")
                 told_login = True
-            time.sleep(3)
+            pump_wait(page, 3000)
             continue
 
         # 승인 화면이면 버튼을 누른다
@@ -371,13 +396,13 @@ def approve(page, url, proc=None):
             except Exception:
                 continue
         else:
-            time.sleep(3)
+            pump_wait(page, 3000)
         try:
             moved = page.url != here
         except Exception:
             moved = True
         if not moved:
-            time.sleep(2)
+            pump_wait(page, 2000)
 
     if proc is not None and proc.poll() is not None:
         return "DONE"
