@@ -47,6 +47,21 @@ _pct = usage_check.pct_text            # 남은량 표기 (공용)
 _fmt_reset_full = usage_check.fmt_reset_full  # 초기화 시각 표기 (공용)
 
 
+def _share_usage(label: str, usage: dict) -> None:
+    """읽은 사용량을 공유 칠판에 올린다(보여주기 전용). 실패해도 알림 본 작업을 막지 않는다.
+
+    이 머신이 쓰는 계정은 여기서만 읽히고, 다른 머신에서는 저장본 출입증이 8시간이라
+    조회가 안 된다. 그래서 읽은 김에 올려두면 세 머신이 서로의 계정 잔여량을 볼 수 있다.
+    """
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_usage(label, usage)
+    except Exception:
+        pass
+
+
 def _load_alerted() -> dict:
     if not ALERT_STATE.exists():
         return {}
@@ -160,6 +175,8 @@ def refresh_order() -> int:
         if not cred.exists():
             continue
         u = usage_check.get_usage_for(cred, is_current=(l == cur))
+        if u:
+            _share_usage(l, u)  # 다른 머신 화면에서 이 계정 잔여량이 보이게 올려둔다
         if u and u.get("weekly_reset"):
             seen.append((l, u["weekly_reset"]))
     if not seen:
@@ -187,6 +204,9 @@ def main() -> int:
         # 조용히 넘어가면 경고가 통째로 멈춘 걸 아무도 모른다. 실행 기록에는 남긴다.
         print(f"사용량 못 읽음: {label} ({usage_check.last_error or '사유 모름'})")
         return 0
+    # 이 머신이 쓰는 계정의 잔여량을 공유 칠판에 올린다. 다른 머신은 이 계정의 출입증이
+    # 만료돼 직접 못 읽으므로, 이게 있어야 어느 화면에서나 계정 넷이 다 보인다.
+    _share_usage(label, u)
 
     if preview:  # 단계를 안 넘었어도 지금 값으로 문구를 만들어 보여준다
         hits = [(k, max(0.0, 100 - float(u[p])), u[r])
