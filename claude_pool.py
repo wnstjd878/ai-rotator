@@ -579,7 +579,7 @@ def _notify_cred_fixed(labels: list) -> None:
         f"받던 상태였습니다. 거절받은 계정: {', '.join(labels) or '확인 안 됨'}. "
         "그 옛 자격만 지우고 계정 저장본으로 다시 연결했습니다.\n\n"
         "하실 일: 없습니다. 표지 만들기·칼럼 초안 같은 봇은 그대로 돌아갑니다. "
-        "지운 값은 ai-rotator/creds/_keychain-rescued-*.json 에 그대로 남겨 뒀습니다.\n\n"
+        "지운 값은 ai-rotator/creds/rescued/keychain-*.json 에 그대로 남겨 뒀습니다.\n\n"
         "혹시 같은 알림이 자꾸 오면 개발 봇에 \"클로드 로그인 자꾸 끊겨\" 라고 답장하세요."
     )
 
