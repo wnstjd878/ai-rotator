@@ -294,6 +294,23 @@ def grab_code(page):
     return None
 
 
+def find_arrival(page):
+    """같은 창의 모든 탭에서 도착 화면을 찾는다. 없으면 None.
+
+    로그인 과정(구글 로그인 등)이 처음 연 탭을 닫고 새 탭으로 흐름을 이어가기도 한다.
+    처음 탭만 지켜보면 도착을 영영 못 보고 제한 시간까지 헛돈다(2026-07-30 A·C 에서
+    실제로 겪음 — 사람이 로그인을 끝냈는데 "승인 화면까지 못 갔습니다"로 실패).
+    """
+    try:
+        pages = list(page.context.pages)
+    except Exception:
+        pages = [page]
+    for pg in pages:
+        if on_callback(pg):
+            return pg
+    return None
+
+
 def approve(page, url, proc=None):
     """인증 주소를 열고 승인 버튼을 누른다. 코드를 돌려준다(못 받으면 None).
 
@@ -313,9 +330,16 @@ def approve(page, url, proc=None):
     while time.time() < deadline:
         if proc is not None and proc.poll() is not None:
             return "DONE"  # 자동으로 열린 브라우저가 먼저 끝냈다
-        if on_callback(page):
+        arrived = find_arrival(page)
+        if arrived is not None:
+            page = arrived
             break
-        here = page.url
+        try:
+            here = page.url
+        except Exception:
+            # 처음 탭이 닫혔다. 남은 탭들에서 도착을 계속 찾는다.
+            time.sleep(3)
+            continue
 
         # 로그인·계정 선택 화면이면 사람이 한 번 해야 한다(계정 보호 — 자동 입력 안 함)
         if "/login" in here or "sign-in" in here or "selectAccount" in here:
@@ -340,11 +364,16 @@ def approve(page, url, proc=None):
                 continue
         else:
             time.sleep(3)
-        if page.url == here:
+        try:
+            moved = page.url != here
+        except Exception:
+            moved = True
+        if not moved:
             time.sleep(2)
 
     if proc is not None and proc.poll() is not None:
         return "DONE"
+    page = find_arrival(page) or page
     if not on_callback(page):
         print("[relogin] 승인 화면까지 못 갔습니다. 뜬 창 상태를 확인해 주세요.")
         return None
