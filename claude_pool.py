@@ -130,54 +130,13 @@ def notify(message: str) -> None:
         log(f"알림 전송 실패: {type(e).__name__}")
 
 
-def _ago_text(sec: float) -> str:
-    """지난 시간을 '방금 / 12분 전 / 3시간 전 / 2일 전' 으로."""
-    if sec < 60:
-        return "방금"
-    if sec < 3600:
-        return f"{int(sec // 60)}분 전"
-    if sec < 86400:
-        return f"{int(sec // 3600)}시간 전"
-    return f"{int(sec // 86400)}일 전"
-
-
-def _last_seen_usage(state: dict, label: str, now: float) -> str:
-    """지금 못 읽을 때 마지막으로 본 값으로 대신 보여준다.
-
-    지금 안 쓰는 계정은 저장본 출입증이 8시간이라 대개 조회가 안 된다(자격이 죽은 게 아니다).
-    세션(5시간) 값은 초기화 시각이 지났으면 이미 무의미하므로 안 보여준다. 주간도 같다.
-    """
-    c = (state.get("usage_seen") or {}).get(label)
-    if not c:
-        return "사용량 못 읽음"
-    parts = []
-    for pct_key, reset_key, name in (("weekly_pct", "weekly_reset", "주간"),
-                                     ("session_pct", "session_reset", "세션")):
-        pct, reset = c.get(pct_key), c.get(reset_key)
-        if pct is None:
-            continue
-        try:
-            if reset and float(reset) <= now:
-                continue  # 그 뒤로 초기화됐다 = 낡은 값
-            parts.append(f"{name} 남은 {max(0, 100 - float(pct)):.0f}%")
-        except (TypeError, ValueError):
-            continue
-    if not parts:
-        return "사용량 못 읽음"
-    try:
-        ago = _ago_text(now - float(c.get("at") or now))
-    except (TypeError, ValueError):
-        ago = "이전"
-    return ", ".join(parts) + f" ({ago} 기준)"
-
-
 def status_text() -> str:
     state = st.prune_blocked(st.load_state())
     cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
     now = time.time()
     saved = set(st.saved_labels())
     lines = [f"현재 계정: {cur}"]
-    seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
+    seen_resets = []  # 여기서 읽은 초기화 시각은 다음 계정 고르는 순서에 쓰인다
     for label in st.account_labels():
         marks = []
         if label == cur:
@@ -188,17 +147,15 @@ def status_text() -> str:
         if until and float(until) > now:
             left = int(float(until) - now)
             marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
-        # 실시간 사용률(세션/주간). 못 읽으면 마지막으로 본 값으로 대신 보여준다.
+        # 실시간 사용률(세션/주간)
         if usage_check and label in saved:
             u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
                                           is_current=(label == cur))
+            marks.append(usage_check.summarize(u))
             if u:
-                marks.append(usage_check.summarize(u))
-                seen.append((label, u))
-            else:
-                marks.append(_last_seen_usage(state, label, now))
+                seen_resets.append((label, u.get("weekly_reset")))
         lines.append(f"  {label}: " + ", ".join(marks))
-    st.remember_usage(seen)
+    st.remember_resets(seen_resets)
     return "\n".join(lines)
 
 
@@ -478,7 +435,7 @@ def _warn_cred_place(label: str | None) -> str:
     why = "열쇠꾸러미에 옛 자격이 남아 있습니다"
     log(f"로그인 거절. 그런데 {why}. 계정 문제가 아니라 자격을 읽는 자리 문제로 봅니다.")
     labels = [label] if label else []
-    if _keychain_fix(acct):
+    if _keychain_fix(acct, label):
         if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
             _notify_cred_fixed(labels)
         return "fixed"
@@ -487,12 +444,72 @@ def _warn_cred_place(label: str | None) -> str:
     return "warned"
 
 
-def _keychain_fix(account: str | None) -> bool:
-    """열쇠꾸러미에 남은 옛 클로드 자격을 스스로 지운다. 지웠으면 True.
+def _keychain_rescue(account: str, label: str | None) -> bool:
+    """열쇠꾸러미 값을 계정 저장본으로 옮겨 담는다. 옮겼으면 True.
 
-    **지우는 건 열쇠꾸러미 항목 하나뿐이다.** 계정 저장본(creds/*.json)과 자격 파일은 안 건드린다.
-    값도 읽지 않는다(읽으면 그 값이 기록에 남는다).
-    로그인 거절을 실제로 받은 뒤에만 부른다 — 잘 돌 때는 절대 지우지 않는다.
+    **지우기 전에 반드시 이걸 먼저 한다.** 클로드는 자격을 새로 받을 때마다 재발급 열쇠를
+    한 번 쓰고 버리는데(회전), 화면 세션에서는 그 최신 값이 열쇠꾸러미에 저장된다.
+    백업 없이 항목만 지우면 최신 재발급 열쇠가 통째로 사라져, 지금 출입증이 만료되는 순간
+    **모든 계정이 되살아나지 못한다**(2026-07-29 실사고: 네 계정이 한꺼번에 그렇게 막혔다).
+
+    값은 화면·명령 인자를 거치지 않고 파일로만 흐른다(save_account.py 와 같은 방식).
+    원격 접속 창에서는 열쇠꾸러미가 잠겨 있어 읽기가 실패하는데, 그때는 False 를 돌려
+    **지우기를 취소**시킨다.
+    """
+    import json as _json
+
+    if not label:
+        return False
+    # 저장본을 **쓰는** 경로는 pool_state 가 정한 자리를 따른다. BASE 를 그대로 쓰면
+    # 시험이 운영 저장본을 덮어쓴다(2026-07-29 실사고: 시험이 A 저장본을 가짜 값으로 밀었다).
+    creds = Path(getattr(st, "CREDS_DIR", BASE / "creds"))
+    dest = creds / f"{label}.json"
+    tmp = creds / f".{label}.keychain.tmp"
+    try:
+        creds.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            r = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials",
+                 "-a", account, "-w"],
+                stdout=fh, stderr=subprocess.DEVNULL, timeout=20,
+            )
+        if r.returncode != 0:
+            tmp.unlink(missing_ok=True)
+            log("열쇠꾸러미 값을 읽지 못해 지우기를 취소합니다(화면 잠금 상태일 수 있습니다).")
+            return False
+        raw = tmp.read_text(encoding="utf-8").strip()
+        o = _json.loads(raw).get("claudeAiOauth", {})   # 형식만 본다. 값은 로그에 안 남긴다
+        if not o.get("refreshToken"):
+            tmp.unlink(missing_ok=True)
+            log("열쇠꾸러미 값에 재발급 열쇠가 없어 지우기를 취소합니다.")
+            return False
+        # 저장본보다 새 것일 때만 덮는다(옛 값으로 최신 저장본을 밀지 않게).
+        try:
+            cur = _json.loads(dest.read_text(encoding="utf-8")).get("claudeAiOauth", {})
+            if int(o.get("expiresAt") or 0) < int(cur.get("expiresAt") or 0):
+                tmp.unlink(missing_ok=True)
+                log(f"열쇠꾸러미 값이 '{label}' 저장본보다 오래돼 그대로 둡니다.")
+                return True   # 최신은 이미 저장본에 있으니 지워도 잃을 게 없다
+        except Exception:
+            pass
+        os.replace(tmp, dest)
+        log(f"열쇠꾸러미에 있던 최신 자격을 '{label}' 저장본으로 옮겼습니다.")
+        return True
+    except Exception as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        log(f"열쇠꾸러미 값 옮기기 실패({type(e).__name__}). 지우기를 취소합니다.")
+        return False
+
+
+def _keychain_fix(account: str | None, label: str | None = None) -> bool:
+    """열쇠꾸러미에 남은 클로드 자격을 저장본으로 옮긴 뒤 지운다. 지웠으면 True.
+
+    **옮기기에 실패하면 지우지 않는다** — 최신 재발급 열쇠를 잃는 사고를 막는 핵심 규칙이다.
+    지우는 건 열쇠꾸러미 항목 하나뿐이고, 자격 파일은 지운 뒤 저장본으로 다시 채운다.
+    로그인 거절을 실제로 받은 뒤에만 부른다. 잘 돌 때는 절대 지우지 않는다.
     한 시간에 한 번만 지운다. 지운 직후 또 걸리면 원인이 다른 데 있다는 뜻이라, 그때는
     손대지 않고 사람에게 넘긴다(지우고 다시 생기고를 반복하는 것을 막는다).
     """
@@ -503,6 +520,9 @@ def _keychain_fix(account: str | None) -> bool:
             return False
     except Exception:
         pass
+    # 지우기 전에 값을 저장본으로 옮긴다. 못 옮기면 지우지 않는다.
+    if not _keychain_rescue(account, label):
+        return False
     try:
         r = subprocess.run(
             ["security", "delete-generic-password", "-s", "Claude Code-credentials", "-a", account],
@@ -518,6 +538,10 @@ def _keychain_fix(account: str | None) -> bool:
         KEYCHAIN_STAMP.write_text(str(int(time.time())), encoding="utf-8")
     except Exception:
         pass
+    # 저장본을 자격 파일 자리에 다시 깔아 준다(떠나는 계정은 주지 않는다 — 망가진 값을
+    # 저장본에 되저장하면 방금 살려낸 자격을 다시 덮어쓴다).
+    if label:
+        _switch(label)
     log("열쇠꾸러미에 남아 있던 옛 자격을 지웠습니다. 이제 계정 저장본으로 나갑니다.")
     return True
 
@@ -591,7 +615,7 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
                 place_why, recent, acct = _cred_place_check(state, used_label)
-                if place_why and acct and _keychain_fix(acct):
+                if place_why and acct and _keychain_fix(acct, used_label):
                     # 옛 자격을 스스로 지웠다. 계정은 그대로 두고 다시 시도하면 통과한다.
                     log(f"'{used_label}' 계정은 그대로 두고 다시 시도합니다.")
                     if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
