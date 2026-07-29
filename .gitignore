@@ -28,3 +28,6 @@ codex_shim.sh
 .env.*
 .original_claude_link
 alert_state.json
+
+# 자동 복구가 남기는 표시(마지막으로 열쇠꾸러미를 지운 시각)
+.keychain-cleared
