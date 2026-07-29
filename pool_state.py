@@ -410,6 +410,44 @@ def remember_resets(pairs) -> None:
         save_state(s)
 
 
+def note_usage(state: dict, label: str, usage, now: float | None = None) -> dict:
+    """그 계정에서 마지막으로 읽은 사용량을 기억한다(보여주기 전용).
+
+    지금 안 쓰는 계정은 저장본의 출입증(access token)이 8시간이라 대개 조회가 안 된다.
+    자격이 죽은 게 아니라 못 읽는 것뿐이라, 마지막으로 본 값에 '언제 기준' 을 붙여
+    보여주려고 남긴다. 계정을 고르거나 막는 판단에는 절대 쓰지 않는다(낡은 값이므로).
+    """
+    if not usage:
+        return state
+    now = time.time() if now is None else now
+    seen = dict(state.get("usage_seen") or {})
+    seen[label] = {
+        "weekly_pct": usage.get("weekly_pct"),
+        "session_pct": usage.get("session_pct"),
+        "weekly_reset": usage.get("weekly_reset"),
+        "session_reset": usage.get("session_reset"),
+        "at": round(now),
+    }
+    state["usage_seen"] = seen
+    return state
+
+
+def remember_usage(pairs) -> None:
+    """읽어둔 사용량과 초기화 시각을 한 번의 잠금으로 상태 파일에 반영한다.
+
+    이미 잠금을 쥔 곳에서는 부르지 말 것(중첩). 거기서는 note_usage 를 직접 쓴다.
+    """
+    pairs = [(l, u) for l, u in pairs if u]
+    if not pairs:
+        return
+    with with_lock():
+        s = prune_blocked(load_state())
+        for l, u in pairs:
+            note_usage(s, l, u)
+            note_weekly_reset(s, l, u.get("weekly_reset"))
+        save_state(s)
+
+
 def pick_next(state: dict, exclude: str | None = None, now: float | None = None) -> str | None:
     """지금 쓸 계정 라벨 하나. 없으면 None.
 
