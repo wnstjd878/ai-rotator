@@ -203,6 +203,66 @@ def claim_once(key: str) -> bool:
     return res is not None
 
 
+USAGE_KEY_PREFIX = "usage:"
+
+
+def _hostname() -> str:
+    import socket
+    try:
+        return socket.gethostname().split(".")[0]
+    except Exception:
+        return "?"
+
+
+def put_usage(label: str, usage: dict, host: str | None = None) -> bool:
+    """그 계정에서 방금 읽은 사용량을 공유 칠판에 적는다(보여주기 전용).
+
+    지금 안 쓰는 계정은 저장본의 출입증이 8시간이라 그 머신에서는 조회가 안 된다.
+    그런데 세 머신이 서로 다른 계정에 앉아 있으므로, 각자 읽은 값을 여기 올려두면
+    아무 머신에서나 계정 넷의 잔여량을 다 볼 수 있다. 자격을 새로 발급받을 필요가 없다.
+    **계정을 고르거나 막는 판단에는 쓰지 않는다** — 남의 머신이 읽은 시점의 값이라 낡을 수 있다.
+    """
+    if not usage:
+        return False
+    body = [{
+        "key": USAGE_KEY_PREFIX + label,
+        "value": json.dumps({
+            "weekly_pct": usage.get("weekly_pct"),
+            "session_pct": usage.get("session_pct"),
+            "weekly_reset": usage.get("weekly_reset"),
+            "session_reset": usage.get("session_reset"),
+            "at": round(time.time()),
+            "host": (host or _hostname())[:40],
+        }, ensure_ascii=False),
+        "updated_at": _to_iso(time.time()),
+    }]
+    res = _request("POST", META_TABLE, body=body,
+                   headers={"Prefer": "resolution=merge-duplicates"})
+    return res is not None
+
+
+def get_usage_all() -> dict | None:
+    """{라벨: 사용량} 공유 칠판에 올라온 값 전체. 읽기 실패면 None(호출부가 로컬로 버틴다).
+
+    행 수가 몇 개뿐이라 전체를 받아 걸러낸다(패턴 조회보다 확실하다).
+    """
+    rows = _request("GET", META_TABLE, params="select=key,value")
+    if rows is None:
+        return None
+    out = {}
+    for r in rows:
+        key = str(r.get("key") or "")
+        if not key.startswith(USAGE_KEY_PREFIX):
+            continue
+        try:
+            val = json.loads(r.get("value") or "")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(val, dict):
+            out[key[len(USAGE_KEY_PREFIX):]] = val
+    return out
+
+
 def snapshot() -> list | None:
     """상태 점검용 전체 행. --status 에서 쓴다."""
     return _request("GET", ACCOUNTS_TABLE,

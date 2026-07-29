@@ -130,13 +130,97 @@ def notify(message: str) -> None:
         log(f"알림 전송 실패: {type(e).__name__}")
 
 
+def _ago_text(sec: float) -> str:
+    """지난 시간을 '방금 / 12분 전 / 3시간 전 / 2일 전' 으로."""
+    if sec < 60:
+        return "방금"
+    if sec < 3600:
+        return f"{int(sec // 60)}분 전"
+    if sec < 86400:
+        return f"{int(sec // 3600)}시간 전"
+    return f"{int(sec // 86400)}일 전"
+
+
+def _usage_line(entry: dict, now: float) -> str:
+    """기록해둔 사용량 한 줄. 초기화 시각이 지난 값은 낡은 것이라 뺀다. 없으면 빈 글."""
+    parts = []
+    for pct_key, reset_key, name in (("weekly_pct", "weekly_reset", "주간"),
+                                     ("session_pct", "session_reset", "세션")):
+        pct, reset = entry.get(pct_key), entry.get(reset_key)
+        if pct is None:
+            continue
+        try:
+            if reset and float(reset) <= now:
+                continue  # 그 뒤로 초기화됐다 = 낡은 값
+            parts.append(f"{name} 남은 {max(0, 100 - float(pct)):.0f}%")
+        except (TypeError, ValueError):
+            continue
+    return ", ".join(parts)
+
+
+def _last_seen_usage(state: dict, shared: dict | None, label: str, now: float) -> str:
+    """지금 못 읽을 때: 다른 머신이 올린 값과 이 머신의 기록 중 더 최신 것을 보여준다.
+
+    지금 안 쓰는 계정은 저장본 출입증이 8시간이라 대개 조회가 안 된다(자격이 죽은 게 아니다).
+    세 머신이 서로 다른 계정에 앉아 있어서, 공유 칠판을 보면 남의 머신이 쓰는 계정의
+    잔여량까지 보인다. 자격을 새로 발급받지 않아도 된다(발급은 열쇠가 회전해 위험하다).
+    언제 어디서 읽은 값인지 같이 적는다. 낡은 값을 지금 값으로 오해하면 안 되기 때문이다.
+    """
+    cands = []
+    local = (state.get("usage_seen") or {}).get(label)
+    if local:
+        cands.append(("이 기기", local))
+    remote = (shared or {}).get(label)
+    if remote:
+        cands.append((str(remote.get("host") or "다른 기기"), remote))
+    if not cands:
+        return "사용량 못 읽음"
+
+    def _at(pair):
+        try:
+            return float(pair[1].get("at") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    who, best = max(cands, key=_at)
+    line = _usage_line(best, now)
+    if not line:
+        return "사용량 못 읽음"
+    seen_at = _at((who, best))
+    return f"{line} ({who} {_ago_text(now - seen_at) if seen_at else '이전'} 기준)"
+
+
+def _share_usage(label: str, usage: dict) -> None:
+    """읽은 사용량을 공유 칠판에 올린다. 실패해도 조용히 넘어간다(표시용이라 없어도 된다)."""
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_usage(label, usage)
+    except Exception:
+        pass
+
+
+def _shared_usage() -> dict | None:
+    """공유 칠판에 올라온 계정별 사용량. 못 읽으면 None."""
+    try:
+        import shared_state
+
+        if not shared_state.enabled():
+            return None
+        return shared_state.get_usage_all()
+    except Exception:
+        return None
+
+
 def status_text() -> str:
     state = st.prune_blocked(st.load_state())
     cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
     now = time.time()
     saved = set(st.saved_labels())
     lines = [f"현재 계정: {cur}"]
-    seen_resets = []  # 여기서 읽은 초기화 시각은 다음 계정 고르는 순서에 쓰인다
+    shared = _shared_usage()  # 다른 머신이 자기 계정에서 읽어 올린 값
+    seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
     for label in st.account_labels():
         marks = []
         if label == cur:
@@ -147,15 +231,18 @@ def status_text() -> str:
         if until and float(until) > now:
             left = int(float(until) - now)
             marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
-        # 실시간 사용률(세션/주간)
+        # 실시간 사용률(세션/주간). 못 읽으면 다른 머신이 올린 값이나 이 기기 기록으로 대신한다.
         if usage_check and label in saved:
             u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
                                           is_current=(label == cur))
-            marks.append(usage_check.summarize(u))
             if u:
-                seen_resets.append((label, u.get("weekly_reset")))
+                marks.append(usage_check.summarize(u))
+                seen.append((label, u))
+                _share_usage(label, u)
+            else:
+                marks.append(_last_seen_usage(state, shared, label, now))
         lines.append(f"  {label}: " + ", ".join(marks))
-    st.remember_resets(seen_resets)
+    st.remember_usage(seen)
     return "\n".join(lines)
 
 
