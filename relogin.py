@@ -317,6 +317,14 @@ def approve(page, url, proc=None):
     claude auth login 은 기본 브라우저를 자동으로 열어 내 컴퓨터 안 주소로 결과를 받는
     길도 같이 연다. 그쪽이 먼저 끝나면 코드를 넣을 필요가 없으므로 "DONE" 을 돌려준다.
     """
+    # 지난 시도가 남긴 옛 도착 탭을 먼저 닫는다. 안 닫으면 모든 탭을 훑는 도착 찾기가
+    # 그 탭의 낡은 코드(1회용이라 이미 무효)를 집어 400 을 받는다(2026-07-30 C 에서 겪음).
+    for pg in list(page.context.pages):
+        if pg is not page and on_callback(pg):
+            try:
+                pg.close()
+            except Exception:
+                pass
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     try:
         page.bring_to_front()  # 사람이 로그인해야 할 수 있으니 창을 앞으로
