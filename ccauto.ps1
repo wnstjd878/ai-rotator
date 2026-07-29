@@ -10,6 +10,12 @@ while ($true) {
     # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
     # (감싸는 코드는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
     python $POOL --ensure
+    # 켜기 직전 계정별 사용량을 화면에 먼저 보여준다(사용자 요구 2026-07-29).
+    # claude 안에서는 이 값을 볼 수 없어서, 감싸는 코드가 뜨기 전에 찍는 자리가 유일하다.
+    Write-Host ""
+    Write-Host "[계정 사용량]" -ForegroundColor Cyan
+    python $POOL --status
+    Write-Host ""
     claude @runArgs
 
     # claude 가 끝났다. 지금 계정이 한도/만료인지 조용히 확인(haiku ping, 소비 미미)

@@ -128,13 +128,54 @@ def notify(message: str) -> None:
         log(f"알림 전송 실패: {type(e).__name__}")
 
 
+def _ago_text(sec: float) -> str:
+    """지난 시간을 '방금 / 12분 전 / 3시간 전 / 2일 전' 으로."""
+    if sec < 60:
+        return "방금"
+    if sec < 3600:
+        return f"{int(sec // 60)}분 전"
+    if sec < 86400:
+        return f"{int(sec // 3600)}시간 전"
+    return f"{int(sec // 86400)}일 전"
+
+
+def _last_seen_usage(state: dict, label: str, now: float) -> str:
+    """지금 못 읽을 때 마지막으로 본 값으로 대신 보여준다.
+
+    지금 안 쓰는 계정은 저장본 출입증이 8시간이라 대개 조회가 안 된다(자격이 죽은 게 아니다).
+    세션(5시간) 값은 초기화 시각이 지났으면 이미 무의미하므로 안 보여준다. 주간도 같다.
+    """
+    c = (state.get("usage_seen") or {}).get(label)
+    if not c:
+        return "사용량 못 읽음"
+    parts = []
+    for pct_key, reset_key, name in (("weekly_pct", "weekly_reset", "주간"),
+                                     ("session_pct", "session_reset", "세션")):
+        pct, reset = c.get(pct_key), c.get(reset_key)
+        if pct is None:
+            continue
+        try:
+            if reset and float(reset) <= now:
+                continue  # 그 뒤로 초기화됐다 = 낡은 값
+            parts.append(f"{name} 남은 {max(0, 100 - float(pct)):.0f}%")
+        except (TypeError, ValueError):
+            continue
+    if not parts:
+        return "사용량 못 읽음"
+    try:
+        ago = _ago_text(now - float(c.get("at") or now))
+    except (TypeError, ValueError):
+        ago = "이전"
+    return ", ".join(parts) + f" ({ago} 기준)"
+
+
 def status_text() -> str:
     state = st.prune_blocked(st.load_state())
     cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
     now = time.time()
     saved = set(st.saved_labels())
     lines = [f"현재 계정: {cur}"]
-    seen_resets = []  # 여기서 읽은 초기화 시각은 다음 계정 고르는 순서에 쓰인다
+    seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
     for label in st.account_labels():
         marks = []
         if label == cur:
@@ -145,15 +186,17 @@ def status_text() -> str:
         if until and float(until) > now:
             left = int(float(until) - now)
             marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
-        # 실시간 사용률(세션/주간)
+        # 실시간 사용률(세션/주간). 못 읽으면 마지막으로 본 값으로 대신 보여준다.
         if usage_check and label in saved:
             u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
                                           is_current=(label == cur))
-            marks.append(usage_check.summarize(u))
             if u:
-                seen_resets.append((label, u.get("weekly_reset")))
+                marks.append(usage_check.summarize(u))
+                seen.append((label, u))
+            else:
+                marks.append(_last_seen_usage(state, label, now))
         lines.append(f"  {label}: " + ", ".join(marks))
-    st.remember_resets(seen_resets)
+    st.remember_usage(seen)
     return "\n".join(lines)
 
 
