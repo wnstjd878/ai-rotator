@@ -7,6 +7,12 @@
       ~/.claude/.credentials.json 파일이 있으면 그걸 우선 읽는다. 그래서 Mac 도
       Keychain 을 안 쓰고 파일 스왑으로 처리한다(Keychain 쓰기는 ssh·launchd 에서
       승인 문제로 막혔었다 — 그 걸림돌이 사라짐).
+파일만으로는 부족하다(2026-07-30 실측 정정): claude 는 파일을 읽어 쓰기는 하지만,
+      자격을 갱신하면 새 값을 **Keychain 에만** 남기고 파일은 만들지 않는다. 그래서 화면
+      세션(launchd 봇)에서는 갈아끼운 파일이 곧 뒤처지고, 다음 갱신부터 옛 계정으로 되돌아간
+      것처럼 보인다. 이제 Mac 에서는 파일과 Keychain 을 **함께** 갈아끼운다(switch_keychain).
+      Keychain 에 못 쓰는 자리(원격 접속·화면 잠금)에서는 creds/.pending-switch 에 예약만
+      남기고, 화면 세션에서 도는 cred_mirror 가 마무리한다.
 실행: python switch_account.py <라벨> [--from <떠나는라벨>]
 입력: creds/<라벨>.json (그 머신에서 직접 로그인해 저장한 자격이어야 함.
       다른 머신에서 복사한 자격은 access token 만료 후 refresh 가 거부된다 — 복사 금지).
@@ -189,16 +195,68 @@ def save_back(leaving) -> str:
     return f"{note} — {done}" if note else done
 
 
-def switch_file(src: Path, leaving=None) -> bool:
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+PENDING = CREDS_DIR / ".pending-switch"
+
+
+def switch_keychain(src: Path) -> str:
+    """맥 열쇠꾸러미 항목도 같은 값으로 덮어쓴다. 결과를 한 줄로 돌려준다.
+
+    화면 세션에서 도는 봇(launchd)이 실제로 읽는 자리가 여기다. 파일만 갈아끼우면
+    다음 자격 갱신 때 봇 자리가 옛 계정으로 되돌아간 것처럼 보인다(2026-07-30 실측).
+
+    값은 표준입력으로만 흐른다. 명령 인자에 넣으면 프로세스 목록에 자격이 남는다(9.1).
+    원격 접속·화면 잠금에서는 실패하는데, 그건 고장이 아니라 그 자리의 정상 결과다.
+    """
+    import os
+    import subprocess
+
+    if sys.platform != "darwin":
+        return "맥이 아니라 열쇠꾸러미는 건너뜁니다"
+    acct = os.environ.get("USER") or "kwon"
+    try:
+        payload = src.read_bytes()
+        cmd = 'add-generic-password -U -a "%s" -s "%s" -X "%s"\n' % (
+            acct, KEYCHAIN_SERVICE, payload.hex())
+        r = subprocess.run(["security", "-i"], input=cmd, capture_output=True,
+                           text=True, timeout=20)
+    except Exception as e:
+        return f"열쇠꾸러미에 못 넣었습니다({type(e).__name__})"
+    if r.returncode != 0:
+        return "열쇠꾸러미에 못 넣었습니다(원격 접속이거나 화면이 잠긴 자리)"
+    return "열쇠꾸러미도 같은 계정으로 맞췄습니다"
+
+
+def mark_pending(label: str) -> None:
+    """열쇠꾸러미에 못 넣었을 때, 화면 세션이 마무리하도록 예약만 남긴다."""
+    try:
+        PENDING.parent.mkdir(parents=True, exist_ok=True)
+        PENDING.write_text(label, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def switch_file(src: Path, leaving=None, label=None) -> bool:
     """creds 자격을 지금 쓰는 자격 파일 자리로 복사한다. 세 머신 공통.
 
     복사 전에 지금 쓰던 계정의 갱신분을 그 라벨 파일로 되저장한다(save_back).
+    맥에서는 열쇠꾸러미까지 같이 맞춘다. 못 맞추면 예약을 남긴다.
     """
     LIVE.parent.mkdir(parents=True, exist_ok=True)
     print(f"[save-back] {save_back(leaving)}")
     if LIVE.exists():
         shutil.copy2(LIVE, LIVE.with_suffix(".json.bak"))  # 되돌리기용 백업
     shutil.copy2(src, LIVE)
+    if sys.platform == "darwin":
+        note = switch_keychain(src)
+        print(f"[keychain] {note}")
+        if note.startswith("열쇠꾸러미에 못 넣었습니다"):
+            mark_pending(label or src.stem)
+        else:
+            try:
+                PENDING.unlink(missing_ok=True)
+            except Exception:
+                pass
     return True
 
 
@@ -227,7 +285,7 @@ def main():
     if leaving == label:
         leaving = None  # 같은 계정으로 다시 꽂는 건 되저장 대상이 아니다
 
-    if not switch_file(src, leaving=leaving):
+    if not switch_file(src, leaving=leaving, label=label):
         return 1
     print(f"[switch] Claude Code 로그인을 '{label}' 로 교체했습니다.")
     print("[switch] 열려있는 claude 를 종료하고 다시 실행하면 적용됩니다.")

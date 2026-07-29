@@ -1,0 +1,308 @@
+"""
+== 운영 맥락 ==
+용도: 맥에서 자격이 저장되는 진짜 자리(열쇠꾸러미)의 최신 값을, 순환기가 쓰는 두 자리
+      (~/.claude/.credentials.json 과 creds/<라벨>.json)로 되비춘다.
+실행 시점: launchd com.user.claude-cred-mirror, 5분마다 + 시작 시 1회 (화면 세션 필요)
+입력: 열쇠꾸러미 항목 "Claude Code-credentials"
+출력: ~/.claude/.credentials.json (미러), creds/<라벨>.json (되저장, prev/ 에 한 세대 백업)
+외부 의존: security 명령, api.anthropic.com/api/oauth/profile (자격이 누구 것인지 확인)
+
+왜 필요한가 (2026-07-30 실측):
+  클로드는 자격을 갱신할 때마다 재발급 열쇠를 한 번 쓰고 버린다(회전). 화면 세션에서 도는
+  봇(launchd)이 갱신하면 그 최신 값은 **열쇠꾸러미에만** 저장되고 파일은 만들어지지 않는다.
+  순환기는 파일만 갈아끼우는 설계라, 시간이 지나면 저장본이 전부 폐기된 옛 열쇠가 된다.
+  - 계정을 되돌리는 순간 "로그인 만료"(2026-07-29 네 계정 동시 사망의 원인)
+  - 원격 접속(ssh) 자리는 열쇠꾸러미를 못 읽어 자격이 아예 없다(session_learn 실패)
+  - 순환기가 열쇠꾸러미 항목을 보고 "옛 자격 그림자"로 오판해 사람에게 지우라고 알린다
+  되비추기가 돌면 이 셋이 한꺼번에 사라진다.
+
+안전 규칙:
+  - 열쇠꾸러미를 못 읽는 자리(원격 접속·화면 잠금)에서는 아무것도 하지 않는다.
+  - 자격이 누구 것인지 서버에 물어 확정하지 못하면 저장본은 건드리지 않는다(계정 오염 방지).
+  - 값은 파일로만 흐른다. 화면·명령 인자·로그에 남기지 않는다(지문 12자리만).
+  - 열쇠꾸러미를 지우지 않는다. 지우는 판단은 claude_pool 쪽 한 곳에만 둔다.
+의도적 미구현: 파일 -> 열쇠꾸러미 방향(반대 방향) 쓰기. 그건 계정 전환의 일이라
+      switch_account.py 가 맡는다. 여기서 양방향으로 만들면 어느 쪽이 최신인지 다투게 된다.
+마지막 점검: 2026-07-30
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
+LIVE = Path.home() / ".claude" / ".credentials.json"
+SERVICE = "Claude Code-credentials"
+LOG = BASE / "rotator.log"
+
+sys.path.insert(0, str(BASE))
+
+
+def log(msg: str) -> None:
+    line = time.strftime("%Y-%m-%d %H:%M:%S") + " [되비추기] " + msg
+    print(line, flush=True)
+    try:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+
+
+def creds_dir() -> Path:
+    try:
+        import pool_state as st
+
+        return Path(getattr(st, "CREDS_DIR", BASE / "creds"))
+    except Exception:
+        return BASE / "creds"
+
+
+def fingerprint(obj) -> str | None:
+    """재발급 열쇠의 지문. 값 자체는 어디에도 남기지 않는다."""
+    try:
+        token = (obj.get("claudeAiOauth") or {}).get("refreshToken") or ""
+    except Exception:
+        return None
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else None
+
+
+def read_json(path: Path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def keychain_account() -> str | None:
+    """열쇠꾸러미 항목의 계정 이름. 값은 읽지 않는다."""
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", SERVICE],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    for line in (r.stdout or "").splitlines():
+        if '"acct"' in line and "=" in line:
+            name = line.split("=", 1)[1].strip().strip('"')
+            if name:
+                return name
+    return os.environ.get("USER") or None
+
+
+def read_keychain(account: str):
+    """열쇠꾸러미 값을 파일 통로로만 읽어 온다. 못 읽으면 None."""
+    tmp = Path("/tmp/.cred_mirror_read.json")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            r = subprocess.run(
+                ["security", "find-generic-password", "-s", SERVICE, "-a", account, "-w"],
+                stdout=fh, stderr=subprocess.DEVNULL, timeout=20,
+            )
+        if r.returncode != 0:
+            return None
+        obj = read_json(tmp)
+        if not obj or not fingerprint(obj):
+            return None
+        return obj
+    except Exception:
+        return None
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def write_atomic(dest: Path, obj) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / ("." + dest.name + ".tmp")
+    tmp.write_text(json.dumps(obj), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass
+    os.replace(tmp, dest)
+
+
+def label_of(obj) -> str | None:
+    """이 자격이 어느 계정 것인지 서버에 직접 물어 라벨로 바꾼다. 모르면 None.
+
+    출입증이 만료돼 있으면 조회가 안 된다. 그때는 지문 대조로 떨어진다(갱신 직전 값과
+    같은 저장본이 있으면 그 라벨). 둘 다 안 되면 None 이라 저장본을 건드리지 않는다.
+    """
+    try:
+        import switch_account as sw
+    except Exception:
+        return None
+
+    probe = Path("/tmp/.cred_mirror_probe.json")
+    try:
+        write_atomic(probe, obj)
+        email = sw.cred_email(probe)
+    except Exception:
+        email = None
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    label = None
+    try:
+        label = sw.label_of_email(email)
+    except Exception:
+        label = None
+    if label:
+        return label
+
+    # 서버 조회가 안 될 때: 만료 시각이 같은 저장본을 같은 계정으로 본다.
+    # 재발급 열쇠 만료 시각은 그 계정에 로그인한 시점에서 정해지므로 계정마다 다르다.
+    try:
+        mine = (obj.get("claudeAiOauth") or {}).get("refreshTokenExpiresAt")
+    except Exception:
+        mine = None
+    if not mine:
+        return None
+    hits = []
+    for f in sorted(creds_dir().glob("*.json")):
+        o = read_json(f)
+        if not o:
+            continue
+        if (o.get("claudeAiOauth") or {}).get("refreshTokenExpiresAt") == mine:
+            hits.append(f.stem)
+    return hits[0] if len(hits) == 1 else None
+
+
+def mirror_live(obj, fp: str) -> bool:
+    """원격 접속 자리가 읽는 파일에 최신 값을 깐다. 바뀐 게 있으면 True."""
+    cur = read_json(LIVE)
+    if cur and fingerprint(cur) == fp:
+        return False
+    write_atomic(LIVE, obj)
+    return True
+
+
+def mirror_store(obj, fp: str, label: str) -> bool:
+    """계정 저장본에 최신 값을 되저장한다. 바뀐 게 있으면 True."""
+    dest = creds_dir() / (label + ".json")
+    cur = read_json(dest)
+    if cur and fingerprint(cur) == fp:
+        return False
+    if dest.exists():
+        prev = creds_dir() / "prev"
+        prev.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(dest, prev / dest.name)
+    write_atomic(dest, obj)
+    return True
+
+
+def apply_pending() -> bool:
+    """원격 접속 자리에서 예약해 둔 계정 전환을 화면 세션에서 마무리한다.
+
+    되비추기(열쇠꾸러미 → 파일)와 계정 전환(파일 → 열쇠꾸러미)은 방향이 반대다.
+    예약을 먼저 처리하지 않으면, 원격 접속에서 갈아끼운 파일을 다음 회차의 되비추기가
+    옛 계정 값으로 되돌려 버린다. 그래서 이게 sync 의 첫 번째 일이다.
+    """
+    p = creds_dir() / ".pending-switch"
+    try:
+        label = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        return False
+    if not label:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+    src = creds_dir() / (label + ".json")
+    if not src.exists():
+        log("예약된 계정 '%s' 의 저장본이 없어 전환 예약을 지웠습니다." % label)
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+    try:
+        import switch_account as sw
+
+        note = sw.switch_keychain(src)
+    except Exception:
+        return False
+    if not note.startswith("열쇠꾸러미도"):
+        return False   # 아직 화면 세션이 아니다. 다음 회차에 다시 해 본다.
+
+    obj = read_json(src)
+    if obj:
+        mirror_live(obj, fingerprint(obj))
+    try:
+        p.unlink(missing_ok=True)
+    except Exception:
+        pass
+    log("예약돼 있던 '%s' 계정 전환을 열쇠꾸러미까지 마무리했습니다." % label)
+    return True
+
+
+def sync(quiet: bool = False) -> bool:
+    """되비추기 1회. 실제로 맞춘 자리가 있으면 True.
+
+    순환기(claude_pool)가 로그인 거절을 받았을 때도 이 함수를 부른다. 두 자리가 어긋나
+    나는 거절은 열쇠꾸러미를 지워서가 아니라 되비춰서 고치는 것이 맞다.
+    """
+    if sys.platform != "darwin":
+        return False
+
+    if apply_pending():
+        # 방금 넣은 값이 최신이다. 되비추기는 다음 회차에 자연히 맞는다.
+        return True
+
+    account = keychain_account()
+    if not account:
+        # 항목이 없으면 파일이 원본인 상태다. 되비출 것이 없다.
+        return False
+
+    obj = read_keychain(account)
+    if obj is None:
+        # 원격 접속 창이거나 화면이 잠겨 값을 못 읽는다. 조용히 넘어간다(알림도 안 낸다).
+        return False
+
+    fp = fingerprint(obj)
+    changed_live = mirror_live(obj, fp)
+
+    label = label_of(obj)
+    changed_store = False
+    if label:
+        changed_store = mirror_store(obj, fp, label)
+
+    if changed_live or changed_store:
+        where = []
+        if changed_live:
+            where.append("자격 파일")
+        if changed_store:
+            where.append("'%s' 저장본" % label)
+        if not quiet:
+            log("열쇠꾸러미의 최신 자격(%s)을 %s에 되비췄습니다." % (fp, ", ".join(where)))
+        return True
+    if not label and not quiet:
+        log("자격이 누구 것인지 확인하지 못해 저장본은 그대로 뒀습니다(파일만 최신).")
+    return False
+
+
+def main() -> int:
+    sync()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

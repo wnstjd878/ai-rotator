@@ -111,8 +111,9 @@ def _switch(label: str, leaving: str | None = None) -> bool:
         log(f"자격 교체 실패({label}): {(ret.stderr or ret.stdout).strip()[:200]}")
         return False
     for line in (ret.stdout or "").splitlines():
-        if line.startswith("[save-back]"):
-            log(line.strip())  # 되저장 결과는 남긴다(유실이 다시 생기면 여기서 보인다)
+        if line.startswith("[save-back]") or line.startswith("[keychain]"):
+            # 되저장·열쇠꾸러미 반영 결과는 남긴다(유실이 다시 생기면 여기서 보인다)
+            log(line.strip())
     return True
 
 
@@ -518,6 +519,75 @@ def _keychain_account() -> str | None:
         return None
 
 
+def _read_keychain_cred(account: str):
+    """열쇠꾸러미 값을 파일 통로로만 읽어 온다. 못 읽으면 None.
+
+    못 읽는 것은 고장이 아니다 — 원격 접속 창이나 화면 잠금 상태의 정상 결과다.
+    값은 화면·명령 인자를 거치지 않는다(9.1).
+    """
+    import json as _json
+
+    tmp = Path("/tmp/.pool_keychain_read.json")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            r = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials",
+                 "-a", account, "-w"],
+                stdout=fh, stderr=subprocess.DEVNULL, timeout=20,
+            )
+        if r.returncode != 0:
+            return None
+        return _json.loads(tmp.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _keychain_verdict(account: str | None) -> str:
+    """열쇠꾸러미에 든 값이 지금 쓸 수 있는 값인지 본다.
+
+    "none"       항목 자체가 없다
+    "unreadable" 값을 못 읽는다(원격 접속 창·화면 잠금). **판정하지 않는다.**
+    "fresh"      재발급 열쇠가 살아 있다. 그림자가 아니라 오히려 최신본이다.
+    "stale"      재발급 열쇠가 만료됐다. 이것만 진짜 그림자다.
+
+    **항목이 있다는 것만으로 옛 자격이라 단정하면 안 된다(2026-07-30 실측).** 화면 세션에서
+    도는 봇이 자격을 갱신하면 그 최신 값은 열쇠꾸러미에만 저장되므로, 잘 돌고 있을 때도
+    항목은 늘 존재한다. 그 상태에서 지우라고 알리면 유일하게 살아 있는 자격을 버리게 된다
+    (2026-07-29 오후 실사고: 지운 뒤 여덟 시간 만에 네 계정이 한꺼번에 막혔다).
+    """
+    if not account or sys.platform != "darwin":
+        return "none"
+    obj = _read_keychain_cred(account)
+    if not isinstance(obj, dict):
+        return "unreadable"
+    o = obj.get("claudeAiOauth") or {}
+    try:
+        exp = float(o.get("refreshTokenExpiresAt") or 0)
+    except Exception:
+        exp = 0
+    return "fresh" if exp / 1000 > time.time() else "stale"
+
+
+def _mirror_now() -> bool:
+    """열쇠꾸러미의 최신 자격을 자격 파일·계정 저장본으로 되비춘다. 맞춘 게 있으면 True.
+
+    두 자리가 어긋나 나는 거절은 지우기가 아니라 되비추기로 고친다(cred_mirror.py 참조).
+    """
+    try:
+        import cred_mirror
+    except Exception:
+        return False
+    try:
+        return cred_mirror.sync() is True
+    except Exception:
+        return False
+
+
 def _note_auth_fail(state: dict, label: str | None, now: float | None = None) -> list:
     """로그인 거절을 기록하고, 최근 창 안에서 거절받은 계정 라벨을 돌려준다."""
     now = now or time.time()
@@ -540,8 +610,13 @@ def _cred_place_check(state: dict, label: str | None) -> tuple:
     """
     recent = _note_auth_fail(state, label)
     acct = _keychain_account()
-    if acct:
+    verdict = _keychain_verdict(acct) if acct else "none"
+    if verdict == "stale":
         return "열쇠꾸러미에 옛 자격이 남아 있습니다", recent, acct
+    if verdict == "fresh":
+        # 지울 값이 아니다. 최신본이 열쇠꾸러미에만 있고 파일 쪽이 뒤처진 상태다.
+        return "자격이 파일과 열쇠꾸러미로 어긋나 있습니다", recent, acct
+    # "unreadable" 은 원격 접속 창의 정상 상태다. 여기서는 판정하지 않는다.
     if len(recent) >= 2:
         return f"짧은 시간에 계정 {len(recent)}개가 한꺼번에 거절받았습니다", recent, None
     return "", recent, None
@@ -554,15 +629,27 @@ def _warn_cred_place(label: str | None) -> str:
     _cred_place_check 가 아예 안 돌고, 봇은 조용히 실패한 채 사람도 모른다(코덱스 검수 2026-07-29).
     여기서는 잠금을 잡지 않으므로 거절 기록은 남기지 않고 열쇠꾸러미만 본다.
 
-    돌려주는 값: "fixed"(스스로 지웠으니 다시 해보라) / "warned"(사람이 지워야 한다) / ""(해당 없음).
+    돌려주는 값: "fixed"(스스로 고쳤으니 다시 해보라) / "warned"(사람이 지워야 한다) / ""(해당 없음).
     """
     acct = _keychain_account()
     if not acct:
         return ""
-    why = "열쇠꾸러미에 옛 자격이 남아 있습니다"
+    verdict = _keychain_verdict(acct)
+    if verdict == "unreadable":
+        # 원격 접속 창이라 값을 못 읽는 것뿐이다. 여기서 알리면 잘 도는 봇을 두고
+        # 사람에게 "지우라"고 시키게 된다(2026-07-30 오탐). 조용히 넘어간다.
+        return ""
+    why = ("열쇠꾸러미에 옛 자격이 남아 있습니다" if verdict == "stale"
+           else "자격이 파일과 열쇠꾸러미로 어긋나 있습니다")
     log(f"로그인 거절. 그런데 {why}. 계정 문제가 아니라 자격을 읽는 자리 문제로 봅니다.")
     labels = [label] if label else []
     res = _keychain_fix(acct, label)
+    if res == "mirrored":
+        # 되비추기로 조용히 맞췄다. 사람이 할 일이 없으니 알리지 않는다.
+        return "fixed"
+    if res == "in-sync":
+        # 자격 자리는 멀쩡하다. 여기서 알리면 원인도 아닌 것을 사람에게 떠넘기게 된다.
+        return ""
     if res == "fixed":
         if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
             _notify_cred_fixed(labels)
@@ -639,8 +726,12 @@ def _keychain_rescue(account: str, label: str | None) -> bool:
 def _keychain_fix(account: str | None, label: str | None = None) -> str:
     """열쇠꾸러미에 남은 클로드 자격을 따로 보관한 뒤 지운다.
 
-    돌려주는 값: "fixed"(지우고 자격 파일까지 다시 깔았다) / "half"(지우긴 했는데 다시 깔기
-    실패, 사람이 저장본을 깔아야 한다) / ""(아무것도 안 했다).
+    돌려주는 값: "fixed"(지우고 자격 파일까지 다시 깔았다) / "mirrored"(지울 값이 아니어서
+    되비추기로 두 자리를 맞췄다) / "half"(지우긴 했는데 다시 깔기 실패, 사람이 저장본을
+    깔아야 한다) / ""(아무것도 안 했다).
+
+    **지우기 전에 값이 실제로 낡았는지부터 본다.** 항목이 있다는 것만으로 지우면, 화면
+    세션 봇이 방금 갱신해 넣은 최신 자격을 버리게 된다(2026-07-30 실측).
 
     **옮기기에 실패하면 지우지 않는다** — 최신 재발급 열쇠를 잃는 사고를 막는 핵심 규칙이다.
     지우는 건 열쇠꾸러미 항목 하나뿐이고, 자격 파일은 지운 뒤 저장본으로 다시 채운다.
@@ -650,6 +741,20 @@ def _keychain_fix(account: str | None, label: str | None = None) -> str:
     """
     if not account or sys.platform != "darwin":
         return ""
+    verdict = _keychain_verdict(account)
+    if verdict == "unreadable":
+        # 값을 못 읽는 자리에서는 낡았는지 알 수 없다. 모르면 손대지 않는다.
+        return ""
+    if verdict == "fresh":
+        # 지울 값이 아니다. 최신본이 열쇠꾸러미에만 있고 파일 쪽이 뒤처진 것뿐이다.
+        if _mirror_now():
+            log("열쇠꾸러미 값이 최신이라 지우지 않았습니다. "
+                "자격 파일과 계정 저장본을 그 값으로 맞췄습니다.")
+            return "mirrored"
+        # 맞출 것이 없었다 = 세 자리가 이미 같은 값이다. 열쇠꾸러미 탓이 아니라는 뜻이므로
+        # 사람을 부르지 않는다. 거절 원인은 다른 데 있으니 평소 계정 처리로 내려보낸다.
+        # (이걸 ""(아무것도 못 함)로 두면 잘 맞아 있는 상태에서 오히려 알림이 나간다.)
+        return "in-sync"
     try:
         if KEYCHAIN_STAMP.exists() and time.time() - KEYCHAIN_STAMP.stat().st_mtime < KEYCHAIN_FIX_COOLDOWN:
             return ""
@@ -716,20 +821,35 @@ def _notify_cred_place(why: str, labels: list, account: str | None = None) -> No
 
     account 는 열쇠꾸러미 항목에 걸린 계정 이름이다. 지우는 명령에 그 이름이 그대로 들어가야
     실제로 지워진다(찾을 때 쓴 조건과 지울 때 쓴 조건이 다르면 지워도 항목이 남는다).
+    **지우라는 명령은 그 값이 낡았다고 실제로 확인했을 때만 넣는다.** 확인 없이 넣으면,
+    봇 자리에서 잘 돌고 있는 최신 자격을 사람 손으로 버리게 된다(2026-07-30 오탐).
+    그래서 account 는 _keychain_verdict 가 "stale" 을 돌려준 경우에만 넘어온다.
     """
     import shlex
-    # 계정 이름에 공백이 있으면 인용 없이는 -a 값이 잘려 실제로 안 지워진다(코덱스 검수).
-    who = shlex.quote(account or os.environ.get("USER") or "kwon")
-    notify(
+
+    head = (
         "클로드 로그인이 계정 문제가 아니라 이 컴퓨터에서 막혀 있습니다.\n\n"
         f"무슨 일: {why}. 그래서 어느 계정으로 바꿔도 로그인 거절만 돌아옵니다. "
         f"거절받은 계정: {', '.join(labels) or '확인 안 됨'}. "
         "이 상태면 표지 만들기·칼럼 초안·질문 답변 같은 Mac 봇이 다 멈춥니다.\n\n"
-        "할 일: Mac 에서 아래 한 줄을 실행하세요. 지워지는 건 이미 만료된 값이고, "
-        "계정 저장본은 그대로 남습니다.\n"
-        f'  security delete-generic-password -s "Claude Code-credentials" -a {who}\n\n'
-        "그래도 안 되면 개발 봇에 \"클로드 로그인 고쳐줘\" 라고 답장하세요."
     )
+    # 부르는 쪽이 어떤 사정으로 넘겼든, 보내기 직전에 낡았는지 한 번 더 확인한다.
+    # 이 알림 한 통이 사람 손으로 자격을 지우게 만들기 때문에 방어를 여기 둔다.
+    if account and _keychain_verdict(account) == "stale":
+        # 계정 이름에 공백이 있으면 인용 없이는 -a 값이 잘려 실제로 안 지워진다(코덱스 검수).
+        who = shlex.quote(account)
+        body = (
+            "할 일: Mac 에서 아래 한 줄을 실행하세요. 지워지는 건 이미 만료가 확인된 값이고, "
+            "계정 저장본은 그대로 남습니다.\n"
+            f'  security delete-generic-password -s "Claude Code-credentials" -a {who}\n\n'
+        )
+    else:
+        # 열쇠꾸러미가 원인이라는 근거가 없다. 아무것도 지우게 시키지 않는다.
+        body = (
+            "할 일: 지금은 지울 것이 없습니다. 개발 봇에 \"클로드 로그인 왜 막혔는지 봐줘\" "
+            "라고 답장하시면 어느 자리에서 막혔는지 확인해 드립니다.\n\n"
+        )
+    notify(head + body + "그래도 안 되면 개발 봇에 \"클로드 로그인 고쳐줘\" 라고 답장하세요.")
 
 
 def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
@@ -769,10 +889,15 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
                 place_why, recent, acct = _cred_place_check(state, used_label)
                 fix = _keychain_fix(acct, used_label) if (place_why and acct) else ""
-                if fix == "fixed":
-                    # 옛 자격을 스스로 지웠다. 계정은 그대로 두고 다시 시도하면 통과한다.
+                if fix == "in-sync":
+                    # 세 자리가 이미 같은 값이었다 = 자격 자리 문제가 아니다.
+                    # 사유를 지워 평소의 계정 처리(교체·재우기)로 내려보낸다.
+                    place_why = ""
+                if fix in ("fixed", "mirrored"):
+                    # 자격 자리를 스스로 고쳤다. 계정은 그대로 두고 다시 시도하면 통과한다.
+                    # "mirrored" 는 되비추기로 조용히 맞춘 경우라 사람에게 알리지 않는다.
                     log(f"'{used_label}' 계정은 그대로 두고 다시 시도합니다.")
-                    if st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
+                    if fix == "fixed" and st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
                         _notify_cred_fixed(recent)
                     st.save_state(state)
                     return used_label or current

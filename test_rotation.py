@@ -55,8 +55,16 @@ class Fake:
     """가짜 claude 실행기. 계정 라벨별로 결과를 정해둔다."""
 
     # 열쇠꾸러미 안에 들어 있다고 칠 값. 지우기 전 백업이 되는지 보는 데 쓴다(가짜 값).
+    # **재발급 열쇠가 만료된 값**이다. 이래야 진짜 '옛 자격 그림자'가 된다. 만료가 안 된
+    # 값은 지우면 안 되는 최신본이므로 다른 길로 간다(keychain_value_fresh, 2026-07-30).
     keychain_value = json.dumps({"claudeAiOauth": {
         "refreshToken": "test-refresh", "accessToken": "test-access",
+        "expiresAt": 1700000000000, "refreshTokenExpiresAt": 1700000000000,
+    }}, ensure_ascii=False)
+
+    # 아직 살아 있는 값(화면 세션 봇이 방금 갱신해 넣은 최신본을 흉내낸다)
+    keychain_value_fresh = json.dumps({"claudeAiOauth": {
+        "refreshToken": "test-refresh-new", "accessToken": "test-access-new",
         "expiresAt": 9999999999000, "refreshTokenExpiresAt": 9999999999000,
     }}, ensure_ascii=False)
 
@@ -958,8 +966,11 @@ def case_keychain_shadow(tmp):
     }, ensure_ascii=False)
 
     real_acct = claude_pool._keychain_account
+    real_verdict = claude_pool._keychain_verdict
     real_alive = claude_pool._cred_alive
     try:
+        # 여기서 보려는 건 '값이 낡은 경우'다. 값 읽기 자체는 다른 케이스에서 본다.
+        claude_pool._keychain_verdict = lambda account: "stale" if account else "none"
         # (1) 로그인 거절 + 열쇠꾸러미에 옛 자격이 남음 → 막지 않고 알림
         setup(tmp, ["A", "B", "C"], "A")
         claude_pool._keychain_account = lambda: "kwon"
@@ -996,6 +1007,7 @@ def case_keychain_shadow(tmp):
               f"blocked={list(st.load_state()['blocked'])}")
     finally:
         claude_pool._keychain_account = real_acct
+        claude_pool._keychain_verdict = real_verdict
         claude_pool._cred_alive = real_alive
 
 
@@ -1062,8 +1074,11 @@ def case_keychain_self_fix(tmp):
         claude_pool.run(["claude", "-p", "안녕"])
         check("값을 못 읽으면 안 지움", fake_locked.keychain_deleted == [],
               f"{fake_locked.keychain_deleted}")
-        check("대신 사람에게 안내", any("security delete" in m for m in fake_locked.notices),
-              f"notices={len(fake_locked.notices)}")
+        # 값을 못 읽는 자리(원격 접속 창)에서는 낡았는지 알 수 없다. 모르면서 "지우세요"라고
+        # 알리면, 봇 자리에서 잘 돌고 있는 최신 자격을 사람 손으로 버리게 된다(2026-07-30 오탐).
+        check("모르는 채로 지우라고 알리지 않음",
+              not any("security delete" in m for m in fake_locked.notices),
+              f"notices={fake_locked.notices[:1]}")
 
         # (4) 지웠는데 자격 파일 다시 깔기가 실패하면 고쳐졌다고 하지 않는다
         claude_pool.KEYCHAIN_STAMP.unlink(missing_ok=True)
@@ -1102,6 +1117,80 @@ def case_keychain_self_fix(tmp):
         claude_pool._cred_alive = real_alive
 
 
+def case_keychain_fresh_not_shadow(tmp):
+    print("\n[31] 열쇠꾸러미 값이 아직 살아 있으면 지우지 않고 두 자리를 맞춘다")
+    # 2026-07-30 실사고: 화면 세션 봇이 자격을 갱신하면 최신 값이 열쇠꾸러미에만 남는다.
+    # 그때 항목이 있다는 이유로 "옛 자격"이라 판정해 사람에게 지우라고 알렸다. 그대로 지웠으면
+    # 유일하게 살아 있던 자격이 사라지고 저장본은 이미 폐기된 옛 열쇠라 계정이 통째로 죽는다.
+    dead = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "api_error_status": 401, "stop_reason": "stop_sequence",
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }, ensure_ascii=False)
+
+    real_stamp = claude_pool.KEYCHAIN_STAMP
+    real_platform = claude_pool.sys.platform
+    real_alive = claude_pool._cred_alive
+    real_mirror = claude_pool._mirror_now
+    try:
+        claude_pool.KEYCHAIN_STAMP = Path(tmp) / ".keychain-cleared"
+        claude_pool.sys.platform = "darwin"
+        claude_pool._cred_alive = lambda label: False
+        setup(tmp, ["A", "B"], "A")
+        fake = Fake({"A": (0, OK_OUT, "")}, keychain="kwon", keychain_out=dead)
+        fake.keychain_value = Fake.keychain_value_fresh   # 아직 살아 있는 값
+        install(fake)
+
+        # 되비추기가 실제로 하는 일: 파일 쪽을 열쇠꾸러미의 최신 값으로 맞춘다.
+        # 그러면 다음 호출부터 거절이 사라진다. 가짜에서는 거절 응답을 거두는 것으로 흉내낸다.
+        mirrored = []
+
+        def fake_mirror():
+            mirrored.append(1)
+            fake.keychain_out = None
+            return True
+
+        claude_pool._mirror_now = fake_mirror
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+
+        check("살아 있는 값은 안 지움", fake.keychain_deleted == [],
+              f"{fake.keychain_deleted}")
+        check("대신 두 자리를 맞춤", len(mirrored) >= 1, f"mirrored={mirrored}")
+        check("맞춘 뒤 같은 계정으로 성공", proc.returncode == 0, f"rc={proc.returncode}")
+        check("계정을 막지 않음", st.load_state()["blocked"] == {},
+              f"blocked={st.load_state()['blocked']}")
+        check("사람에게 지우라고 알리지 않음",
+              not any("security delete" in m for m in fake.notices),
+              f"notices={fake.notices[:1]}")
+        check("사람 손이 필요하다고 알리지 않음", fake.notices == [],
+              f"notices={fake.notices[:1]}")
+
+        # (2) 이미 세 자리가 같은 값이면 되비출 것이 없다. 그때도 사람을 부르면 안 된다
+        # (2026-07-30 실물 검증에서 나온 결함: '맞출 게 없음'을 '못 고침'으로 보고 알렸다).
+        claude_pool.KEYCHAIN_STAMP.unlink(missing_ok=True)
+        setup(tmp, ["A", "B"], "A")
+        fake2 = Fake({"A": (1, dead, ""), "B": (0, OK_OUT, "")},
+                     keychain="kwon", keychain_out=None)
+        fake2.keychain_value = Fake.keychain_value_fresh
+        install(fake2)
+        claude_pool._mirror_now = lambda: False   # 맞출 것이 없는 상태
+        proc2 = claude_pool.run(["claude", "-p", "안녕"])
+        check("맞출 게 없어도 안 지움", fake2.keychain_deleted == [],
+              f"{fake2.keychain_deleted}")
+        # 평소의 계정 전환 알림은 나가도 된다. 나가면 안 되는 건 '자격 자리가 깨졌다'는 쪽이다.
+        check("맞출 게 없어도 자격 자리 탓으로 안 알림",
+              not any(("열쇠꾸러미" in m or "security delete" in m) for m in fake2.notices),
+              f"notices={fake2.notices[:1]}")
+        check("평소 계정 처리로 내려감(B 로 넘어가 성공)",
+              proc2.returncode == 0 and fake2.switches == ["B"],
+              f"rc={proc2.returncode} switches={fake2.switches}")
+    finally:
+        claude_pool.KEYCHAIN_STAMP = real_stamp
+        claude_pool.sys.platform = real_platform
+        claude_pool._cred_alive = real_alive
+        claude_pool._mirror_now = real_mirror
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1121,7 +1210,7 @@ def main():
                      case_save_back_live_label, case_live_label_source,
                      case_switch_passes_leaving, case_ok_envelope_bad_exitcode,
                      case_dead_but_cred_alive, case_keychain_shadow,
-                     case_keychain_self_fix):
+                     case_keychain_self_fix, case_keychain_fresh_not_shadow):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

@@ -31,3 +31,10 @@ alert_state.json
 
 # 자동 복구가 남기는 표시(마지막으로 열쇠꾸러미를 지운 시각)
 .keychain-cleared
+
+# 되비추기 작업 로그
+cred-mirror-launchd.log
+api_usage.json
+.api_fallback.lock
+.last-codex-review
+.codex-review/
