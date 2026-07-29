@@ -79,7 +79,9 @@ def audit():
             # 새 출입증을 받아 정상 동작한다. 여기서 죽었다고 보면 멀쩡한 계정 넷이 아침 점검
             # 알림에 매일 "자격 죽음" 으로 나간다(2026-07-29 실측: 4계정 전부 오탐).
             # 진짜 죽은 자격은 순환기가 부르는 순간 dead 로 잡아 갈아탄다(그쪽이 확증 자리다).
-            if info["days"] is not None and info["days"] > 0:
+            # 만료값이 깨진 계정(odd)은 값이 이상한 것이지 자격이 죽은 게 아니다.
+            # dead 로 넣으면 "자격 죽음" 으로 잘못 알린다. 경보는 odd 쪽에서 이미 켜진다.
+            if (info["days"] is not None and info["days"] > 0) or label in out["odd"]:
                 info["state"] = "unknown"
                 out["unknown"].append(label)
             else:
