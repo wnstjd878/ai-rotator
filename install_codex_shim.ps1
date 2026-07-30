@@ -1,4 +1,4 @@
-# == 운영 맥락 ==
+﻿# == 운영 맥락 ==
 # 용도: winserver(Windows)의 codex 실행 파일 자리에 순환 가로채기를 설치·해제한다.
 #       클로드 쪽 install_shim.ps1 과 같은 방식이다(원본을 옆으로 밀고 그 자리에 래퍼).
 # 실행: powershell -ExecutionPolicy Bypass -File install_codex_shim.ps1            설치
