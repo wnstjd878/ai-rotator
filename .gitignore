@@ -38,3 +38,7 @@ api_usage.json
 .api_fallback.lock
 .last-codex-review
 .codex-review/
+.last-burn-check
+
+# 로그인 화면이 뱉은 출력. 지금은 안내 문구뿐이지만 앞으로 자격이 섞일 수 있어 뺀다
+_login_out.txt
