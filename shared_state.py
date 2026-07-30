@@ -332,10 +332,14 @@ def get_current_all(now: float | None = None,
     rows = _request("GET", META_TABLE, params="select=key,value")
     if rows is None:
         return None
+    prefix = _provider_prefix(provider)
     out = {}
     for r in rows:
         key = str(r.get("key") or "")
         if not key.startswith(CURRENT_KEY_PREFIX):
+            continue
+        host = _split_provider(key[len(CURRENT_KEY_PREFIX):], prefix)
+        if not host:
             continue
         try:
             val = json.loads(r.get("value") or "")
@@ -346,7 +350,7 @@ def get_current_all(now: float | None = None,
             continue
         if at and now - at > CURRENT_STALE:
             continue
-        out.setdefault(str(val["label"]), []).append(host_label(key[len(CURRENT_KEY_PREFIX):]))
+        out.setdefault(str(val["label"]), []).append(host_label(host))
     for labels in out.values():
         labels.sort()
     return out

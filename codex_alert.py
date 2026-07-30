@@ -40,6 +40,8 @@ ALERT_STATE = BASE / "codex_alert_state.json"
 THRESHOLDS = [50, 70, 90]  # 넘을 때마다 알리는 단계
 SWITCH_SOON = 10           # 남은량이 이 % 이하면 첫 줄에 다음 계정을 붙인다
 HISTORY_KEEP = 80
+PROVIDER = "codex"         # 공유 칠판에서 클로드 값과 갈라 쓰는 이름(codex_pool 과 같아야 한다)
+FULL_SHARE_EVERY = 3600    # 이 간격으로 계정 전부를 훑어 공유 칠판에 올린다
 _KIND_NAME = {"wk": "주간", "se": "세션"}
 
 _pct = codex_usage.pct_text
@@ -49,6 +51,57 @@ _fmt_reset_full = codex_usage.fmt_reset_full
 def _cred(label: str) -> Path:
     """그 계정의 자격 파일. 계정마다 codex 폴더가 따로다."""
     return codex_home.auth_path(label)
+
+
+def _share_usage(label: str, usage: dict | None) -> None:
+    """읽은 남은량을 공유 칠판에 올린다. 실패해도 조용히 넘어간다(표시용이라 없어도 된다).
+
+    **Mac 은 사용량 조회가 앞단에서 막혀(HTML 응답) 자기 계정도 못 읽는다.** 여기서
+    올려두면 Mac 화면에서도 계정별 남은량이 보인다. 계정을 고르거나 막는 판단에는 안 쓴다.
+    """
+    if not usage:
+        return
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_usage(label, usage, provider=PROVIDER)
+    except Exception:
+        pass
+
+
+def _share_current(label: str | None) -> None:
+    """이 기계가 지금 물려 있는 계정을 공유 칠판에 적는다. 실패해도 조용히 넘어간다."""
+    if not label:
+        return
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_current(label, provider=PROVIDER)
+    except Exception:
+        pass
+
+
+def _share_all_if_due(alerted: dict, label: str) -> None:
+    """가끔 계정 전부의 남은량을 공유 칠판에 올린다.
+
+    평소엔 지금 쓰는 계정만 올린다. 세 기계가 서로 다른 계정에 앉아 있으면 그것만으로
+    칠판이 채워지지만, 다 같은 계정에 몰려 있으면 나머지 계정이 영영 안 올라간다.
+    그렇다고 10분마다 전부 조회하면 429 가 난다 — 한 시간에 한 번만 훑는다.
+    """
+    now = time.time()
+    try:
+        last = float(alerted.get("_shared_all_at") or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if now - last < FULL_SHARE_EVERY:
+        return
+    for l in st.account_labels():
+        if l == label or not _cred(l).exists():
+            continue
+        _share_usage(l, codex_usage.get_usage(_cred(l)))
+    alerted["_shared_all_at"] = now  # 맨 뒤에 넣어야 기록을 줄일 때 안 잘린다
 
 
 def _load_alerted() -> dict:
@@ -205,8 +258,13 @@ def main() -> int:
         print(build_message(label, hits, _others_weekly(label)))
         return 0
 
+    # 다른 기계가 보라고 공유 칠판에 올린다(알림 여부와 무관하게 매번).
+    _share_current(label)
+    _share_usage(label, u)
+
     seen = [(label, u.get("weekly_reset"))]
     alerted = _load_alerted()
+    _share_all_if_due(alerted, label)  # 한 시간에 한 번은 나머지 계정도 올린다
     hits = []
     for kind, pct_key, reset_key in kinds:
         hit = _check(kind, u.get(pct_key), u.get(reset_key), label, alerted)

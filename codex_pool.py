@@ -50,6 +50,7 @@ except Exception:
 # "쓸 수 있는 계정"은 자격 저장본이 아니라 폴더별 로그인 여부로 판단한다
 st.SAVED_LABELS_FN = codex_home.logged_in_labels
 
+PROVIDER = "codex"  # 공유 칠판에서 클로드 값과 갈라 쓰는 이름(키에 codex: 접두가 붙는다)
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
 CODEX_BINS = (
@@ -122,17 +123,147 @@ def notify(message: str) -> None:
         log(f"알림 전송 실패: {type(e).__name__}")
 
 
+def _ago_text(sec: float) -> str:
+    """지난 시간을 '방금 / 12분 전 / 3시간 전 / 2일 전' 으로."""
+    if sec < 60:
+        return "방금"
+    if sec < 3600:
+        return f"{int(sec // 60)}분 전"
+    if sec < 86400:
+        return f"{int(sec // 3600)}시간 전"
+    return f"{int(sec // 86400)}일 전"
+
+
+def _host_label(host) -> str:
+    """기계 이름을 사람이 알아보는 이름으로(본체/Mac/winserver). 못 바꾸면 원래 이름."""
+    try:
+        import shared_state
+
+        return shared_state.host_label(host)
+    except Exception:
+        return str(host or "다른 기기")
+
+
+def _share_usage(label: str, usage: dict) -> None:
+    """읽은 사용량을 공유 칠판에 올린다. 실패해도 조용히 넘어간다(표시용이라 없어도 된다).
+
+    지피티는 계정마다 폴더가 따로라 대개 자기 기계에서 다 읽힌다. 그런데 **Mac 은 사용량
+    조회가 앞단에서 막혀(HTML 응답) 아무 계정도 못 읽는다.** 그때 다른 기계가 올린 값을
+    보여주려고 남긴다. 계정을 고르거나 막는 판단에는 쓰지 않는다(낡은 값이므로).
+    """
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_usage(label, usage, provider=PROVIDER)
+    except Exception:
+        pass
+
+
+def _shared_usage() -> dict | None:
+    """공유 칠판에 올라온 계정별 사용량. 못 읽으면 None."""
+    try:
+        import shared_state
+
+        if not shared_state.enabled():
+            return None
+        return shared_state.get_usage_all(provider=PROVIDER)
+    except Exception:
+        return None
+
+
+def _share_current(label: str | None) -> None:
+    """이 기계가 지금 물려 있는 계정을 공유 칠판에 적는다. 실패해도 조용히 넘어간다."""
+    if not label:
+        return
+    try:
+        import shared_state
+
+        if shared_state.enabled():
+            shared_state.put_current(label, provider=PROVIDER)
+    except Exception:
+        pass
+
+
+def _shared_current() -> dict | None:
+    """{라벨: [그 계정에 물려 있는 기계...]}. 못 읽으면 None.
+
+    세 기계가 같은 계정에 몰리면 세션 한도를 3배 빨리 태운다. 어디가 어느 계정에
+    앉아 있는지는 자기 화면만 봐서는 알 수 없어서 공유 칠판으로 본다.
+    """
+    try:
+        import shared_state
+
+        if not shared_state.enabled():
+            return None
+        return shared_state.get_current_all(provider=PROVIDER)
+    except Exception:
+        return None
+
+
+def _usage_line(entry: dict, now: float) -> str:
+    """기록해둔 사용량 한 줄. 초기화 시각이 지난 값은 낡은 것이라 뺀다. 없으면 빈 글."""
+    parts = []
+    for pct_key, reset_key, name in (("weekly_pct", "weekly_reset", "주간"),
+                                     ("session_pct", "session_reset", "세션")):
+        pct, reset = entry.get(pct_key), entry.get(reset_key)
+        if pct is None:
+            continue
+        try:
+            if reset and float(reset) <= now:
+                continue  # 그 뒤로 초기화됐다 = 낡은 값
+            parts.append(f"{name} 남은 {max(0, 100 - float(pct)):.0f}%")
+        except (TypeError, ValueError):
+            continue
+    return ", ".join(parts)
+
+
+def _last_seen_usage(state: dict, shared: dict | None, label: str, now: float) -> str:
+    """지금 못 읽을 때: 다른 기계가 올린 값과 이 기계의 기록 중 더 최신 것을 보여준다.
+
+    언제 어디서 읽은 값인지 같이 적는다. 낡은 값을 지금 값으로 오해하면 안 되기 때문이다.
+    """
+    cands = []
+    local = (state.get("usage_seen") or {}).get(label)
+    if local:
+        cands.append(("이 기기", local))
+    remote = (shared or {}).get(label)
+    if remote:
+        cands.append((_host_label(remote.get("host")), remote))
+    if not cands:
+        return "사용량 못 읽음"
+
+    def _at(pair):
+        try:
+            return float(pair[1].get("at") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    who, best = max(cands, key=_at)
+    line = _usage_line(best, now)
+    if not line:
+        return "사용량 못 읽음"
+    seen_at = _at((who, best))
+    return f"{line} ({who} {_ago_text(now - seen_at) if seen_at else '이전'} 기준)"
+
+
 def status_text() -> str:
     state = st.prune_blocked(st.load_state())
     cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
     now = time.time()
     saved = set(st.saved_labels())
     lines = [f"현재 계정: {cur}"]
-    seen_resets = []  # 여기서 읽은 초기화 시각은 다음 계정 고르는 순서에 쓰인다
+    _share_current(state.get("current"))  # 이 기계가 어디 물려 있는지 먼저 올린다
+    shared = _shared_usage()           # 다른 기계가 자기 계정에서 읽어 올린 값
+    holders = _shared_current() or {}  # 어느 기계가 어느 계정에 물려 있는지
+    seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
     for label in st.account_labels():
         marks = []
+        who = holders.get(label) or []
         if label == cur:
-            marks.append("현재 사용 중")
+            marks.append("현재 사용 중" + (f"({', '.join(who)})" if who else ""))
+        elif who:
+            marks.append(f"{', '.join(who)} 사용 중")
         if label not in saved:
             marks.append(f"로그인 없음 (python codex_login.py {label})")
         until = (state.get("blocked") or {}).get(label)
@@ -141,13 +272,17 @@ def status_text() -> str:
             marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
         if codex_usage and label in saved:
             u = codex_usage.get_usage_for(cred_path(label), is_current=(label == cur))
-            marks.append(codex_usage.summarize(u))
             if u:
+                marks.append(codex_usage.summarize(u))
                 if u.get("email"):
                     marks.append(str(u["email"]))
-                seen_resets.append((label, u.get("weekly_reset")))
+                seen.append((label, u))
+                _share_usage(label, u)
+            else:
+                # 이 기계에서 못 읽는 경우(Mac 은 앞단 차단이라 늘 여기로 온다)
+                marks.append(_last_seen_usage(state, shared, label, now))
         lines.append(f"  {label}: " + ", ".join(marks))
-    st.remember_resets(seen_resets)
+    st.remember_usage(seen)
     return "\n".join(lines)
 
 
