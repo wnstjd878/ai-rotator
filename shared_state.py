@@ -228,7 +228,28 @@ def host_label(host: str) -> str:
     return HOST_ALIAS.get(str(host or ""), str(host or "?"))
 
 
-def put_usage(label: str, usage: dict, host: str | None = None) -> bool:
+def _provider_prefix(provider: str | None) -> str:
+    """도구별 접두. 클로드는 접두 없이 쓰던 키를 그대로 둔다(옛 값이 그대로 읽힌다).
+
+    막힘 공유가 라벨에 `codex:` 를 붙여 갈라 쓰는 것과 같은 규칙이다
+    (pool_state._from_shared 가 콜론 든 라벨을 걸러낸다).
+    """
+    p = (provider or "claude").strip()
+    return "" if p == "claude" else p + ":"
+
+
+def _split_provider(rest: str, prefix: str) -> str | None:
+    """키에서 접두를 떼어 남은 부분을 준다. 다른 도구 것이면 None.
+
+    클로드(접두 없음)를 읽을 때 콜론이 든 것은 남의 것이므로 뺀다.
+    """
+    if prefix:
+        return rest[len(prefix):] if rest.startswith(prefix) else None
+    return None if ":" in rest else rest
+
+
+def put_usage(label: str, usage: dict, host: str | None = None,
+              provider: str | None = None) -> bool:
     """그 계정에서 방금 읽은 사용량을 공유 칠판에 적는다(보여주기 전용).
 
     지금 안 쓰는 계정은 저장본의 출입증이 8시간이라 그 머신에서는 조회가 안 된다.
@@ -239,7 +260,7 @@ def put_usage(label: str, usage: dict, host: str | None = None) -> bool:
     if not usage:
         return False
     body = [{
-        "key": USAGE_KEY_PREFIX + label,
+        "key": USAGE_KEY_PREFIX + _provider_prefix(provider) + label,
         "value": json.dumps({
             "weekly_pct": usage.get("weekly_pct"),
             "session_pct": usage.get("session_pct"),
@@ -255,29 +276,34 @@ def put_usage(label: str, usage: dict, host: str | None = None) -> bool:
     return res is not None
 
 
-def get_usage_all() -> dict | None:
-    """{라벨: 사용량} 공유 칠판에 올라온 값 전체. 읽기 실패면 None(호출부가 로컬로 버틴다).
+def get_usage_all(provider: str | None = None) -> dict | None:
+    """{라벨: 사용량} 그 도구의 값만. 읽기 실패면 None(호출부가 로컬로 버틴다).
 
     행 수가 몇 개뿐이라 전체를 받아 걸러낸다(패턴 조회보다 확실하다).
     """
     rows = _request("GET", META_TABLE, params="select=key,value")
     if rows is None:
         return None
+    prefix = _provider_prefix(provider)
     out = {}
     for r in rows:
         key = str(r.get("key") or "")
         if not key.startswith(USAGE_KEY_PREFIX):
+            continue
+        label = _split_provider(key[len(USAGE_KEY_PREFIX):], prefix)
+        if not label:
             continue
         try:
             val = json.loads(r.get("value") or "")
         except (ValueError, TypeError):
             continue
         if isinstance(val, dict):
-            out[key[len(USAGE_KEY_PREFIX):]] = val
+            out[label] = val
     return out
 
 
-def put_current(label: str, host: str | None = None) -> bool:
+def put_current(label: str, host: str | None = None,
+                provider: str | None = None) -> bool:
     """이 머신이 지금 어느 계정에 물려 있는지 공유 칠판에 적는다.
 
     자격은 머신마다 따로라, 세 머신이 서로 다른 계정에 앉아 있는 게 정상이다. 그런데
@@ -287,7 +313,7 @@ def put_current(label: str, host: str | None = None) -> bool:
     if not label:
         return False
     body = [{
-        "key": CURRENT_KEY_PREFIX + (host or _hostname()),
+        "key": CURRENT_KEY_PREFIX + _provider_prefix(provider) + (host or _hostname()),
         "value": json.dumps({"label": label, "at": round(time.time())}, ensure_ascii=False),
         "updated_at": _to_iso(time.time()),
     }]
@@ -296,7 +322,8 @@ def put_current(label: str, host: str | None = None) -> bool:
     return res is not None
 
 
-def get_current_all(now: float | None = None) -> dict | None:
+def get_current_all(now: float | None = None,
+                    provider: str | None = None) -> dict | None:
     """{라벨: [머신 이름...]} 지금 그 계정에 물려 있는 머신들. 읽기 실패면 None.
 
     오래된 기록은 뺀다. 꺼진 머신이 몇 달 전 계정을 아직 쓰는 것처럼 보이면 안 된다.
