@@ -489,13 +489,65 @@ def case_window_kind():
           codex_usage.which_limit(usage(weekly=10, reached_type="weekly")) == "weekly")
 
 
+def case_usage_namespace(tmp):
+    print("\n[13] 공유 저장소에서 남은량·물려 있는 기계도 안 섞인다")
+    import shared_state as ss
+
+    sent = []    # 올린 줄
+    table = []   # 읽을 때 칠판에 있다고 칠 줄
+
+    def fake_request(method, path, body=None, params=None, headers=None):
+        if method == "POST":
+            sent.extend(body or [])
+            return body
+        return table
+
+    real_request, real_enabled = ss._request, ss.enabled
+    ss._request = fake_request
+    ss.enabled = lambda: True
+    try:
+        ss.put_usage("A", {"weekly_pct": 9.0}, host="시험기계", provider="codex")
+        ss.put_usage("A", {"weekly_pct": 50.0}, host="시험기계")  # 클로드(접두 없음)
+        check("지피티 남은량 키에 접두가 붙음", sent[0]["key"] == "usage:codex:A",
+              f"key={sent[0]['key']}")
+        check("클로드 남은량 키는 예전 그대로", sent[1]["key"] == "usage:A",
+              f"key={sent[1]['key']}")
+
+        table[:] = list(sent)  # 둘 다 칠판에 있는 상태로 읽는다
+        got_codex = ss.get_usage_all(provider="codex") or {}
+        got_claude = ss.get_usage_all() or {}
+        check("지피티는 자기 것만 읽음",
+              list(got_codex) == ["A"] and got_codex["A"]["weekly_pct"] == 9.0,
+              f"got={got_codex}")
+        check("클로드는 자기 것만 읽음",
+              list(got_claude) == ["A"] and got_claude["A"]["weekly_pct"] == 50.0,
+              f"got={got_claude}")
+
+        sent.clear()
+        table.clear()
+        ss.put_current("A", host="시험기계", provider="codex")
+        ss.put_current("D", host="시험기계")  # 같은 기계가 클로드는 D 를 쓰는 상황
+        check("물려 있는 기계 키도 갈린다",
+              sent[0]["key"] == "current:codex:시험기계" and sent[1]["key"] == "current:시험기계",
+              f"keys={[r['key'] for r in sent]}")
+
+        table[:] = list(sent)
+        cur_codex = ss.get_current_all(provider="codex") or {}
+        cur_claude = ss.get_current_all() or {}
+        check("지피티 쪽은 A 만 보임", list(cur_codex) == ["A"], f"got={cur_codex}")
+        check("클로드 쪽은 D 만 보임", list(cur_claude) == ["D"], f"got={cur_claude}")
+    finally:
+        ss._request, ss.enabled = real_request, real_enabled
+
+
 def main():
     real_run = subprocess.run
     cases = [case_success, case_false_positive_body, case_rotate_on_limit,
              case_limit_text_but_server_ok, case_ignored_limits, case_all_exhausted,
              case_already_switched, case_auth_stops, case_reset_from_usage,
              case_folder_switch, case_revoked_copy, case_revoked_first_call,
-             case_not_logged_in_skipped, case_home_picks_usable, case_shared_namespace]
+             case_not_logged_in_skipped, case_home_picks_usable, case_shared_namespace,
+             case_usage_namespace]
     for fn in cases:
         with tempfile.TemporaryDirectory() as tmp:
             fn(tmp)
