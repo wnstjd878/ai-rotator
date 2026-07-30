@@ -27,6 +27,9 @@ if (-not $real) {
 $first = ($args | Where-Object { $_ -notmatch '^-' } | Select-Object -First 1)
 $passthrough = @('login', 'logout', 'mcp', 'app', 'completion', 'update', 'doctor', 'sandbox')
 $isVersionish = ($args | Where-Object { $_ -in @('--version', '-V', '--help', '-h') }).Count -gt 0
+# 단발 호출(exec/review)은 부르는 쪽이 출력을 읽어 파싱한다. 사용량 표시를 섞으면 배포 검수가
+# 깨지므로 사람이 보는 대화형에서만 찍는다. 기준은 codex_shim.py 의 SINGLE_SHOT_CMDS 와 같다.
+$isSingleShot = ($first -in @('exec', 'e', 'review'))
 
 if ($first -eq 'logout') {
     Write-Host "[자동순환] codex logout 은 그 계정 자격을 지웁니다. 계정을 바꾸려면 gs 로 확인하고" -ForegroundColor Red
@@ -62,6 +65,17 @@ try {
             break
         }
         $env:CODEX_HOME = $codexHome.Trim()
+
+        # 켜기 직전 계정별 남은 양을 화면에 먼저 보여준다(클로드 cc 와 같은 자리).
+        # codex 안에서는 이 값을 볼 방법이 없어서 감싸는 코드가 유일한 자리다. 2초쯤 걸린다.
+        if (-not $isSingleShot) {
+            Write-Host ""
+            Write-Host "[계정 사용량]" -ForegroundColor Cyan
+            # 화면 출력으로 넘겨야 위 제목과 순서가 맞는다(표준 출력은 파이프를 타서 뒤늦게 합쳐진다).
+            # 부르는 쪽이 출력을 모아 읽는 경우에도 이 줄들이 섞이지 않는다.
+            python $POOL --status | ForEach-Object { Write-Host $_ }
+            Write-Host ""
+        }
 
         & $real @args
 
