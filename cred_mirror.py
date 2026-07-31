@@ -21,9 +21,19 @@
   - 자격이 누구 것인지 서버에 물어 확정하지 못하면 저장본은 건드리지 않는다(계정 오염 방지).
   - 값은 파일로만 흐른다. 화면·명령 인자·로그에 남기지 않는다(지문 12자리만).
   - 열쇠꾸러미를 지우지 않는다. 지우는 판단은 claude_pool 쪽 한 곳에만 둔다.
-의도적 미구현: 파일 -> 열쇠꾸러미 방향(반대 방향) 쓰기. 그건 계정 전환의 일이라
-      switch_account.py 가 맡는다. 여기서 양방향으로 만들면 어느 쪽이 최신인지 다투게 된다.
-마지막 점검: 2026-07-30
+
+양방향으로 바꾼 이유 (2026-07-31 실사고):
+  원래는 열쇠꾸러미 -> 파일 한 방향만 봤다. 그런데 **원격 접속 자리에서 클로드가 돌면
+  파일 쪽이 갱신되고**, 갱신은 재발급 열쇠를 회전시키므로 그 순간 열쇠꾸러미 값이 폐기된다.
+  그러면 열쇠꾸러미를 먼저 보는 봇(launchd)만 죽는다 — 07-31 07:45~08:45 표지 생성 등
+  맥 봇 전체가 한 시간 멈췄다. 한 방향 되비추기는 이 경우를 메우지 못한다.
+  이제 두 자리를 견줘 **나중에 받은 쪽을 반대편에 반영**한다.
+  어느 쪽이 나중인지는 출입증(access token) 만료 시각으로 가른다 — 갱신할 때마다 새로 받으므로
+  더 미래인 쪽이 나중 것이다. 재발급 열쇠 만료 시각은 로그인 시점에 정해져 회전해도 안 바뀌니
+  기준으로 쓸 수 없다.
+의도적 미구현: 열쇠꾸러미를 못 읽는 자리(원격 접속·화면 잠김)에서의 반대 방향 쓰기.
+      견줄 대상을 못 읽으면서 쓰면 최신 값을 옛 값으로 밀 수 있다. 그 자리는 그냥 쉰다.
+마지막 점검: 2026-07-31
 """
 
 from __future__ import annotations
@@ -188,6 +198,43 @@ def label_of(obj) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def issued_at(obj) -> int:
+    """이 자격을 언제 받았는지 견줄 값. 출입증 만료 시각을 쓴다(클수록 나중에 받은 것).
+
+    출입증은 갱신할 때마다 새로 받으므로 이게 유일하게 믿을 만한 순서다.
+    재발급 열쇠 만료 시각은 로그인 시점에 정해져 회전해도 안 바뀌어서 못 쓴다.
+    """
+    try:
+        v = (obj.get("claudeAiOauth") or {}).get("expiresAt")
+        return int(v) if v is not None else 0
+    except Exception:
+        return 0
+
+
+def push_to_keychain(obj) -> bool:
+    """파일 쪽이 나중 것일 때 열쇠꾸러미를 그 값으로 맞춘다. 맞췄으면 True.
+
+    봇(launchd)이 실제로 읽는 자리가 열쇠꾸러미다. 여기가 옛 값이면 파일이 멀쩡해도
+    봇만 인증 실패한다(2026-07-31 한 시간 정지). 쓰기는 화면 세션에서만 된다.
+    """
+    try:
+        import switch_account as sw
+    except Exception:
+        return False
+    tmp = creds_dir() / ".mirror-push.json"
+    try:
+        write_atomic(tmp, obj)
+        note = sw.switch_keychain(tmp)
+    except Exception:
+        return False
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return note.startswith("열쇠꾸러미도")
+
+
 def mirror_live(obj, fp: str) -> bool:
     """원격 접속 자리가 읽는 파일에 최신 값을 깐다. 바뀐 게 있으면 True."""
     cur = read_json(LIVE)
@@ -291,6 +338,23 @@ def sync(quiet: bool = False) -> bool:
         return False
 
     fp = fingerprint(obj)
+
+    # 파일 쪽이 나중에 받은 것이면 방향을 뒤집는다.
+    # 원격 접속 자리에서 클로드가 돌면 파일만 갱신되고, 그 갱신이 열쇠꾸러미 값을 폐기시켜
+    # 봇 자리만 죽는다(2026-07-31). 그때는 파일 값을 열쇠꾸러미로 밀어야 한다.
+    live = read_json(LIVE)
+    live_fp = fingerprint(live) if live else None
+    if live_fp and live_fp != fp and issued_at(live) > issued_at(obj):
+        if not push_to_keychain(live):
+            # 화면 세션이 아니거나 화면이 잠겼다. 다음 회차에 다시 해 본다.
+            return False
+        label = label_of(live)
+        changed_store = mirror_store(live, live_fp, label) if label else False
+        where = ["열쇠꾸러미"] + (["'%s' 저장본" % label] if changed_store else [])
+        if not quiet:
+            log("자격 파일이 더 최신이라 그 값(%s)을 %s에 맞췄습니다." % (live_fp, ", ".join(where)))
+        return True
+
     changed_live = mirror_live(obj, fp)
 
     label = label_of(obj)

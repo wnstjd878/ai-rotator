@@ -1195,6 +1195,72 @@ def case_keychain_fresh_not_shadow(tmp):
         claude_pool._mirror_now = real_mirror
 
 
+def case_mirror_both_ways(tmp):
+    print("\n[32] 되비추기가 양쪽을 견줘 나중 것을 반대편에 맞춘다")
+    # 2026-07-31 실사고: 원격 접속 자리에서 클로드가 돌면 파일만 갱신되고 그 갱신이
+    # 열쇠꾸러미 값을 폐기시킨다. 한 방향(열쇠꾸러미 -> 파일)만 보던 되비추기는 이걸 못 메워
+    # 봇 자리만 한 시간 죽었다. 이제 출입증 만료 시각으로 나중 것을 가려 반대편에 민다.
+    import cred_mirror as cm
+
+    old = {"claudeAiOauth": {"refreshToken": "old-refresh", "expiresAt": 1000}}
+    new = {"claudeAiOauth": {"refreshToken": "new-refresh", "expiresAt": 2000}}
+
+    real = (cm.LIVE, cm.keychain_account, cm.read_keychain, cm.push_to_keychain,
+            cm.label_of, cm.creds_dir, cm.apply_pending, cm.sys.platform)
+    try:
+        cm.sys.platform = "darwin"
+        cm.LIVE = Path(tmp) / "live.json"
+        cm.creds_dir = lambda: Path(tmp)
+        cm.apply_pending = lambda: "none"
+        cm.label_of = lambda obj: "B"
+        cm.keychain_account = lambda: "kwon"
+
+        # (1) 파일이 나중 것 -> 열쇠꾸러미로 민다. 파일은 덮이면 안 된다.
+        pushed = []
+        cm.read_keychain = lambda acct: json.loads(json.dumps(old))
+        cm.push_to_keychain = lambda obj: (pushed.append(cm.fingerprint(obj)), True)[1]
+        cm.write_atomic(cm.LIVE, new)
+        cm.sync(quiet=True)
+        check("파일이 나중이면 열쇠꾸러미로 민다", pushed == [cm.fingerprint(new)],
+              f"pushed={pushed}")
+        check("그때 파일은 옛 값으로 안 덮인다",
+              cm.fingerprint(cm.read_json(cm.LIVE)) == cm.fingerprint(new),
+              "파일이 열쇠꾸러미 값으로 덮였다")
+        check("저장본도 나중 값으로 맞춘다",
+              cm.fingerprint(cm.read_json(Path(tmp) / "B.json")) == cm.fingerprint(new),
+              "저장본이 안 맞춰졌다")
+
+        # (2) 밀기가 실패하면(원격·화면 잠김) 아무것도 건드리지 않는다
+        pushed.clear()
+        cm.push_to_keychain = lambda obj: False
+        cm.write_atomic(cm.LIVE, new)
+        cm.sync(quiet=True)
+        check("밀기 실패면 파일을 안 건드린다",
+              cm.fingerprint(cm.read_json(cm.LIVE)) == cm.fingerprint(new),
+              "밀기 실패인데 파일이 덮였다")
+
+        # (3) 열쇠꾸러미가 나중 것이면 예전대로 파일 쪽을 맞춘다 (회귀 확인)
+        pushed.clear()
+        cm.read_keychain = lambda acct: json.loads(json.dumps(new))
+        cm.push_to_keychain = lambda obj: (pushed.append(1), True)[1]
+        cm.write_atomic(cm.LIVE, old)
+        cm.sync(quiet=True)
+        check("열쇠꾸러미가 나중이면 파일을 맞춘다",
+              cm.fingerprint(cm.read_json(cm.LIVE)) == cm.fingerprint(new),
+              "파일이 안 맞춰졌다")
+        check("그때는 열쇠꾸러미로 밀지 않는다", pushed == [], f"pushed={pushed}")
+
+        # (4) 같은 값이면 양쪽 다 가만둔다
+        pushed.clear()
+        cm.write_atomic(cm.LIVE, new)
+        changed = cm.sync(quiet=True)
+        check("같은 값이면 아무 일도 안 한다", changed is False and pushed == [],
+              f"changed={changed} pushed={pushed}")
+    finally:
+        (cm.LIVE, cm.keychain_account, cm.read_keychain, cm.push_to_keychain,
+         cm.label_of, cm.creds_dir, cm.apply_pending, cm.sys.platform) = real
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1214,7 +1280,8 @@ def main():
                      case_save_back_live_label, case_live_label_source,
                      case_switch_passes_leaving, case_ok_envelope_bad_exitcode,
                      case_dead_but_cred_alive, case_keychain_shadow,
-                     case_keychain_self_fix, case_keychain_fresh_not_shadow):
+                     case_keychain_self_fix, case_keychain_fresh_not_shadow,
+                     case_mirror_both_ways):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
