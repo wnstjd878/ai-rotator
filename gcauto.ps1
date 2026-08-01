@@ -69,12 +69,22 @@ try {
         # 켜기 직전 계정별 남은 양을 화면에 먼저 보여준다(클로드 cc 와 같은 자리).
         # codex 안에서는 이 값을 볼 방법이 없어서 감싸는 코드가 유일한 자리다. 2초쯤 걸린다.
         if (-not $isSingleShot) {
-            Write-Host ""
-            Write-Host "[계정 사용량]" -ForegroundColor Cyan
-            # 화면 출력으로 넘겨야 위 제목과 순서가 맞는다(표준 출력은 파이프를 타서 뒤늦게 합쳐진다).
-            # 부르는 쪽이 출력을 모아 읽는 경우에도 이 줄들이 섞이지 않는다.
-            python $POOL --status | ForEach-Object { Write-Host $_ }
-            Write-Host ""
+            # codex_pool.py 는 출력 통로를 UTF-8 로 고정해 내보내는데, 한국어 윈도우 콘솔은
+            # 기본이 cp949 라 파이프로 받으면 글자가 통째로 깨진다(2026-08-02 실측).
+            # 읽는 쪽·찍는 쪽을 UTF-8 로 맞춘 뒤 원래대로 되돌린다.
+            $prevOutEnc = [Console]::OutputEncoding
+            try {
+                [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+                Write-Host ""
+                Write-Host "[계정 사용량]" -ForegroundColor Cyan
+                # 화면 출력으로 넘겨야 위 제목과 순서가 맞는다(표준 출력은 파이프를 타서 뒤늦게 합쳐진다).
+                # 부르는 쪽이 출력을 모아 읽는 경우에도 이 줄들이 섞이지 않는다.
+                python $POOL --status | ForEach-Object { Write-Host $_ }
+                Write-Host ""
+            }
+            finally {
+                [Console]::OutputEncoding = $prevOutEnc
+            }
         }
 
         & $real @args
