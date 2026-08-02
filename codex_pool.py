@@ -42,6 +42,7 @@ st.use("codex")  # 이 프로세스는 지피티 쪽 상태만 다룬다 (불러
 
 import codex_home  # noqa: E402
 import codex_limit  # noqa: E402
+import usage_view  # 남은 사용량 표시 글자(클로드 쪽과 한 벌)  # noqa: E402
 try:
     import codex_usage  # 계정별 사용률 (없어도 순환은 됨)
 except Exception:
@@ -125,23 +126,12 @@ def notify(message: str) -> None:
 
 def _ago_text(sec: float) -> str:
     """지난 시간을 '방금 / 12분 전 / 3시간 전 / 2일 전' 으로."""
-    if sec < 60:
-        return "방금"
-    if sec < 3600:
-        return f"{int(sec // 60)}분 전"
-    if sec < 86400:
-        return f"{int(sec // 3600)}시간 전"
-    return f"{int(sec // 86400)}일 전"
+    return usage_view.ago_text(sec)
 
 
 def _host_label(host) -> str:
     """기계 이름을 사람이 알아보는 이름으로(본체/Mac/winserver). 못 바꾸면 원래 이름."""
-    try:
-        import shared_state
-
-        return shared_state.host_label(host)
-    except Exception:
-        return str(host or "다른 기기")
+    return usage_view.host_label(host)
 
 
 def _share_usage(label: str, usage: dict) -> None:
@@ -202,49 +192,18 @@ def _shared_current() -> dict | None:
 
 
 def _usage_line(entry: dict, now: float) -> str:
-    """기록해둔 사용량 한 줄. 초기화 시각이 지난 값은 낡은 것이라 뺀다. 없으면 빈 글."""
-    parts = []
-    for pct_key, reset_key, name in (("weekly_pct", "weekly_reset", "주간"),
-                                     ("session_pct", "session_reset", "세션")):
-        pct, reset = entry.get(pct_key), entry.get(reset_key)
-        if pct is None:
-            continue
-        try:
-            if reset and float(reset) <= now:
-                continue  # 그 뒤로 초기화됐다 = 낡은 값
-            parts.append(f"{name} 남은 {max(0, 100 - float(pct)):.0f}%")
-        except (TypeError, ValueError):
-            continue
-    return ", ".join(parts)
+    """기록해둔 사용량 한 줄. 초기화 시각이 지난 창은 남은 100% 로 본다. 없으면 빈 글."""
+    return usage_view.usage_line(entry, now)
 
 
 def _last_seen_usage(state: dict, shared: dict | None, label: str, now: float) -> str:
     """지금 못 읽을 때: 다른 기계가 올린 값과 이 기계의 기록 중 더 최신 것을 보여준다.
 
-    언제 어디서 읽은 값인지 같이 적는다. 낡은 값을 지금 값으로 오해하면 안 되기 때문이다.
+    언제 어디서 읽은 값인지 같이 적는다(낡은 값을 지금 값으로 오해하면 안 된다).
+    글자 만드는 규칙은 클로드 쪽과 한 벌로 쓴다(usage_view). Mac 은 앞단 차단이라
+    늘 이 경로로 온다.
     """
-    cands = []
-    local = (state.get("usage_seen") or {}).get(label)
-    if local:
-        cands.append(("이 기기", local))
-    remote = (shared or {}).get(label)
-    if remote:
-        cands.append((_host_label(remote.get("host")), remote))
-    if not cands:
-        return "사용량 못 읽음"
-
-    def _at(pair):
-        try:
-            return float(pair[1].get("at") or 0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    who, best = max(cands, key=_at)
-    line = _usage_line(best, now)
-    if not line:
-        return "사용량 못 읽음"
-    seen_at = _at((who, best))
-    return f"{line} ({who} {_ago_text(now - seen_at) if seen_at else '이전'} 기준)"
+    return usage_view.last_seen(state, shared, label, now)
 
 
 def status_text() -> str:

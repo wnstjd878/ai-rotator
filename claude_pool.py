@@ -41,6 +41,7 @@ if str(BASE) not in sys.path:
 
 import limit_detect  # noqa: E402
 import pool_state as st  # noqa: E402
+import usage_view  # 남은 사용량 표시 글자(지피티 쪽과 한 벌)  # noqa: E402
 try:
     import usage_check  # 계정별 세션/주간 사용률 (없어도 순환은 됨)
 except Exception:
@@ -133,40 +134,17 @@ def notify(message: str) -> None:
 
 def _ago_text(sec: float) -> str:
     """지난 시간을 '방금 / 12분 전 / 3시간 전 / 2일 전' 으로."""
-    if sec < 60:
-        return "방금"
-    if sec < 3600:
-        return f"{int(sec // 60)}분 전"
-    if sec < 86400:
-        return f"{int(sec // 3600)}시간 전"
-    return f"{int(sec // 86400)}일 전"
+    return usage_view.ago_text(sec)
 
 
 def _host_label(host) -> str:
     """기계 이름을 사람이 알아보는 이름으로(본체/Mac/winserver). 못 바꾸면 원래 이름."""
-    try:
-        import shared_state
-
-        return shared_state.host_label(host)
-    except Exception:
-        return str(host or "다른 기기")
+    return usage_view.host_label(host)
 
 
 def _usage_line(entry: dict, now: float) -> str:
-    """기록해둔 사용량 한 줄. 초기화 시각이 지난 값은 낡은 것이라 뺀다. 없으면 빈 글."""
-    parts = []
-    for pct_key, reset_key, name in (("weekly_pct", "weekly_reset", "주간"),
-                                     ("session_pct", "session_reset", "세션")):
-        pct, reset = entry.get(pct_key), entry.get(reset_key)
-        if pct is None:
-            continue
-        try:
-            if reset and float(reset) <= now:
-                continue  # 그 뒤로 초기화됐다 = 낡은 값
-            parts.append(f"{name} 남은 {max(0, 100 - float(pct)):.0f}%")
-        except (TypeError, ValueError):
-            continue
-    return ", ".join(parts)
+    """기록해둔 사용량 한 줄. 초기화 시각이 지난 창은 남은 100% 로 본다. 없으면 빈 글."""
+    return usage_view.usage_line(entry, now)
 
 
 def _last_seen_usage(state: dict, shared: dict | None, label: str, now: float) -> str:
@@ -175,30 +153,9 @@ def _last_seen_usage(state: dict, shared: dict | None, label: str, now: float) -
     지금 안 쓰는 계정은 저장본 출입증이 8시간이라 대개 조회가 안 된다(자격이 죽은 게 아니다).
     세 머신이 서로 다른 계정에 앉아 있어서, 공유 칠판을 보면 남의 머신이 쓰는 계정의
     잔여량까지 보인다. 자격을 새로 발급받지 않아도 된다(발급은 열쇠가 회전해 위험하다).
-    언제 어디서 읽은 값인지 같이 적는다. 낡은 값을 지금 값으로 오해하면 안 되기 때문이다.
+    글자 만드는 규칙은 지피티 쪽과 한 벌로 쓴다(usage_view).
     """
-    cands = []
-    local = (state.get("usage_seen") or {}).get(label)
-    if local:
-        cands.append(("이 기기", local))
-    remote = (shared or {}).get(label)
-    if remote:
-        cands.append((_host_label(remote.get("host")), remote))
-    if not cands:
-        return "사용량 못 읽음"
-
-    def _at(pair):
-        try:
-            return float(pair[1].get("at") or 0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    who, best = max(cands, key=_at)
-    line = _usage_line(best, now)
-    if not line:
-        return "사용량 못 읽음"
-    seen_at = _at((who, best))
-    return f"{line} ({who} {_ago_text(now - seen_at) if seen_at else '이전'} 기준)"
+    return usage_view.last_seen(state, shared, label, now)
 
 
 def _share_usage(label: str, usage: dict) -> None:

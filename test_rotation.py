@@ -1261,6 +1261,58 @@ def case_mirror_both_ways(tmp):
          cm.label_of, cm.creds_dir, cm.apply_pending, cm.sys.platform) = real
 
 
+def case_usage_after_reset(tmp):
+    """[33] 초기화 시각이 지난 기록은 버리지 말고 '남은 100%' 로 보여준다.
+
+    2026-08-03 사용자 지적: D 가 실제로는 주간 한도가 풀려 다 쓸 수 있는데
+    화면엔 '사용량 못 읽음' 만 떴다. 기록의 풀리는 시각이 지나 통째로 버려졌기 때문.
+    """
+    print("\n[33] 초기화된 뒤의 기록 표시")
+    import usage_view
+
+    now = time.time()
+
+    # (1) 주간·세션 둘 다 초기화 시각이 지난 기록 = D 가 있던 상태
+    state = {"usage_seen": {"D": {"weekly_pct": 100.0, "session_pct": 59.0,
+                                  "weekly_reset": now - 4 * 3600,
+                                  "session_reset": now - 60 * 3600,
+                                  "at": now - 60 * 3600}}}
+    line = usage_view.last_seen(state, None, "D", now)
+    check("못 읽음이 아님", "못 읽음" not in line, line)
+    check("주간 남은 100%", "주간 남은 100%" in line, line)
+    check("세션 남은 100%", "세션 남은 100%" in line, line)
+    check("초기화된 값이라고 밝힘", "초기화된 뒤 읽은 값 없음" in line, line)
+
+    # (2) 한쪽만 지난 경우 = 실측한 주간은 그대로, 세션만 되살린다
+    mixed = {"usage_seen": {"B": {"weekly_pct": 89.0, "session_pct": 19.0,
+                                  "weekly_reset": now + 3 * 86400,
+                                  "session_reset": now - 600,
+                                  "at": now - 120}}}
+    line = usage_view.last_seen(mixed, None, "B", now)
+    check("실측한 주간은 그대로", "주간 남은 11%" in line, line)
+    check("지난 세션만 되살림", "세션 남은 100%(초기화됨)" in line, line)
+    check("섞였을 땐 언제 읽은 값인지 남김", "기준)" in line, line)
+
+    # (3) 기록이 아예 없으면 예전대로 못 읽음
+    check("기록 없으면 못 읽음", usage_view.last_seen({}, None, "C", now) == "사용량 못 읽음")
+
+    # (4) 둘 다 아직 안 지난 값은 예전 표시 그대로 (회귀 없음)
+    fresh = {"usage_seen": {"A": {"weekly_pct": 5.0, "session_pct": 0.0,
+                                  "weekly_reset": now + 86400,
+                                  "session_reset": now + 3600,
+                                  "at": now - 30}}}
+    line = usage_view.last_seen(fresh, None, "A", now)
+    check("멀쩡한 값은 그대로", "주간 남은 95%" in line and "세션 남은 100%" in line, line)
+    check("멀쩡한 값엔 초기화 표시 없음", "초기화" not in line, line)
+
+    # (5) 더 최신인 공유 값이 있으면 그쪽을 쓴다 (되살리기가 우선순위를 안 흔든다)
+    shared = {"D": {"weekly_pct": 30.0, "session_pct": 10.0,
+                    "weekly_reset": now + 86400, "session_reset": now + 3600,
+                    "at": now - 60, "host": "gwon-ui-Macmini"}}
+    line = usage_view.last_seen(state, shared, "D", now)
+    check("새 실측이 있으면 그 값을 씀", "주간 남은 70%" in line, line)
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1281,7 +1333,7 @@ def main():
                      case_switch_passes_leaving, case_ok_envelope_bad_exitcode,
                      case_dead_but_cred_alive, case_keychain_shadow,
                      case_keychain_self_fix, case_keychain_fresh_not_shadow,
-                     case_mirror_both_ways):
+                     case_mirror_both_ways, case_usage_after_reset):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
