@@ -50,6 +50,9 @@ except Exception:
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
 AUTH_FAIL_WINDOW = 10 * 60      # 이 시간 안에 서로 다른 계정이 거절받으면 자격 자리를 의심한다
+AUTH_REJECT_LIMIT = 3           # 같은 계정이 이만큼 잇달아 거절받으면 판정을 믿지 말고 갈아탄다
+AUTH_REJECT_WINDOW_MIN = int(st.AUTH_REJECT_WINDOW // 60)  # 그 횟수를 세는 창(분), 로그 문구용
+FORCED_ROTATE_COOLDOWN = 5 * 60  # 그렇게 강제로 넘길 때 그 계정을 쉬게 할 시간(초)
 KEYCHAIN_FIX_COOLDOWN = 60 * 60  # 열쇠꾸러미를 스스로 지운 뒤, 다시 지우기까지 두는 시간
 KEYCHAIN_STAMP = BASE / ".keychain-cleared"  # 마지막으로 스스로 지운 시각
 CLAUDE_BINS = (
@@ -807,6 +810,25 @@ def _notify_cred_place(why: str, labels: list, account: str | None = None) -> No
     notify(head + body + "그래도 안 되면 개발 봇에 \"클로드 로그인 고쳐줘\" 라고 답장하세요.")
 
 
+def _clear_auth_rejects(label: str | None) -> None:
+    """호출이 성공하면 그 계정의 거절 횟수를 지운다.
+
+    셀 거리가 없으면 파일을 안 건드린다 — 봇 수십 곳이 매 호출마다 상태를 쓰면
+    잠금 다툼만 늘어난다. 지우다 실패해도 호출 결과에는 영향을 주지 않는다.
+    """
+    if not label:
+        return
+    try:
+        if not st.auth_reject_count(st.load_state(), label):
+            return
+        with st.with_lock():
+            state = st.load_state()
+            st.clear_auth_reject(state, label)
+            st.save_state(state)
+    except Exception:
+        pass
+
+
 def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
     """실패한 계정을 쉬게 하고 다음 계정으로 교체. 교체된 라벨을 반환.
 
@@ -842,22 +864,39 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 left = int(until - time.time())
                 log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
+                # 같은 계정이 짧은 시간에 거듭 거절받으면 아래 우회 갈래를 더 믿지 않는다.
+                # 저장본 조회가 되고 재발급 열쇠 날짜가 남아 있어도 실제 갱신은 거부될 수 있다
+                # (열쇠는 한 번 쓰면 회전 폐기된다). 그걸 "살아 있음"으로 보고 같은 계정에
+                # 눌러앉으면 아무 조치 없이 몇 시간이 지난다 — 2026-08-03 실사고: 마케팅위키
+                # 챗봇 답변이 1시간 24분 동안 전패했는데 순환기는 "저장본은 살아 있습니다"만
+                # 반복했고, 계정을 갈아끼우자 바로 풀렸다.
+                rejects = st.note_auth_reject(state, used_label)
+                forced = rejects >= AUTH_REJECT_LIMIT
+                if forced:
+                    log(f"'{used_label}' 이(가) {AUTH_REJECT_WINDOW_MIN}분 안에 로그인 거절을 "
+                        f"{rejects}번 받았습니다. 저장본 판정과 무관하게 다음 계정으로 넘깁니다.")
                 place_why, recent, acct = _cred_place_check(state, used_label)
                 fix = _keychain_fix(acct, used_label) if (place_why and acct) else ""
                 if fix == "in-sync":
                     # 세 자리가 이미 같은 값이었다 = 자격 자리 문제가 아니다.
                     # 사유를 지워 평소의 계정 처리(교체·재우기)로 내려보낸다.
                     place_why = ""
-                if fix in ("fixed", "mirrored"):
+                if fix == "fixed" and st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
+                    # 자격 자리를 실제로 고친 사실은 계정을 갈아타든 아니든 알린다.
+                    _notify_cred_fixed(recent)
+                if fix in ("fixed", "mirrored") and not forced:
                     # 자격 자리를 스스로 고쳤다. 계정은 그대로 두고 다시 시도하면 통과한다.
                     # "mirrored" 는 되비추기로 조용히 맞춘 경우라 사람에게 알리지 않는다.
                     log(f"'{used_label}' 계정은 그대로 두고 다시 시도합니다.")
-                    if fix == "fixed" and st.claim_notice(f"cred-fixed:{int(time.time() // 3600)}"):
-                        _notify_cred_fixed(recent)
                     st.save_state(state)
                     return used_label or current
-                if place_why:
-                    # "half" 면 저장본 재설치 안내가 이미 나갔다. 같은 일로 두 번 알리지 않는다.
+                if place_why and fix != "half":
+                    # 자격 자리가 깨졌다는 근거가 있으면 사람에게는 항상 알린다(시간당 한 건).
+                    # 계정을 갈아타든 아니든 사람이 손볼 거리는 그대로 남아 있기 때문이다.
+                    # "half" 면 저장본 재설치 안내가 이미 나갔다 — 같은 일로 두 번 알리지 않는다.
+                    if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
+                        _notify_cred_place(place_why, recent, acct)
+                if place_why and not forced:
                     if fix == "half":
                         st.save_state(state)
                         return used_label or current
@@ -866,12 +905,9 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                     # 잠겼다), 봇들이 종량제로 넘어가 카드가 나간다. 막지 말고 사람에게 알린다.
                     log(f"'{used_label}' 로그인 거절. 그런데 {place_why}. 계정 문제가 아니라 "
                         f"자격을 읽는 자리 문제로 봅니다. 막지 않고 그대로 다시 시도합니다.")
-                    # 알림은 시간당 한 건만. 봇 수십 곳이 각자 부르면 알림이 쏟아진다.
-                    if st.claim_notice(f"cred-place:{int(time.time() // 3600)}"):
-                        _notify_cred_place(place_why, recent, acct)
                     st.save_state(state)
                     return used_label or current
-                if verdict == "dead" and _cred_alive(used_label):
+                if verdict == "dead" and not forced and _cred_alive(used_label):
                     # 저장본이 멀쩡한데 거절이 온 경우다. 자격 파일을 갈아끼우는 순간에
                     # 호출이 겹치면 남의 자격으로 나가 인증 실패가 난다. 이때 지금 계정을
                     # 죽었다고 막으면 멀쩡한 계정이 줄줄이 막히고, 봇들이 종량제로 넘어가
@@ -880,11 +916,15 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                         f"계정을 막지 않고 그대로 다시 시도합니다.")
                     st.save_state(state)
                     return used_label
-                st.mark_blocked(state, used_label, time.time() + BROKEN_CRED_COOLDOWN,
+                # 잇단 거절로 강제로 넘기는 경우엔 짧게만 쉬게 한다. 원인이 계정이 아니라
+                # 이 컴퓨터의 자격 자리일 수도 있는데, 그때 네 계정을 30분씩 재우면
+                # 그동안 쓸 계정이 없어져 봇들이 종량제로 넘어간다.
+                cooldown = FORCED_ROTATE_COOLDOWN if forced else BROKEN_CRED_COOLDOWN
+                st.mark_blocked(state, used_label, time.time() + cooldown,
                                 limit_detect.short_reason(out, err))
                 _why = ("로그인이 만료됐습니다" if verdict == "dead" else "저장본이 상했습니다")
                 log(f"'{used_label}' {_why}(로그인 거절). "
-                    f"{BROKEN_CRED_COOLDOWN // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
+                    f"{cooldown // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
                     f"그 계정으로 다시 로그인해 save_account.py 로 저장하세요.")
 
         nxt = st.pick_next(state, exclude=used_label)
@@ -1033,6 +1073,7 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         verdict = limit_detect.classify(proc.returncode, proc.stdout, proc.stderr)
 
         if verdict == "ok":
+            _clear_auth_rejects(used_label)
             return _finish(proc, args, want_check)
 
         if verdict == "auth" and not switched_here:

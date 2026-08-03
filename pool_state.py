@@ -61,6 +61,9 @@ LOCK_FILE = BASE / "state.lock"
 ACCOUNTS_FILE = BASE / "accounts.json"
 CREDS_DIR = BASE / "creds"
 
+# 로그인 거절을 이어서 몇 번 받았는지 세는 창(초). 이 시간 안에 다시 거절받으면 이어서 센다.
+AUTH_REJECT_WINDOW = 600
+
 _LAYOUT = {
     "claude": {"state": "state.json", "lock": "state.lock",
                "accounts": "accounts.json", "creds": "creds", "prefix": ""},
@@ -216,7 +219,7 @@ def saved_labels() -> list[str]:
 def _blank_state() -> dict:
     return {"current": None, "blocked": {}, "switched_at": None, "history": [],
             "notified_for": None, "notified_at": None,
-            "manual": None, "reclaim_at": None}
+            "manual": None, "reclaim_at": None, "auth_rejects": {}}
 
 
 def load_state() -> dict:
@@ -245,6 +248,8 @@ def load_state() -> dict:
         out["blocked"] = clean
     if not isinstance(out.get("history"), list):
         out["history"] = []
+    if not isinstance(out.get("auth_rejects"), dict):
+        out["auth_rejects"] = {}
     if not isinstance(out.get("current"), (str, type(None))):
         out["current"] = None
     return out
@@ -347,6 +352,65 @@ def clear_blocked_label(state: dict, label: str) -> dict:
     if _shared_on():
         shared_state.clear_blocked(_to_shared(label))
     return state
+
+
+def note_auth_reject(state: dict, label: str | None, now: float | None = None,
+                     window: float = AUTH_REJECT_WINDOW) -> int:
+    """로그인 거절을 계정별로 센다. 창(기본 10분) 안에서 이어진 횟수를 돌려준다.
+
+    창이 끊기면 처음부터 다시 센다. 호출이 성공하면 clear_auth_reject 로 지운다.
+    잠금 안에서 부를 것 — 상태를 바꾼다.
+    """
+    if not label:
+        return 0
+    now = time.time() if now is None else now
+    box = state.get("auth_rejects")
+    if not isinstance(box, dict):
+        box = {}
+        state["auth_rejects"] = box
+    rec = box.get(str(label))
+    last, n = 0.0, 0
+    if isinstance(rec, dict):
+        try:
+            last = float(rec.get("last") or 0)
+            n = int(rec.get("n") or 0)
+        except (TypeError, ValueError):
+            last, n = 0.0, 0
+    if now - last > window:
+        n = 0
+    n += 1
+    box[str(label)] = {"n": n, "last": now}
+    return n
+
+
+def clear_auth_reject(state: dict, label: str | None = None) -> dict:
+    """거절 기록을 지운다. 라벨을 안 주면 전부."""
+    box = state.get("auth_rejects")
+    if not isinstance(box, dict):
+        state["auth_rejects"] = {}
+        return state
+    if label is None:
+        state["auth_rejects"] = {}
+    else:
+        box.pop(str(label), None)
+    return state
+
+
+def auth_reject_count(state: dict, label: str | None, now: float | None = None,
+                      window: float = AUTH_REJECT_WINDOW) -> int:
+    """지금까지 센 거절 횟수를 읽기만 한다(창이 지났으면 0)."""
+    if not label:
+        return 0
+    now = time.time() if now is None else now
+    rec = (state.get("auth_rejects") or {}).get(str(label))
+    if not isinstance(rec, dict):
+        return 0
+    try:
+        if now - float(rec.get("last") or 0) > window:
+            return 0
+        return int(rec.get("n") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def set_current(state: dict, label: str, reason: str = "", manual: bool = False) -> dict:
