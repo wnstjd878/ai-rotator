@@ -50,8 +50,8 @@ except Exception:
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
 AUTH_FAIL_WINDOW = 10 * 60      # 이 시간 안에 서로 다른 계정이 거절받으면 자격 자리를 의심한다
-AUTH_REJECT_LIMIT = 3           # 같은 계정이 이만큼 잇달아 거절받으면 판정을 믿지 말고 갈아탄다
-AUTH_REJECT_WINDOW_MIN = int(st.AUTH_REJECT_WINDOW // 60)  # 그 횟수를 세는 창(분), 로그 문구용
+AUTH_REJECT_LIMIT = 3           # 강제 교체에 필요한 최소 거절 횟수(이 횟수 + 아래 시간 둘 다)
+AUTH_REJECT_STUCK = 3 * 60      # 같은 계정이 이 시간을 넘겨 계속 거절받으면 판정을 믿지 말고 갈아탄다
 FORCED_ROTATE_COOLDOWN = 5 * 60  # 그렇게 강제로 넘길 때 그 계정을 쉬게 할 시간(초)
 KEYCHAIN_FIX_COOLDOWN = 60 * 60  # 열쇠꾸러미를 스스로 지운 뒤, 다시 지우기까지 두는 시간
 KEYCHAIN_STAMP = BASE / ".keychain-cleared"  # 마지막으로 스스로 지운 시각
@@ -870,11 +870,12 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 # 눌러앉으면 아무 조치 없이 몇 시간이 지난다 — 2026-08-03 실사고: 마케팅위키
                 # 챗봇 답변이 1시간 24분 동안 전패했는데 순환기는 "저장본은 살아 있습니다"만
                 # 반복했고, 계정을 갈아끼우자 바로 풀렸다.
-                rejects = st.note_auth_reject(state, used_label)
-                forced = rejects >= AUTH_REJECT_LIMIT
+                rejects, stuck_for = st.note_auth_reject(state, used_label)
+                forced = rejects >= AUTH_REJECT_LIMIT and stuck_for >= AUTH_REJECT_STUCK
                 if forced:
-                    log(f"'{used_label}' 이(가) {AUTH_REJECT_WINDOW_MIN}분 안에 로그인 거절을 "
-                        f"{rejects}번 받았습니다. 저장본 판정과 무관하게 다음 계정으로 넘깁니다.")
+                    log(f"'{used_label}' 이(가) {int(stuck_for // 60)}분 {int(stuck_for % 60)}초째 "
+                        f"로그인 거절만 받고 있습니다(거절 {rejects}번). "
+                        f"저장본 판정과 무관하게 다음 계정으로 넘깁니다.")
                 place_why, recent, acct = _cred_place_check(state, used_label)
                 fix = _keychain_fix(acct, used_label) if (place_why and acct) else ""
                 if fix == "in-sync":

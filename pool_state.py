@@ -355,32 +355,37 @@ def clear_blocked_label(state: dict, label: str) -> dict:
 
 
 def note_auth_reject(state: dict, label: str | None, now: float | None = None,
-                     window: float = AUTH_REJECT_WINDOW) -> int:
-    """로그인 거절을 계정별로 센다. 창(기본 10분) 안에서 이어진 횟수를 돌려준다.
+                     window: float = AUTH_REJECT_WINDOW) -> tuple[int, float]:
+    """로그인 거절을 계정별로 센다. (이어진 횟수, 처음 거절받은 뒤 흐른 초)를 돌려준다.
 
-    창이 끊기면 처음부터 다시 센다. 호출이 성공하면 clear_auth_reject 로 지운다.
-    잠금 안에서 부를 것 — 상태를 바꾼다.
+    횟수보다 흐른 시간이 중요하다. 자격 파일을 갈아끼우는 순간에 호출이 겹쳐 나는 거절은
+    한 번의 호출 안에서 몇 번씩 연달아 나지만 몇 초면 풀린다. 반대로 자격이 진짜 못 쓰게
+    되면 몇 분이 지나도 계속 거절받는다. 그래서 두 상황은 횟수로는 못 가르고 시간으로 갈린다.
+
+    마지막 거절로부터 창(기본 10분)이 지나면 처음부터 다시 센다.
+    호출이 성공하면 clear_auth_reject 로 지운다. 잠금 안에서 부를 것 — 상태를 바꾼다.
     """
     if not label:
-        return 0
+        return 0, 0.0
     now = time.time() if now is None else now
     box = state.get("auth_rejects")
     if not isinstance(box, dict):
         box = {}
         state["auth_rejects"] = box
     rec = box.get(str(label))
-    last, n = 0.0, 0
+    last, first, n = 0.0, 0.0, 0
     if isinstance(rec, dict):
         try:
             last = float(rec.get("last") or 0)
+            first = float(rec.get("first") or 0)
             n = int(rec.get("n") or 0)
         except (TypeError, ValueError):
-            last, n = 0.0, 0
-    if now - last > window:
-        n = 0
+            last, first, n = 0.0, 0.0, 0
+    if now - last > window or not first or first > now:
+        n, first = 0, now
     n += 1
-    box[str(label)] = {"n": n, "last": now}
-    return n
+    box[str(label)] = {"n": n, "first": first, "last": now}
+    return n, max(0.0, now - first)
 
 
 def clear_auth_reject(state: dict, label: str | None = None) -> dict:
