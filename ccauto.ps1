@@ -1,7 +1,9 @@
 ﻿# 클로드 계정 자동 순환 래퍼 (claude 를 감싸는 코드)
 # claude 대화형을 실행하고, 한도로 끝나면 자동으로 다음 계정 전환 후 다시 시작한다.
 # 사용: cc   (PowerShell 프로필에 등록된 짧은 명령. claude 대신 이걸 쓴다)
-$POOL = "C:\Users\JUNSEONG\ai-rotator\claude_pool.py"
+# 자기가 놓인 폴더에서 찾는다. 머신마다 홈 경로가 달라 박아두면 다른 기기에서 안 돈다
+# (2026-08-04 출장 노트북 C:\Users\wnstj 추가하며 바뀜).
+$POOL = Join-Path $PSScriptRoot "claude_pool.py"
 $fails = 0
 # 첫 실행은 사용자가 준 인자 그대로. 한도로 갈아탄 뒤 다시 켤 때만 --continue 를 붙여
 # 직전 대화를 이어받는다. (처음부터 --continue 를 박으면 새 대화를 못 연다)
