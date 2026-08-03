@@ -1313,6 +1313,73 @@ def case_usage_after_reset(tmp):
     check("새 실측이 있으면 그 값을 씀", "주간 남은 70%" in line, line)
 
 
+def case_stuck_on_dead_account(tmp):
+    """[34] 한 계정이 몇 분째 로그인 거절만 받으면 판정을 믿지 말고 갈아탄다.
+
+    2026-08-03 실사고: 마케팅위키 챗봇 답변이 1시간 24분 동안 전패했는데 순환기는
+    "저장본은 살아 있습니다(서버 확인)" 만 반복하며 같은 계정에 눌러앉았다. 저장본 조회가
+    되고 재발급 열쇠 날짜가 남아 있어도 실제 갱신은 거부될 수 있어서다(열쇠는 한 번 쓰면
+    회전 폐기된다). 계정을 갈아끼우자 바로 풀렸다.
+
+    짧게 겹쳐 나는 거절([28])과는 흐른 시간으로 가른다. 시간을 안 보고 횟수만 세면
+    한 번의 호출이 재시도하는 사이에 발동해 [28] 이 깨진다.
+    """
+    print("\n[34] 같은 계정이 몇 분째 막혀 있으면 강제로 갈아탄다")
+    dead = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "api_error_status": 401, "stop_reason": "stop_sequence",
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }, ensure_ascii=False)
+
+    real_alive = claude_pool._cred_alive
+    try:
+        claude_pool._cred_alive = lambda label: True  # 저장본은 살아 있다고 나온다
+
+        # (1) 방금 시작된 거절은 예전대로 안 갈아탄다(자격 갈아끼우다 겹친 경우)
+        setup(tmp, ["A", "B", "C"], "A")
+        fake = Fake({"A": (1, dead, "")})
+        install(fake)
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("몇 초짜리 겹침엔 안 갈아탐", fake.switches == [], f"switches={fake.switches}")
+        check("아직 안 막음", st.load_state()["blocked"] == {},
+              f"blocked={st.load_state()['blocked']}")
+
+        # (2) 그 상태로 시간이 흐른다 — 처음 거절받은 시각을 4분 전으로 민다
+        state = st.load_state()
+        rec = state["auth_rejects"]["A"]
+        check("거절을 세고 있음", int(rec.get("n") or 0) >= 1, f"rec={rec}")
+        rec["first"] = time.time() - 4 * 60
+        st.save_state(state)
+
+        fake2 = Fake({"A": (1, dead, ""), "B": (0, OK_OUT, "")})
+        install(fake2)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("B 로 갈아타 성공", proc.returncode == 0 and fake2.switches == ["B"],
+              f"switches={fake2.switches}")
+        check("A 를 쉬게 기록", "A" in st.load_state()["blocked"],
+              f"blocked={list(st.load_state()['blocked'])}")
+
+        # (3) 강제로 넘길 땐 짧게만 쉬게 한다. 자격 자리가 원인일 수도 있는데 네 계정을
+        #     30분씩 재우면 그동안 쓸 계정이 없어져 봇들이 종량제(카드)로 넘어간다.
+        left = st.load_state()["blocked"]["A"] - time.time()
+        check("짧게만 쉬게 함", left <= claude_pool.FORCED_ROTATE_COOLDOWN + 5,
+              f"{int(left)}초")
+
+        # (4) 성공한 계정의 거절 기록은 지워진다(다음 실패가 처음부터 세지도록)
+        check("성공하면 기록을 지움", "B" not in (st.load_state().get("auth_rejects") or {}),
+              f"auth_rejects={st.load_state().get('auth_rejects')}")
+
+        # (5) 창(10분)이 지나 다시 거절받으면 처음부터 센다 — 하루 종일 쌓여 있다가
+        #     멀쩡한 계정이 한 번 튕겼을 때 곧바로 갈아타는 일을 막는다
+        state = st.load_state()
+        n1, elapsed1 = st.note_auth_reject(state, "C", now=1000.0)
+        n2, elapsed2 = st.note_auth_reject(state, "C", now=1000.0 + st.AUTH_REJECT_WINDOW + 1)
+        check("창이 지나면 다시 1회부터", (n1, n2) == (1, 1), f"{n1},{n2}")
+        check("흐른 시간도 초기화", elapsed2 == 0, f"{elapsed2}")
+    finally:
+        claude_pool._cred_alive = real_alive
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1333,7 +1400,8 @@ def main():
                      case_switch_passes_leaving, case_ok_envelope_bad_exitcode,
                      case_dead_but_cred_alive, case_keychain_shadow,
                      case_keychain_self_fix, case_keychain_fresh_not_shadow,
-                     case_mirror_both_ways, case_usage_after_reset):
+                     case_mirror_both_ways, case_usage_after_reset,
+                     case_stuck_on_dead_account):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
