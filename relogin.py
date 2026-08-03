@@ -52,10 +52,14 @@ BASE_PORT = 9240                       # 기존 크롬들(9222~9233)과 안 겹�
 CALLBACK_HOST = "platform.claude.com"
 LOGIN_TIMEOUT = 900                    # 사람이 로그인해야 할 때 기다리는 시간(초)
 
-# 원격 머신: 이름 → (그쪽 작업 폴더, 파이썬 명령). ssh 설정에 그 이름이 있어야 한다.
+# 원격 머신: 이름 → (그쪽 작업 폴더, 파이썬 명령, 그쪽 기본 셸). ssh 설정에 그 이름이 있어야 한다.
+# 셸을 따로 적는 이유: 명령 이어붙이는 문자가 다르다(PowerShell 은 ';', 나머지는 '&&').
+# 예전엔 파이썬 명령이 python3 인지로 갈랐는데, 노트북도 'python' 이라 그 기준으로는
+# PowerShell 로 잘못 갈린다(노트북 기본 셸은 cmd). 2026-08-04 출장 노트북 추가하며 바꿈.
 REMOTES = {
-    "macmini": ("projects/ai-rotator", "python3"),
-    "winserver": (r"C:\Users\pc\projects\ai-rotator", "python"),
+    "macmini": ("projects/ai-rotator", "python3", "unix"),
+    "winserver": (r"C:\Users\pc\projects\ai-rotator", "python", "powershell"),
+    "laptop": (r"C:\Users\wnstj\ai-rotator", "python", "cmd"),
 }
 
 CHROME_CANDIDATES = [
@@ -582,11 +586,11 @@ def remote(host, label):
     if host not in REMOTES:
         print(f"[relogin] 모르는 머신 '{host}'. 쓸 수 있는 것: {', '.join(REMOTES)}")
         return 1
-    workdir, py = REMOTES[host]
-    if py == "python3":  # 유닉스 셸
-        remote_cmd = f"cd {workdir} && {py} relogin.py --serve {label}"
-    else:                # winserver 는 PowerShell
+    workdir, py, shell = REMOTES[host]
+    if shell == "powershell":   # 세미콜론으로 이어붙인다
         remote_cmd = f"cd {workdir}; {py} relogin.py --serve {label}"
+    else:                       # unix(zsh) 와 cmd 는 둘 다 && 로 이어붙인다
+        remote_cmd = f"cd {workdir} && {py} relogin.py --serve {label}"
 
     p = subprocess.Popen(
         ["ssh", host, remote_cmd],
