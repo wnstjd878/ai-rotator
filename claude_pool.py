@@ -835,8 +835,12 @@ def _clear_auth_rejects(label: str | None) -> None:
         if not st.auth_reject_count(st.load_state(), label):
             return
         if sys.platform == "darwin":
+            # 항목 자체가 없으면(acct None) 파일이 모든 자리의 원본이라 평소대로 지운다
+            # (코덱스 지적: None 을 원격 자리로 오인하면 기록이 영영 안 지워져, 뒤에
+            # 스치는 거절 한 번에 강제 교체가 잘못 발동한다). 항목은 있는데 값을 못
+            # 읽는 자리(ssh·화면 잠금)만 봇 자리와 자격 경로가 갈리므로 안 지운다.
             acct = _keychain_account()
-            if not acct or _read_keychain_cred(acct) is None:
+            if acct and _read_keychain_cred(acct) is None:
                 log(f"'{label}' 호출은 성공했지만 여기는 열쇠꾸러미를 못 읽는 원격 "
                     "자리라 거절 기록을 지우지 않습니다(봇 자리는 다른 자격을 씁니다).")
                 return
