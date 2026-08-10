@@ -211,28 +211,58 @@ def issued_at(obj) -> int:
         return 0
 
 
+_push_err = ""
+
+
+def _warn_hourly(key: str, msg: str) -> None:
+    """같은 사유는 한 시간에 한 번만 기록한다(5분 주기라 매번 쓰면 도배).
+    도장 파일은 creds/ 아래(커밋 제외 폴더)에 둔다."""
+    stamp = creds_dir() / (".warn-" + key)
+    try:
+        last = float(stamp.read_text(encoding="utf-8"))
+    except Exception:
+        last = 0.0
+    if time.time() - last < 3600:
+        return
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(time.time()), encoding="utf-8")
+    except Exception:
+        pass
+    log(msg)
+
+
 def push_to_keychain(obj) -> bool:
     """파일 쪽이 나중 것일 때 열쇠꾸러미를 그 값으로 맞춘다. 맞췄으면 True.
 
     봇(launchd)이 실제로 읽는 자리가 열쇠꾸러미다. 여기가 옛 값이면 파일이 멀쩡해도
     봇만 인증 실패한다(2026-07-31 한 시간 정지). 쓰기는 화면 세션에서만 된다.
+    실패 사유는 _push_err 에 남긴다 — 예전엔 아무 기록 없이 False 만 돌려줘,
+    되비추기가 왜 안 되는지 로그로는 알 수 없었다(2026-08-10 조사 때 확인).
     """
+    global _push_err
+    _push_err = ""
     try:
         import switch_account as sw
-    except Exception:
+    except Exception as e:
+        _push_err = "switch_account 불러오기 실패: %s" % e
         return False
     tmp = creds_dir() / ".mirror-push.json"
     try:
         write_atomic(tmp, obj)
         note = sw.switch_keychain(tmp)
-    except Exception:
+    except Exception as e:
+        _push_err = "%s: %s" % (type(e).__name__, str(e)[:120])
         return False
     finally:
         try:
             tmp.unlink(missing_ok=True)
         except Exception:
             pass
-    return note.startswith("열쇠꾸러미도")
+    if not note.startswith("열쇠꾸러미도"):
+        _push_err = "switch_keychain 응답: %s" % (note or "(빈 응답)")[:120]
+        return False
+    return True
 
 
 def mirror_live(obj, fp: str) -> bool:
@@ -347,6 +377,10 @@ def sync(quiet: bool = False) -> bool:
     if live_fp and live_fp != fp and issued_at(live) > issued_at(obj):
         if not push_to_keychain(live):
             # 화면 세션이 아니거나 화면이 잠겼다. 다음 회차에 다시 해 본다.
+            # 단 이 상태가 이어지면 봇 자리만 죽어 있는 것이므로 흔적은 남긴다
+            # (시간당 1회 — 예전엔 무기록이라 어긋남 자체를 몰랐다).
+            _warn_hourly("push-fail", "자격 파일이 더 최신인데 열쇠꾸러미에 못 밀었습니다"
+                         "(%s). 다음 회차에 다시 시도합니다." % (_push_err or "원인 미상"))
             return False
         label = label_of(live)
         changed_store = mirror_store(live, live_fp, label) if label else False

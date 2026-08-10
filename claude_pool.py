@@ -821,12 +821,25 @@ def _clear_auth_rejects(label: str | None) -> None:
 
     셀 거리가 없으면 파일을 안 건드린다 — 봇 수십 곳이 매 호출마다 상태를 쓰면
     잠금 다툼만 늘어난다. 지우다 실패해도 호출 결과에는 영향을 주지 않는다.
+
+    단 거절이 쌓여 있는 동안에는 성공이 '봇과 같은 자리'에서 났을 때만 지운다.
+    봇 자리(launchd)는 열쇠꾸러미 자격을 쓰고 원격 접속(ssh) 자리는 파일 자격을
+    쓰므로, 열쇠꾸러미 값을 못 읽는 자리의 성공은 봇 자리 거절의 반증이 못 된다.
+    2026-08-10 실사고: 봇 자리가 로그인 거절을 받는 동안 진단용 ssh 호출이
+    성공하며 거절 기록을 지워, 3분 강제 교체가 눈앞에서 무력화되고 봇 정지가
+    이어졌다. 이 검사는 거절이 쌓여 있을 때만 돌아 평소 호출엔 비용이 없다.
     """
     if not label:
         return
     try:
         if not st.auth_reject_count(st.load_state(), label):
             return
+        if sys.platform == "darwin":
+            acct = _keychain_account()
+            if not acct or _read_keychain_cred(acct) is None:
+                log(f"'{label}' 호출은 성공했지만 여기는 열쇠꾸러미를 못 읽는 원격 "
+                    "자리라 거절 기록을 지우지 않습니다(봇 자리는 다른 자격을 씁니다).")
+                return
         with st.with_lock():
             state = st.load_state()
             st.clear_auth_reject(state, label)
