@@ -11,7 +11,9 @@ $runArgs = @($args)
 while ($true) {
     # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
     # (감싸는 코드는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
-    python $POOL --ensure
+    # 인자를 같이 넘긴다 — 그래야 --model 을 보고 그 모델 칸(예: Fable)까지 확인한다.
+    # 인자에 없으면 순환기가 settings.json 에 고정된 모델을 대신 본다.
+    python $POOL --ensure @runArgs
     # 켜기 직전 계정별 사용량을 화면에 먼저 보여준다(사용자 요구 2026-07-29).
     # claude 안에서는 이 값을 볼 수 없어서, 감싸는 코드가 뜨기 전에 찍는 자리가 유일하다.
     Write-Host ""
@@ -22,12 +24,14 @@ while ($true) {
 
     # claude 가 끝났다. 지금 계정이 한도/만료인지 조용히 확인(haiku ping, 소비 미미)
     $j = (("ping" | claude -p --model claude-haiku-4-5-20251001 --output-format json 2>&1) | Out-String)
-    $limited = $j -match "weekly limit|usage limit reached|hit your .{0,40}limit|OAuth session expired|5-hour limit|rate.?limit"
+    # "reached your ..." 는 모델별 한도 문구다(실제: "You've reached your Fable 5 limit").
+    # 이게 없어서 2026-08-12 에 Fable 이 막혔는데도 자동 전환이 안 걸렸다.
+    $limited = $j -match "weekly limit|usage limit reached|hit your .{0,40}limit|reached your .{0,40}limit|OAuth session expired|5-hour limit|rate.?limit"
 
     if ($limited) {
         Write-Host ""
         Write-Host "[자동순환] 한도 도달 감지 -> 다음 계정으로 전환합니다..." -ForegroundColor Yellow
-        python $POOL --next
+        python $POOL --next @runArgs
         # 이어받기 인자가 아직 없고, 사용자가 --resume 으로 특정 대화를 고른 게 아니면 붙인다
         $hasResume = ($runArgs -contains "--continue") -or ($runArgs -contains "-c") -or ($runArgs -contains "--resume") -or ($runArgs -contains "-r")
         if (-not $hasResume) {

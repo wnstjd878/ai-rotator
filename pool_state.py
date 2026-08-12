@@ -219,7 +219,57 @@ def saved_labels() -> list[str]:
 def _blank_state() -> dict:
     return {"current": None, "blocked": {}, "switched_at": None, "history": [],
             "notified_for": None, "notified_at": None,
-            "manual": None, "reclaim_at": None, "auth_rejects": {}}
+            "manual": None, "reclaim_at": None, "auth_rejects": {},
+            "scoped_blocked": {}}
+
+
+def _clean_scoped(raw) -> dict:
+    """모델 칸별 막힘을 {라벨: {칸이름: 해제시각}} 으로 다듬는다. 이상한 값은 버린다."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for label, buckets in raw.items():
+        if not isinstance(buckets, dict):
+            continue
+        clean = {}
+        for name, until in buckets.items():
+            try:
+                clean[str(name)] = float(until)
+            except (TypeError, ValueError):
+                continue
+        if clean:
+            out[str(label)] = clean
+    return out
+
+
+def mark_scoped_blocked(state: dict, label: str, bucket: str, until_epoch: float) -> dict:
+    """그 계정의 **특정 모델 칸만** 막혔다고 적는다(계정 전체는 그대로 쓸 수 있다).
+
+    계정 전체를 막는 mark_blocked 와 갈라 둔 이유: Fable 이 다 떨어져도 그 계정으로
+    Opus 는 멀쩡히 쓸 수 있다. 여기서 계정을 통째로 막으면 남은 Opus 몫을 버리게 된다.
+    """
+    if not label or not bucket:
+        return state
+    try:
+        until = float(until_epoch)
+    except (TypeError, ValueError):
+        return state
+    box = _clean_scoped(state.get("scoped_blocked"))
+    prev = box.get(str(label), {}).get(str(bucket))
+    box.setdefault(str(label), {})[str(bucket)] = max(float(prev), until) if prev else until
+    state["scoped_blocked"] = box
+    _push_history(state, label, "scoped_blocked", f"{bucket} 칸 소진")
+    return state
+
+
+def is_scoped_blocked(state: dict, label: str, bucket: str | None,
+                      now: float | None = None) -> bool:
+    """그 계정의 그 모델 칸이 아직 막혀 있는지. 칸을 안 주면 항상 False."""
+    if not bucket:
+        return False
+    now = time.time() if now is None else now
+    until = (_clean_scoped(state.get("scoped_blocked")).get(str(label)) or {}).get(str(bucket))
+    return bool(until and until > now)
 
 
 def load_state() -> dict:
@@ -250,6 +300,7 @@ def load_state() -> dict:
         out["history"] = []
     if not isinstance(out.get("auth_rejects"), dict):
         out["auth_rejects"] = {}
+    out["scoped_blocked"] = _clean_scoped(out.get("scoped_blocked"))
     if not isinstance(out.get("current"), (str, type(None))):
         out["current"] = None
     return out
@@ -288,6 +339,14 @@ def prune_blocked(state: dict, now: float | None = None) -> dict:
                 blocked[label] = max(blocked.get(label, 0.0), float(v))
 
     state["blocked"] = blocked
+    # 모델 칸별 막힘도 같이 턴다. 안 털면 Fable 이 다시 채워져도 그 계정을 계속 건너뛴다.
+    # 이건 공유 저장소에 안 올린다 — 공유 쪽은 계정 단위 막힘만 다루는 구조다.
+    scoped = {}
+    for label, buckets in _clean_scoped(state.get("scoped_blocked")).items():
+        alive = {name: until for name, until in buckets.items() if until > now}
+        if alive:
+            scoped[label] = alive
+    state["scoped_blocked"] = scoped
     if not blocked:
         state["notified_for"] = None  # 하나라도 풀렸으면 다음 소진 때 다시 알린다
     return state
@@ -495,6 +554,9 @@ def note_usage(state: dict, label: str, usage, now: float | None = None) -> dict
         "session_pct": usage.get("session_pct"),
         "weekly_reset": usage.get("weekly_reset"),
         "session_reset": usage.get("session_reset"),
+        # 모델 칸(Fable 등)도 같이 남긴다. 이걸 안 남기면 계정 목록 화면에서
+        # "주간 40% 남음" 만 보여 그 계정으로 Fable 이 되는지 알 수가 없다.
+        "scoped": usage.get("scoped") or {},
         "at": round(now),
     }
     state["usage_seen"] = seen
@@ -517,8 +579,13 @@ def remember_usage(pairs) -> None:
         save_state(s)
 
 
-def pick_next(state: dict, exclude: str | None = None, now: float | None = None) -> str | None:
+def pick_next(state: dict, exclude: str | None = None, now: float | None = None,
+              bucket: str | None = None) -> str | None:
     """지금 쓸 계정 라벨 하나. 없으면 None.
+
+    `bucket` 을 주면 **그 모델 칸이 막힌 계정도 건너뛴다**. 쓰려는 게 Fable 인데
+    Fable 만 바닥난 계정으로 갈아타면 갈아탄 의미가 없다. 칸을 안 주면 예전과 똑같이
+    계정 단위 막힘만 본다(Opus 로 쓰는 경우가 그대로 유지되는 지점이다).
 
     순차 소진: 한 계정을 다 태우고 다음으로 간다(분산하지 않는다).
     순서는 **주간 초기화가 이른 계정부터**. 곧 초기화되는 계정의 남은 양은 안 쓰면 그냥
@@ -530,7 +597,8 @@ def pick_next(state: dict, exclude: str | None = None, now: float | None = None)
     now = time.time() if now is None else now
     saved = set(saved_labels())
     candidates = [l for l in account_labels()
-                  if l != exclude and l in saved and not is_blocked(state, label=l, now=now)]
+                  if l != exclude and l in saved and not is_blocked(state, label=l, now=now)
+                  and not is_scoped_blocked(state, l, bucket, now)]
     order = priority_order(state, candidates, now)
     return order[0] if order else None
 

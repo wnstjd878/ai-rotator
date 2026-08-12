@@ -1380,6 +1380,87 @@ def case_stuck_on_dead_account(tmp):
         claude_pool._cred_alive = real_alive
 
 
+def case_model_scoped_limit(tmp):
+    """[35] 모델 칸(Fable)만 바닥나면 그 칸만 막고, 계정은 계속 쓴다.
+
+    2026-08-12 실사고: 계정 A 의 주간 전체는 60% 여유였는데 Fable 만 100% 였다.
+    순환기가 seven_day 만 보던 탓에 계정을 안 바꿨고, 사람이 손으로 모델을 바꿔야 했다.
+    반대로 계정을 통째로 막아버리면 그 계정에 남은 Opus 몫까지 버리게 되므로 갈라야 한다.
+    """
+    print("\n[35] 모델 칸만 바닥난 경우")
+    import limit_detect as ld
+    import usage_check as uc
+
+    # (1) 실제 응답 모양에서 모델 칸을 읽어낸다
+    body = {"five_hour": {"utilization": 2.0, "resets_at": "2026-08-12T15:49:59+00:00"},
+            "seven_day": {"utilization": 60.0, "resets_at": "2026-08-15T11:59:59+00:00"},
+            "seven_day_opus": None,
+            "limits": [{"kind": "session", "percent": 2, "scope": None},
+                       {"kind": "weekly_all", "percent": 60, "scope": None},
+                       {"kind": "weekly_scoped", "percent": 100,
+                        "resets_at": "2026-08-15T11:59:59+00:00",
+                        "scope": {"model": {"id": None, "display_name": "Fable"}}}]}
+    scoped = uc._scoped(body)
+    check("Fable 칸을 읽는다", scoped.get("Fable", {}).get("pct") == 100.0, scoped)
+    check("이름 없는 칸은 안 넣는다", list(scoped) == ["Fable"], scoped)
+
+    usage = {"weekly_pct": 60.0, "session_pct": 2.0, "scoped": scoped}
+    check("칸을 안 주면 예전대로 여유",
+          uc.which_limit(usage, threshold=100.0) is None)
+    check("Fable 칸을 주면 소진으로 잡힘",
+          uc.which_limit(usage, threshold=100.0, bucket="Fable") == "model:Fable")
+    check("칸 정보가 없으면 소진으로 안 본다",
+          uc.which_limit({"weekly_pct": 60.0, "scoped": {}}, threshold=100.0,
+                         bucket="Fable") is None)
+
+    # (2) 모델 이름 → 칸 이름
+    check("fable[1m] → Fable", uc.bucket_for_model("fable[1m]") == "Fable")
+    check("claude-fable-5 → Fable", uc.bucket_for_model("claude-fable-5") == "Fable")
+    check("opus[1m] → Opus", uc.bucket_for_model("opus[1m]") == "Opus")
+    check("모르면 None", uc.bucket_for_model("gpt-5") is None)
+    check("안 주면 None", uc.bucket_for_model(None) is None)
+
+    # (3) 칸만 막으면 그 모델만 건너뛰고 다른 모델은 그 계정을 그대로 쓴다
+    setup(tmp, ["A", "B"], "A")
+    state = st.load_state()
+    st.mark_scoped_blocked(state, "A", "Fable", time.time() + 3600)
+    st.save_state(state)
+    state = st.load_state()
+    check("계정 전체는 안 막힌다", not st.is_blocked(state, label="A"))
+    check("그 칸은 막혔다", st.is_scoped_blocked(state, "A", "Fable"))
+    check("다른 칸은 안 막혔다", not st.is_scoped_blocked(state, "A", "Opus"))
+    check("Fable 로 고르면 A 를 건너뛴다",
+          st.pick_next(state, bucket="Fable") == "B")
+    check("Opus 로 고르면 A 를 그대로 쓴다",
+          st.pick_next(state, bucket="Opus") == "A")
+    check("칸을 안 주면 예전 그대로", st.pick_next(state) == "A")
+
+    # (4) 시간이 지나면 칸 막힘도 저절로 풀린다
+    state = st.load_state()
+    state["scoped_blocked"] = {"A": {"Fable": time.time() - 10}}
+    st.save_state(state)
+    state = st.prune_blocked(st.load_state())
+    check("풀린 칸은 지워진다", not st.is_scoped_blocked(state, "A", "Fable"))
+    check("Fable 로 다시 A 를 쓴다", st.pick_next(state, bucket="Fable") == "A")
+
+    # (5) 거절 문구 판정 — 판 번호가 낀 실제 문구
+    real = "You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model."
+    check("Fable 5 거절을 한도로 본다", ld.classify(1, "", real) == "limit", real)
+    check("Opus 거절도 그대로", ld.classify(1, "", "You've reached your Opus limit.") == "limit")
+    check("문맥 한도는 여전히 한도 아님",
+          ld.classify(1, "", "context window limit reached") != "limit")
+    check("예산 한도도 여전히 한도 아님",
+          ld.classify(1, "", "spend limit reached") != "limit")
+
+    # (6) 켜기 직전 모델 알아내기 — 인자가 먼저, 없으면 settings.json
+    check("인자에서 읽는다",
+          claude_pool.intended_model(["--continue", "--model", "opus[1m]"]) == "opus[1m]")
+    check("등호 표기도 읽는다",
+          claude_pool.intended_model(["--model=fable[1m]"]) == "fable[1m]")
+    got = claude_pool.intended_model([])
+    check("인자가 없으면 고정값을 본다", got is None or isinstance(got, str), got)
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1401,7 +1482,7 @@ def main():
                      case_dead_but_cred_alive, case_keychain_shadow,
                      case_keychain_self_fix, case_keychain_fresh_not_shadow,
                      case_mirror_both_ways, case_usage_after_reset,
-                     case_stuck_on_dead_account):
+                     case_stuck_on_dead_account, case_model_scoped_limit):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

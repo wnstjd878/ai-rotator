@@ -53,6 +53,21 @@ def usage_parts(entry: dict, now: float):
             reset_at = reset if reset_at is None else max(reset_at, reset)
         else:
             parts.append((name, max(0.0, 100.0 - pct), False))
+
+    # 모델 칸(Fable 등). 계정 전체가 여유여도 이 칸만 바닥날 수 있어서 따로 적는다.
+    # 옛 기록에는 이 자리가 없다 — 없으면 그냥 안 적는다(예전 화면 그대로).
+    for bucket, row in sorted((entry.get("scoped") or {}).items()):
+        if not isinstance(row, dict):
+            continue
+        pct = _num(row.get("pct"))
+        if pct is None:
+            continue
+        reset = _num(row.get("reset"))
+        if reset is not None and reset <= now:
+            parts.append((bucket, 100.0, True))
+            reset_at = reset if reset_at is None else max(reset_at, reset)
+        else:
+            parts.append((bucket, max(0.0, 100.0 - pct), False))
     return parts, reset_at
 
 

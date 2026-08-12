@@ -3,8 +3,13 @@
 용도: 계정별 사용량(세션 5시간 한도 %, 주간 한도 %)을 claude 서버에서 읽는다.
       claude Code 설정 화면의 "현재 세션 / 주간 한도" 와 같은 데이터다.
 호출: /api/oauth/usage (Bearer accessToken). creds/<라벨>.json 의 accessToken 사용.
-      응답: five_hour.utilization(세션 %), seven_day.utilization(주간 %), 각 resets_at.
-출력: get_usage(cred_path) → {session_pct, weekly_pct, session_reset(epoch), weekly_reset(epoch)}
+      응답: five_hour.utilization(세션 %), seven_day.utilization(주간 %), 각 resets_at,
+      그리고 limits[] 안의 모델별 주간 칸(kind=="weekly_scoped", 화면 표시는 'Fable').
+출력: get_usage(cred_path) → {session_pct, weekly_pct, session_reset(epoch), weekly_reset(epoch),
+      scoped: {"Fable": {"pct": 100.0, "reset": epoch}}}
+모델별 칸: 계정 전체 주간이 60% 여유여도 Fable 만 100% 소진일 수 있다(2026-08-12 실제).
+      그래서 which_limit(..., bucket="Fable") 로 그 칸만 따로 물어볼 수 있게 뒀다.
+      칸 정보가 안 오면 None 이다 — 모르는 걸 소진으로 보면 멀쩡한 계정을 막는다.
       실패(네트워크·토큰 만료 등)면 None. 봇을 멈추지 않는다.
       알림 문구용 공용 표기도 여기 둔다: fmt_reset_full(초기화 시각+남은 기간),
       pct_text(남은량), left_phrase(남은 기간), weekly_left(주간 남은량).
@@ -75,7 +80,64 @@ def get_usage(cred_path) -> dict | None:
         "session_reset": _iso_to_epoch(fh.get("resets_at")),
         "weekly_pct": sd.get("utilization"),
         "weekly_reset": _iso_to_epoch(sd.get("resets_at")),
+        "scoped": _scoped(j),
     }
+
+
+def _scoped(body: dict) -> dict:
+    """모델별 주간 칸. {"Fable": {"pct": 100.0, "reset": epoch}} 모양.
+
+    서버는 이걸 `seven_day_opus` 로도 주지만 그 자리는 비어 있을 때가 있고 모델 이름이 없다.
+    이름이 붙어 오는 건 `limits[]` 쪽뿐이라 그쪽만 읽는다.
+    없으면 빈 것으로 둔다 — 정보가 없는 걸 소진으로 보면 멀쩡한 계정을 막는다.
+    """
+    out = {}
+    for item in (body.get("limits") or []):
+        if not isinstance(item, dict) or item.get("kind") != "weekly_scoped":
+            continue
+        name = (((item.get("scope") or {}).get("model") or {}).get("display_name") or "").strip()
+        if not name:
+            continue
+        try:
+            pct = float(item.get("percent"))
+        except (TypeError, ValueError):
+            continue
+        out[name] = {"pct": pct, "reset": _iso_to_epoch(item.get("resets_at"))}
+    return out
+
+
+def bucket_for_model(model: str | None) -> str | None:
+    """쓰려는 모델 이름 → 그 모델이 걸리는 칸 이름. 모르면 None(계정 전체 한도만 본다).
+
+    `fable[1m]`, `claude-fable-5`, `Fable 5` 처럼 표기가 제각각이라 포함 여부로 본다.
+    Opus·Sonnet 은 따로 칸이 잡혀 오면 그 칸을, 안 오면 계정 전체 한도만 보게 된다.
+    """
+    if not model:
+        return None
+    low = str(model).lower()
+    for name in ("Fable", "Opus", "Sonnet", "Haiku"):
+        if name.lower() in low:
+            return name
+    return None
+
+
+def scoped_pct(usage: dict | None, bucket: str | None):
+    """그 칸을 얼마나 썼는지(%). 칸 정보가 없으면 None."""
+    if not usage or not bucket:
+        return None
+    row = (usage.get("scoped") or {}).get(bucket)
+    if not isinstance(row, dict):
+        return None
+    pct = row.get("pct")
+    return None if pct is None else float(pct)
+
+
+def scoped_reset(usage: dict | None, bucket: str | None):
+    """그 칸이 언제 다시 채워지는지(epoch). 없으면 None."""
+    if not usage or not bucket:
+        return None
+    row = (usage.get("scoped") or {}).get(bucket)
+    return row.get("reset") if isinstance(row, dict) else None
 
 
 def get_usage_for(cred_path, *, is_current: bool = False) -> dict | None:
@@ -94,8 +156,14 @@ def get_usage_for(cred_path, *, is_current: bool = False) -> dict | None:
     return get_usage(live) if live.exists() else None
 
 
-def which_limit(usage: dict | None, threshold: float = 95.0) -> str | None:
-    """도달(임박)한 한도 종류. 'session'(5시간) / 'weekly'(주간) / None."""
+def which_limit(usage: dict | None, threshold: float = 95.0,
+                bucket: str | None = None) -> str | None:
+    """도달(임박)한 한도 종류. 'session' / 'weekly' / 'model:<칸이름>' / None.
+
+    `bucket` 을 주면 그 모델 칸이 찼는지도 본다. 계정 전체는 여유가 남았는데 그 모델만
+    바닥난 경우가 실제로 있고(2026-08-12 Fable), 그때 이 인자가 없으면 안 걸린다.
+    계정 전체 한도를 먼저 보는 이유: 그쪽이 막히면 어느 모델도 못 쓰기 때문이다.
+    """
     if not usage:
         return None
     wk = usage.get("weekly_pct")
@@ -104,6 +172,9 @@ def which_limit(usage: dict | None, threshold: float = 95.0) -> str | None:
         return "weekly"
     if se is not None and se >= threshold:
         return "session"
+    mp = scoped_pct(usage, bucket)
+    if mp is not None and mp >= threshold:
+        return f"model:{bucket}"
     return None
 
 
@@ -168,6 +239,12 @@ def summarize(usage: dict | None) -> str:
         parts.append(f"주간 남은 {max(0, 100 - wk):.0f}%{_fmt_reset(usage.get('weekly_reset'))}")
     if se is not None:
         parts.append(f"세션 남은 {max(0, 100 - se):.0f}%{_fmt_reset(usage.get('session_reset'))}")
+    # 모델 칸(Fable 등). 주간이 40% 남았어도 이 칸은 0% 일 수 있어서 따로 적는다.
+    for name, row in sorted((usage.get("scoped") or {}).items()):
+        if not isinstance(row, dict) or row.get("pct") is None:
+            continue
+        parts.append(f"{name} 남은 {max(0, 100 - float(row['pct'])):.0f}%"
+                     f"{_fmt_reset(row.get('reset'))}")
     return ", ".join(parts) if parts else "사용량 없음"
 
 

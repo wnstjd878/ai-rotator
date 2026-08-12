@@ -19,7 +19,14 @@
       ssh 비대화형에서는 자격 교체가 실패할 수 있다.
 동시성: 여러 봇이 같이 실패해도 교체는 잠금으로 한 번만 일어난다. 다른 프로세스가 이미
       계정을 바꿨으면 교체 없이 바로 재시도한다.
+모델 칸: 계정 전체 한도와 별개로 모델별 주간 칸(화면 표시 'Fable')이 따로 있다.
+      계정 주간이 40% 여유여도 Fable 만 0% 일 수 있어서(2026-08-12 실사고) 쓰려는 모델을
+      알아내(intended_model: --model 인자 → settings.json 고정값) 그 칸까지 본다.
+      그 칸만 바닥나면 **계정을 통째로 막지 않고 그 칸만** 막는다(scoped_blocked).
+      같은 계정으로 Opus 는 계속 쓰고, Fable 로 켤 때만 그 계정을 건너뛴다.
 의도적 미구현: 여유 있는 계정을 미리 바꾸는 선제 전환 없음(limit_detect 참고).
+      다른 계정의 모델 칸을 미리 못 본다 — 저장본 출입증이 8시간이라 대개 401 이 나고,
+      그 계정이 현재가 된 뒤에야 읽힌다. 그래서 갈아탄 계정도 바닥이면 한 번 더 넘어간다.
       --ensure 는 선제 전환이 아니다 — 이미 100% 다 찬 계정만 켜기 전에 건너뛴다.
       되돌리기도 선제 전환이 아니다 — 사용량을 보지 않고 막힘이 풀렸는지만 본다.
       대화형 claude 세션의 실시간 교체 없음 — 이미 떠 있는 세션은 재시작해야 새 계정이 붙는다.
@@ -28,6 +35,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -264,17 +272,32 @@ def use(label: str) -> int:
     return 0
 
 
-def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN) -> int:
+def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN,
+                 model: str | None = None) -> int:
     """지금 계정을 한도 도달로 보고 다음 계정으로 넘긴다 (사람이 직접 쓸 때).
 
     대화형 claude 창에서 한도 거절을 봤을 때 쓴다. 교체 뒤 claude 를 새로 실행해야 적용된다.
+    `model` 을 주고 실제로 그 모델 칸만 바닥났으면 **그 칸만** 막는다. 계정을 통째로
+    막으면 그 계정에 남아 있는 다른 모델 몫까지 같이 버리기 때문이다.
     """
+    bucket = usage_check.bucket_for_model(model) if usage_check else None
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
         cur = state.get("current")
         if cur:
-            st.mark_blocked(state, cur, time.time() + cooldown, "사람이 한도 도달로 지정")
-        nxt = st.pick_next(state, exclude=cur)
+            scoped_only = False
+            if bucket and usage_check:
+                u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
+                # 계정 전체는 멀쩡하고 그 칸만 찼을 때만 갈라 막는다.
+                if (usage_check.which_limit(u, threshold=100.0, bucket=bucket) or "") \
+                        .startswith("model:"):
+                    st.mark_scoped_blocked(state, cur, bucket,
+                                           usage_check.scoped_reset(u, bucket)
+                                           or (time.time() + cooldown))
+                    scoped_only = True
+            if not scoped_only:
+                st.mark_blocked(state, cur, time.time() + cooldown, "사람이 한도 도달로 지정")
+        nxt = st.pick_next(state, exclude=cur, bucket=bucket)
         if nxt is None:
             st.save_state(state)
             reset_at = st.earliest_reset(state)
@@ -292,15 +315,44 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN) -> int:
     return 0
 
 
-def ensure_usable() -> int:
+def intended_model(argv=None) -> str | None:
+    """켜려는 세션이 쓸 모델 이름. 못 알아내면 None(그러면 계정 전체 한도만 본다).
+
+    두 자리에서 찾는다. 1순위는 사람이 직접 준 `--model`(그 판이 확실하다),
+    2순위는 settings.json 에 고정된 값(대부분 이쪽이다 — cc 는 보통 인자 없이 친다).
+    """
+    args = list(argv or [])
+    for i, a in enumerate(args):
+        if a == "--model" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--model="):
+            return a.split("=", 1)[1]
+    for path in (Path.home() / ".claude" / "settings.json",
+                 Path.home() / ".claude" / "settings.local.json"):
+        try:
+            got = json.loads(path.read_text(encoding="utf-8")).get("model")
+        except Exception:
+            continue
+        if isinstance(got, str) and got.strip():
+            return got.strip()
+    return None
+
+
+def ensure_usable(model: str | None = None) -> int:
     """켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 다음 계정으로 바꾼다.
 
     선제 전환이 아니다. 잔여가 조금이라도 있으면 그대로 둔다(거절 기반 순환은 그대로).
     사용량을 못 읽으면(네트워크 실패 등) 아무것도 안 한다 — 멀쩡한 계정을 막으면 안 되므로.
     전환할 때는 그 계정을 실제 리셋 시각까지 쉬게 표시하므로 세 머신이 같이 건너뛴다.
+
+    `model` 을 주면 그 모델이 걸리는 칸까지 본다. 계정 전체 주간이 60% 여유인데
+    Fable 만 100% 소진인 경우가 실제로 있었고(2026-08-12), 그때 계정을 통째로 막으면
+    남은 Opus 몫을 버리게 되므로 **그 칸만 막고** 다음 계정으로 넘긴다.
+    Opus 로 켜는데 여유가 있으면 아무것도 안 바뀐다(그 계정 그대로 쓴다).
     """
     if usage_check is None:
         return 0
+    bucket = usage_check.bucket_for_model(model)
     started_from = None   # 처음 쓰던 계정 (알림·안내용)
     first_kind = ""       # 그 계정이 무슨 한도로 막혔는지
     landed = None         # 최종으로 고른 계정
@@ -318,14 +370,24 @@ def ensure_usable() -> int:
             if not u:
                 break  # 못 읽었으면 그대로 쓴다
             st.note_weekly_reset(state, cur, u.get("weekly_reset"))  # 순서 기준으로 쓰인다
-            kind = usage_check.which_limit(u, threshold=100.0)  # 진짜 소진(100% 사용)일 때만
+            st.note_usage(state, cur, u)  # 계정 목록 화면에 모델 칸까지 남기려고
+            # 진짜 소진(100% 사용)일 때만. bucket 을 주면 그 모델 칸까지 본다.
+            kind = usage_check.which_limit(u, threshold=100.0, bucket=bucket)
             if not kind:
                 break
-            kind_txt = "주간" if kind == "weekly" else "세션(5시간)"
-            until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
-            st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
-                            f"{kind_txt} 한도 소진(켜기 전 확인)")
-            nxt = st.pick_next(state, exclude=cur)
+            if kind.startswith("model:"):
+                # 그 모델만 바닥났다. 계정은 살려 두고 그 칸만 막는다 —
+                # 통째로 막으면 이 계정으로 아직 쓸 수 있는 다른 모델까지 버린다.
+                kind_txt = bucket  # 뒤에 붙는 문구가 '한도 소진' 이라 여기선 이름만
+                until = usage_check.scoped_reset(u, bucket)
+                st.mark_scoped_blocked(state, cur,
+                                       bucket, until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
+            else:
+                kind_txt = "주간" if kind == "weekly" else "세션(5시간)"
+                until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
+                st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
+                                f"{kind_txt} 한도 소진(켜기 전 확인)")
+            nxt = st.pick_next(state, exclude=cur, bucket=bucket)
             if nxt is None:
                 st.save_state(state)
                 reset_at = st.earliest_reset(state)
@@ -852,10 +914,13 @@ def _clear_auth_rejects(label: str | None) -> None:
         pass
 
 
-def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str) -> str:
+def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: str,
+                          bucket: str | None = None) -> str:
     """실패한 계정을 쉬게 하고 다음 계정으로 교체. 교체된 라벨을 반환.
 
     다른 프로세스가 이미 계정을 바꿨으면 교체하지 않고 그 라벨을 그대로 쓴다.
+    `bucket` 은 이번 호출이 쓰던 모델 칸이다. 그 칸만 바닥난 거절이면 계정을 통째로
+    막지 않고 그 칸만 막아, 같은 계정으로 다른 모델은 계속 쓰게 둔다.
     """
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
@@ -872,20 +937,30 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 # 세션(5시간)인지 주간인지에 맞는 리셋 시각을 실시간 사용량에서 읽는다.
                 # 못 읽으면 응답 문구 파싱으로 떨어진다.
                 until = None
+                kind = None
                 if usage_check:
                     u = usage_check.get_usage(BASE / "creds" / f"{used_label}.json")
                     if u:
                         st.note_weekly_reset(state, used_label, u.get("weekly_reset"))
-                    kind = usage_check.which_limit(u)
+                    kind = usage_check.which_limit(u, bucket=bucket)
                     if kind == "weekly" and u.get("weekly_reset"):
                         until = u["weekly_reset"]
                     elif kind == "session" and u.get("session_reset"):
                         until = u["session_reset"]
+                    elif kind and kind.startswith("model:"):
+                        until = usage_check.scoped_reset(u, bucket)
                 if until is None:
                     until = limit_detect.reset_epoch(out, err)
-                st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
                 left = int(until - time.time())
-                log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
+                if kind and kind.startswith("model:"):
+                    # 그 모델만 바닥났다. 계정은 살려 둔다 — 통째로 막으면 이 계정으로
+                    # 아직 쓸 수 있는 다른 모델 몫까지 같이 버린다.
+                    st.mark_scoped_blocked(state, used_label, bucket, until)
+                    log(f"'{used_label}' 의 {bucket} 한도만 도달. "
+                        f"{left // 3600}시간 {left % 3600 // 60}분 뒤 풀림 (계정은 계속 씁니다)")
+                else:
+                    st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
+                    log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
                 # 같은 계정이 짧은 시간에 거듭 거절받으면 아래 우회 갈래를 더 믿지 않는다.
                 # 저장본 조회가 되고 재발급 열쇠 날짜가 남아 있어도 실제 갱신은 거부될 수 있다
@@ -951,7 +1026,7 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                     f"{cooldown // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
                     f"그 계정으로 다시 로그인해 save_account.py 로 저장하세요.")
 
-        nxt = st.pick_next(state, exclude=used_label)
+        nxt = st.pick_next(state, exclude=used_label, bucket=bucket)
         if nxt is None:
             reset_at = st.earliest_reset(state)
             when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
@@ -1060,6 +1135,10 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
     그 밖의 실패는 한 번만 그대로 재시도하고, 결과를 그대로 돌려준다.
     쓸 계정이 없으면 AllAccountsExhausted 를 올린다.
     """
+    # 이번 호출이 어느 모델 칸을 쓰는지. 봇이 --model 을 안 붙이면 None 이고,
+    # 그때는 예전처럼 계정 단위 한도만 본다(동작이 안 바뀐다).
+    bucket = usage_check.bucket_for_model(intended_model(args)) if usage_check else None
+
     labels = st.saved_labels()
     if max_attempts is None:
         max_attempts = max(2, len(labels) + 1)
@@ -1123,7 +1202,8 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
 
         # limit, 또는 갈아끼운 저장본이 상한 auth → 계정 교체 후 재시도
         try:
-            nxt = _rotate_after_failure(used_label, verdict, proc.stdout, proc.stderr)
+            nxt = _rotate_after_failure(used_label, verdict, proc.stdout, proc.stderr,
+                                        bucket=bucket)
         except AllAccountsExhausted as e:
             if e.notify_message:  # 전송은 잠금 밖에서
                 notify(e.notify_message)
@@ -1157,9 +1237,11 @@ def main():
         print(status_text())
         return 0
     if argv[0] == "--next":
-        return next_account()
+        return next_account(model=intended_model(argv[1:]))
     if argv[0] == "--ensure":
-        return ensure_usable()
+        # 뒤에 붙는 건 켜려는 claude 의 인자를 그대로 넘겨받은 것이다.
+        # 모르는 인자는 무시하고 --model 만 본다.
+        return ensure_usable(intended_model(argv[1:]))
     if argv[0] == "--use":
         if len(argv) < 2:
             print("사용법: python claude_pool.py --use <라벨>")

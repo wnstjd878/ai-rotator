@@ -37,6 +37,11 @@ MAX_COOLDOWN = 8 * 24 * 3600  # 문구에서 읽은 값이 이보다 멀면 잘�
 LIMIT_PATTERNS = [
     r"usage limit reached",
     r"\b(session|weekly|opus|sonnet) limit\b",
+    # 모델 이름이 붙어 오는 형태. 실제 문구: "You've reached your Fable 5 limit."
+    # 위의 목록은 이름만 나열해서 판(版) 번호가 끼면 안 걸렸다(2026-08-12 Fable 5 에서
+    # 실제로 안 걸려 계정 교체가 아예 안 일어났다). 이름을 늘리는 대신 모양으로 잡는다.
+    # 앞서 IGNORE 로 문맥 한도·예산 한도 문구를 지운 뒤에 보므로 오판이 안 난다.
+    r"reached your [\w .+-]{0,24}limit",
     r"\b(five_hour|seven_day(_opus|_sonnet)?)\b",
     r"billing_error",
     r"credit balance (is )?too low",

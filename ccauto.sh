@@ -29,7 +29,9 @@ run_args=("$@")
 
 while true; do
   # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
-  "$PY" "$POOL" --ensure
+  # 인자를 같이 넘긴다 — 그래야 --model 을 보고 그 모델 칸(예: Fable)까지 확인한다.
+  # 인자에 없으면 순환기가 settings.json 에 고정된 모델을 대신 본다.
+  "$PY" "$POOL" --ensure "${run_args[@]}"
   # 켜기 직전 계정별 사용량을 화면에 먼저 보여준다. claude 안에서는 이 값을 볼 수 없다.
   echo ""
   echo "[계정 사용량]"
@@ -42,10 +44,12 @@ while true; do
   # 가로채기(claude_shim)가 이 확인을 대신 처리하면 판정이 흐려지므로 꺼두고 부른다.
   probe="$(echo "ping" | CLAUDE_ROTATOR_DISABLED=1 "$CLAUDE_BIN" -p --model claude-haiku-4-5-20251001 --output-format json 2>&1)"
 
-  if printf '%s' "$probe" | grep -qiE "weekly limit|usage limit reached|hit your .{0,40}limit|OAuth session expired|5-hour limit|rate.?limit"; then
+  # "reached your ..." 는 모델별 한도 문구다(실제: "You've reached your Fable 5 limit").
+  # 이게 없어서 2026-08-12 에 Fable 이 막혔는데도 자동 전환이 안 걸렸다.
+  if printf '%s' "$probe" | grep -qiE "weekly limit|usage limit reached|hit your .{0,40}limit|reached your .{0,40}limit|OAuth session expired|5-hour limit|rate.?limit"; then
     echo ""
     echo "[자동순환] 한도 도달 감지 -> 다음 계정으로 전환합니다..."
-    "$PY" "$POOL" --next
+    "$PY" "$POOL" --next "${run_args[@]}"
 
     has_resume=0
     for a in "${run_args[@]}"; do
