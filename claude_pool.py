@@ -360,7 +360,7 @@ def ensure_usable(model: str | None = None) -> int:
         state = st.prune_blocked(st.load_state())
         # 앞순위 계정이 풀렸으면 먼저 되돌린다(대화형 cc 도 이 경로로 켜진다).
         # 되돌린 계정이 아직 다 찬 상태면 바로 아래 확인이 다시 넘겨준다.
-        reclaimed = _reclaim_locked(state)
+        reclaimed = _reclaim_locked(state, bucket)
         # 다음 계정도 이미 소진돼 있을 수 있다. 쓸 만한 계정이 나올 때까지 이어서 건너뛴다.
         for _ in range(len(st.account_labels()) + 1):
             cur = state.get("current")
@@ -409,11 +409,11 @@ def ensure_usable(model: str | None = None) -> int:
             print(f"[켜기 전 확인] 앞순위 '{reclaimed}' 계정이 풀려 그쪽으로 되돌렸습니다.")
         return 0
     print(f"[켜기 전 확인] '{started_from}' {first_kind} 한도 소진 → '{landed}' 계정으로 바꿔서 켭니다.")
-    _notify_switch(started_from, landed, "limit", state)  # 전송은 잠금 밖에서
+    _notify_switch(started_from, landed, "limit", state, bucket)  # 전송은 잠금 밖에서
     return 0
 
 
-def _reclaim_locked(state: dict):
+def _reclaim_locked(state: dict, bucket: str | None = None):
     """(잠금 안에서) 앞순위 계정이 풀렸으면 그쪽으로 되돌린다. 바꿨으면 새 라벨, 아니면 None.
 
     세션(5시간) 한도로 잠깐 비켜났던 계정은 5시간 뒤 막힘이 저절로 풀리는데, 예전에는
@@ -422,12 +422,15 @@ def _reclaim_locked(state: dict):
     사용량 조회는 하지 않는다 — 잦으면 429 가 난다. 막힘 목록만 보고 정한다.
     되돌린 계정이 사실 아직 소진 상태여도 손해는 헛걸음 한 번이고, 그 거절이 정확한
     해제 시각으로 다시 막아준다. 그 반복은 RECLAIM_MIN_GAP 간격이 막는다.
+    `bucket`(이번에 쓰려는 모델 칸)을 주면 그 칸이 막힌 계정으로는 안 되돌린다 —
+    안 그러면 되돌림 → 그 칸 소진 재발견 → 재전환 + 알림이 10분마다 반복된다
+    (2026-08-14 실사고, 알림 반복의 원인).
     상태 저장은 부르는 쪽이 한다(이미 잠금을 쥐고 있는 흐름에서 쓰라고 나눠둔 함수다).
     """
     cur = state.get("current")
     if not st.may_reclaim(state):
         return None
-    nxt = st.better_candidate(state, cur)
+    nxt = st.better_candidate(state, cur, bucket=bucket)
     if nxt is None:
         return None
     st.note_reclaim(state)  # 교체가 실패해도 기록해 재시도 폭주를 막는다
@@ -438,36 +441,39 @@ def _reclaim_locked(state: dict):
     return nxt
 
 
-def _reclaim_if_better(state: dict, cur: str):
+def _reclaim_if_better(state: dict, cur: str, bucket: str | None = None):
     """지금 계정이 안 막혔어도 순서상 앞선 계정이 풀려 있으면 그쪽으로 되돌린다."""
-    if not st.may_reclaim(state) or st.better_candidate(state, cur) is None:
+    if not st.may_reclaim(state) or st.better_candidate(state, cur, bucket=bucket) is None:
         return cur  # 잠금을 잡기 전 값싼 확인. 평소에는 여기서 끝난다
     with st.with_lock():
         s = st.prune_blocked(st.load_state())
-        nxt = _reclaim_locked(s)
+        nxt = _reclaim_locked(s, bucket)
         st.save_state(s)
         return nxt or s.get("current") or cur
 
 
-def _switch_if_blocked(state: dict):
+def _switch_if_blocked(state: dict, bucket: str | None = None):
     """지금 계정이 이미 막혀 있으면 부르기 전에 갈아탄다. 막힌 계정 목록만 보고 판단한다.
 
     막힘은 세 머신이 공유하므로, 다른 머신이 한도로 막아둔 계정을 이 머신이 그대로 쓰다가
     똑같이 거절받는 헛걸음을 없앤다. 사용량 조회를 하지 않아 값싸고, 알림도 안 보낸다
     (막을 때 이미 한 번 나갔다).
+    `bucket` 을 주면 이번 호출이 쓰는 모델 칸이 막힌 경우에도 미리 갈아탄다 —
+    그 계정으로 나가 봐야 거절 한 번만 낭비된다(칸 막힘은 이 머신에서 이미 겪은 것이다).
     막히지 않았으면 그 다음으로, 앞순위 계정이 풀렸는지만 보고 되돌린다.
     """
     cur = state.get("current")
     if not cur:
         return cur
-    if not st.is_blocked(state, cur):
-        return _reclaim_if_better(state, cur)
+    if not st.is_blocked(state, cur) and not st.is_scoped_blocked(state, cur, bucket):
+        return _reclaim_if_better(state, cur, bucket)
     with st.with_lock():
         s = st.prune_blocked(st.load_state())
         cur = s.get("current")
-        if not cur or not st.is_blocked(s, cur):
+        if not cur or (not st.is_blocked(s, cur)
+                       and not st.is_scoped_blocked(s, cur, bucket)):
             return cur  # 그 사이 다른 프로세스가 바꿨다
-        nxt = st.pick_next(s, exclude=cur)
+        nxt = st.pick_next(s, exclude=cur, bucket=bucket)
         if nxt is None or not _switch(nxt, leaving=cur):
             return cur  # 갈아탈 데가 없으면 기존 흐름(거절 → 소진 알림)이 처리한다
         st.set_current(s, nxt, f"{cur} → {nxt} (이미 막힌 계정이라 미리 교체)")
@@ -1045,27 +1051,32 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
         st.set_current(state, nxt, f"{used_label or '?'} → {nxt} ({verdict})")
         st.save_state(state)
         log(f"'{used_label or '?'}' → '{nxt}' 계정 교체 완료")
-        _notify_switch(used_label, nxt, verdict, state)
+        _notify_switch(used_label, nxt, verdict, state, bucket)
         return nxt
 
 
-def switch_message(used_label, nxt, verdict, state) -> str:
+def switch_message(used_label, nxt, verdict, state, bucket=None) -> str:
     """계정 전환 알림 문구. 두괄식 — 첫 줄이 '어디서 어디로, 왜'.
 
     사용량 경고(usage_alert)와 같은 표기를 쓴다. 시각·남은량 표기는 usage_check 한 벌에서 온다.
+    `bucket` 을 주면 그 모델 칸만 바닥난 경우를 갈라 말한다 — 안 그러면 계정 전체가
+    62% 남았는데도 "A 한도 도달" 로 나가 사람을 헷갈리게 한다(2026-08-14 사용자 지적).
     """
-    # 어느 한도(세션 5시간 / 주간)에 걸렸는지 실시간으로 읽어 사유에 붙인다
+    # 어느 한도(세션 5시간 / 주간 / 모델 칸)에 걸렸는지 실시간으로 읽어 사유에 붙인다
     reason = "한도 도달"
     used_until = None
     if verdict == "limit" and usage_check:
         u_used = usage_check.get_usage(BASE / "creds" / f"{used_label}.json")
-        kind = usage_check.which_limit(u_used)
+        kind = usage_check.which_limit(u_used, bucket=bucket)
         if kind == "session":
             reason = "세션(5시간) 한도 도달"
             used_until = (u_used or {}).get("session_reset")
         elif kind == "weekly":
             reason = "주간 한도 도달"
             used_until = (u_used or {}).get("weekly_reset")
+        elif kind and kind.startswith("model:"):
+            reason = f"{bucket} 한도만 도달, 계정 주간은 여유"
+            used_until = usage_check.scoped_reset(u_used, bucket)
     elif verdict == "limit":
         reason = "주간/세션 한도 도달"
     else:
@@ -1112,7 +1123,7 @@ def switch_message(used_label, nxt, verdict, state) -> str:
     return "\n".join(lines)
 
 
-def _notify_switch(used_label, nxt, verdict, state):
+def _notify_switch(used_label, nxt, verdict, state, bucket=None):
     """계정이 바뀔 때 사용자에게 텔레그램으로 알린다. 세 머신 통틀어 전환당 한 번만.
 
     실제로 교체를 수행한 머신만 이 지점에 오고, claim_notice 로 한 번 더 걸러 중복을 막는다.
@@ -1122,7 +1133,7 @@ def _notify_switch(used_label, nxt, verdict, state):
     key = f"switch_{used_label}_{nxt}_{int(time.time() // 600)}"  # 10분 창당 1회
     if not st.claim_notice(key):
         return
-    notify(switch_message(used_label, nxt, verdict, state))
+    notify(switch_message(used_label, nxt, verdict, state, bucket))
 
 
 def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs):
@@ -1167,7 +1178,7 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
     proc = None
     for attempt in range(max_attempts):
         state = st.prune_blocked(st.load_state())
-        used_label = _switch_if_blocked(state)
+        used_label = _switch_if_blocked(state, bucket)
 
         try:
             proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)

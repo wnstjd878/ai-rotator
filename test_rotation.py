@@ -1461,6 +1461,71 @@ def case_model_scoped_limit(tmp):
     check("인자가 없으면 고정값을 본다", got is None or isinstance(got, str), got)
 
 
+def case_scoped_no_reclaim(tmp):
+    """[36] 칸이 막힌 계정으로는 되돌리지 않는다 (전환 알림 반복 방지).
+
+    2026-08-14 실사고: Mac 이 A 의 Fable 칸 소진(주간 전체는 38% 남음)을 무시하고
+    10분 간격으로 A 로 되돌렸다가, 다음 호출이 거절되며 매번 D 로 재전환 + 텔레그램
+    알림이 나갔다. 같은 "A → D 전환됨" 알림이 하루 종일 반복돼 사용자가 지적했다.
+    """
+    print("\n[36] 칸 막힌 계정으로 안 되돌린다 (알림 반복 방지)")
+    import usage_check as uc
+
+    setup(tmp, ["A", "B"], "B")   # 자동 전환으로 B 에 앉아 있는 상황
+    claude_pool.usage_check = uc  # run() 이 칸 이름을 뽑게 한다(순수 함수만 탄다, 통신 없음)
+    state = st.load_state()
+    st.mark_scoped_blocked(state, "A", "Fable", time.time() + 3600)
+    state["reclaim_at"] = None  # 간격 제한이 판정을 가리지 않게
+    st.save_state(state)
+
+    # (1) 후보 판정 자체
+    state = st.load_state()
+    check("Fable 칸이면 A 는 후보가 아님",
+          st.better_candidate(state, "B", bucket="Fable") is None,
+          f"고른 것={st.better_candidate(state, 'B', bucket='Fable')}")
+    check("칸을 안 주면 예전 그대로 A 가 후보",
+          st.better_candidate(state, "B") == "A",
+          f"고른 것={st.better_candidate(state, 'B')}")
+    check("다른 칸(Opus)이면 A 가 후보",
+          st.better_candidate(state, "B", bucket="Opus") == "A",
+          f"고른 것={st.better_candidate(state, 'B', bucket='Opus')}")
+
+    # (2) 실제 호출 흐름 — Fable 호출은 B 에 그대로 머문다 (왕복 없음 = 알림 없음)
+    fake = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake)
+    proc = claude_pool.run(["claude", "-p", "안녕", "--model", "fable[1m]"])
+    check("성공", proc.returncode == 0)
+    check("A 로 안 되돌아감", st.load_state()["current"] == "B",
+          f"현재={st.load_state()['current']}")
+    check("교체 자체가 없음", fake.switches == [], f"switches={fake.switches}")
+    check("알림 없음", fake.notices == [], f"알림={fake.notices}")
+
+    # (3) Opus 호출은 예전처럼 앞순위 A 로 되돌아간다 (순차 소진 유지)
+    state = st.load_state()
+    state["reclaim_at"] = None
+    st.save_state(state)
+    fake2 = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake2)
+    proc = claude_pool.run(["claude", "-p", "안녕", "--model", "opus[1m]"])
+    check("성공", proc.returncode == 0)
+    check("Opus 는 A 로 되돌림", st.load_state()["current"] == "A",
+          f"현재={st.load_state()['current']}")
+
+    # (4) 지금 계정의 칸이 막혀 있으면 부르기 전에 미리 갈아탄다 (헛걸음·알림 없이)
+    state = st.load_state()
+    st.mark_scoped_blocked(state, "A", "Fable", time.time() + 3600)
+    state["reclaim_at"] = time.time()  # 되돌리기 경로가 아니라 미리-교체 경로를 본다
+    st.save_state(state)
+    fake3 = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+    install(fake3)
+    proc = claude_pool.run(["claude", "-p", "안녕", "--model", "fable[1m]"])
+    check("성공", proc.returncode == 0)
+    check("부르기 전에 B 로 교체해 부름", fake3.calls == ["B"], f"부른 계정={fake3.calls}")
+    check("미리 교체는 알림 없음", fake3.notices == [], f"알림={fake3.notices}")
+
+    claude_pool.usage_check = None
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1482,7 +1547,8 @@ def main():
                      case_dead_but_cred_alive, case_keychain_shadow,
                      case_keychain_self_fix, case_keychain_fresh_not_shadow,
                      case_mirror_both_ways, case_usage_after_reset,
-                     case_stuck_on_dead_account, case_model_scoped_limit):
+                     case_stuck_on_dead_account, case_model_scoped_limit,
+                     case_scoped_no_reclaim):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

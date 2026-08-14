@@ -627,13 +627,17 @@ def priority_order(state: dict, labels=None, now: float | None = None) -> list:
     return sorted(labels, key=key)
 
 
-def better_candidate(state: dict, cur: str | None, now: float | None = None):
+def better_candidate(state: dict, cur: str | None, now: float | None = None,
+                     bucket: str | None = None):
     """지금 쓰는 계정보다 순서가 앞선 계정. 없으면 None.
 
     세션(5시간) 한도로 잠깐 비켜났던 앞순위 계정이 풀렸을 때 그쪽으로 되돌리기 위한 것.
     되돌리지 않으면 뒷순위 계정의 주간 잔여를 먼저 깎게 되고, 앞순위 계정의 남은 양은
     안 쓰인 채 초기화되어 사라진다(순차 소진의 목적과 반대).
     사람이 --use 로 고른 계정은 그 계정이 막힐 때까지 존중한다.
+    `bucket` 은 이번에 쓰려는 모델 칸이다. 그 칸이 막힌 계정으로 되돌리면 다음 호출이
+    곧바로 다시 넘기면서 전환 알림이 왕복마다 나간다(2026-08-14 실사고: Mac 이 A 의
+    Fable 칸 소진을 무시하고 A 로 되돌렸다가 매번 D 로 재전환 + 알림 반복).
     """
     now = time.time() if now is None else now
     if not cur or state.get("manual") == cur:
@@ -642,7 +646,8 @@ def better_candidate(state: dict, cur: str | None, now: float | None = None):
     if cur not in saved or is_blocked(state, label=cur, now=now):
         return None  # 지금 계정이 막혔으면 되돌리기가 아니라 일반 교체가 처리한다
     candidates = [l for l in account_labels()
-                  if l in saved and not is_blocked(state, label=l, now=now)]
+                  if l in saved and not is_blocked(state, label=l, now=now)
+                  and not is_scoped_blocked(state, l, bucket, now)]
     order = priority_order(state, candidates, now)
     if not order or order[0] == cur:
         return None
