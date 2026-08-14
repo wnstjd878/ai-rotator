@@ -1621,6 +1621,49 @@ def case_scoped_shared(tmp):
         ss._request = real_req
 
 
+def case_meta_cleanup():
+    """[38] 공유 칠판 청소 — 옛 알림 열쇠만 지우고 계정 상태 행은 지킨다.
+
+    claim_once 가 만드는 중복 방지 열쇠(switch_* 등)는 한 번 쓰고 영영 안 지워져
+    표가 계속 큰다(2026-08-14 실측 90행 중 75행). 아침 점검이 매일 cleanup_meta 를 부른다.
+    """
+    print("\n[38] 공유 칠판 청소 — 옛 알림 열쇠만 지운다")
+    import shared_state as ss
+    real_req = ss._request
+    deleted_params = []
+
+    def fake_req(method, path, *, params="", body=None, headers=None):
+        if method == "GET":
+            return [{"key": "switch_A_D_123"}, {"key": "cred-place:456"},
+                    {"key": "codex:switch_A_B_9"},
+                    {"key": "usage:A"}, {"key": "current:Mac"},
+                    {"key": "scoped:A"}, {"key": "rotator_notified"}]
+        if method == "DELETE":
+            deleted_params.append(params)
+            return []
+        return None
+
+    ss._request = fake_req
+    try:
+        got = ss.cleanup_meta(7)
+        check("알림 열쇠 3행만 지움", got == (3, 3), f"결과={got}")
+        joined = " ".join(deleted_params)
+        check("계정 상태 행은 삭제 요청에 없음",
+              "usage" not in joined and "scoped" not in joined
+              and "current" not in joined and "rotator_notified" not in joined, joined)
+        check("삭제에도 시각 조건이 붙음", "updated_at=lt." in joined, joined)
+
+        deleted_params.clear()
+        got = ss.cleanup_meta(7, dry_run=True)
+        check("시험 조회는 안 지움", got == (0, 3) and not deleted_params,
+              f"결과={got} 삭제요청={deleted_params}")
+
+        ss._request = lambda *a, **k: None
+        check("조회 실패면 None(안 지움)", ss.cleanup_meta(7) is None)
+    finally:
+        ss._request = real_req
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1647,6 +1690,7 @@ def main():
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
+        case_meta_cleanup()
         case_shim_prompt_argument()
     finally:
         claude_pool.subprocess.run = real_run

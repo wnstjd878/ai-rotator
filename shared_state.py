@@ -464,6 +464,42 @@ def clear_scoped_blocked(label: str, provider: str | None = None) -> bool:
     return res is not None
 
 
+# 청소 때 지키는 행(계정 상태 행). 라벨·머신 수만큼으로 유계라 안 지워도 안 큰다.
+KEEP_META_PREFIXES = (USAGE_KEY_PREFIX, CURRENT_KEY_PREFIX, SCOPED_KEY_PREFIX,
+                      "rotator_notified")
+
+
+def cleanup_meta(days: float = 7.0, dry_run: bool = False):
+    """옛 알림 열쇠 행을 지운다. (지운 행 수, 후보 행 수) — 조회 실패면 None.
+
+    claim_once/claim_notify 가 만드는 중복 방지 열쇠(switch_*, cred-place:* 등)는
+    한 번 확인되고 영영 안 지워져 표가 계속 큰다(2026-08-14 실측: 90행 중 75행).
+    행이 늘면 이 표를 읽는 조회가 다 같이 느려지므로 아침 점검이 매일 부른다.
+    days 일 넘게 안 바뀐 행 중 계정 상태 행(KEEP_META_PREFIXES)이 아닌 것만 지운다.
+    지우는 요청에도 시각 조건을 다시 붙인다 — 조회와 삭제 사이에 갱신된 행을 지우지 않게.
+    """
+    cutoff = _to_iso(time.time() - float(days) * 86400)
+    q_cut = urllib.parse.quote(cutoff, safe="")
+    rows = _request("GET", META_TABLE,
+                    params=f"select=key&updated_at=lt.{q_cut}&limit=1000")
+    if rows is None:
+        return None
+    doomed = [str(r.get("key")) for r in rows
+              if r.get("key") and not str(r.get("key")).startswith(KEEP_META_PREFIXES)]
+    if dry_run or not doomed:
+        return (0, len(doomed))
+    deleted = 0
+    for i in range(0, len(doomed), 50):
+        chunk = doomed[i:i + 50]
+        vals = ",".join('"' + k.replace('"', "") + '"' for k in chunk)
+        res = _request("DELETE", META_TABLE,
+                       params=f"key=in.({urllib.parse.quote(vals, safe='')})"
+                              f"&updated_at=lt.{q_cut}")
+        if res is not None:
+            deleted += len(chunk)
+    return (deleted, len(doomed))
+
+
 def snapshot() -> list | None:
     """상태 점검용 전체 행. --status 에서 쓴다."""
     return _request("GET", ACCOUNTS_TABLE,
@@ -497,6 +533,20 @@ if __name__ == "__main__":
         print("\n[테이블 만들기] 신규 Supabase SQL Editor 에 아래를 붙여넣어 실행:\n")
         print(SCHEMA_SQL)
         sys.exit(1)
+    if "--cleanup" in sys.argv:
+        days = 7.0
+        if "--days" in sys.argv:
+            days = float(sys.argv[sys.argv.index("--days") + 1])
+        got = cleanup_meta(days, dry_run="--dry-run" in sys.argv)
+        if got is None:
+            print("공유 저장소 응답 없음 — 청소 건너뜀")
+            sys.exit(1)
+        deleted, candidates = got
+        if "--dry-run" in sys.argv:
+            print(f"지울 후보 {candidates}행 (시험 조회만, 안 지움)")
+        else:
+            print(f"지움 {deleted}행 (후보 {candidates}행, 기준 {days:g}일)")
+        sys.exit(0)
     rows = snapshot()
     if rows is None:
         print("공유 저장소에 접속하지 못했습니다. URL/키/네트워크를 확인하세요.")
