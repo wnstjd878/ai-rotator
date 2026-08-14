@@ -472,6 +472,9 @@ KEEP_META_PREFIXES = (USAGE_KEY_PREFIX, CURRENT_KEY_PREFIX, SCOPED_KEY_PREFIX,
 def cleanup_meta(days: float = 7.0, dry_run: bool = False):
     """옛 알림 열쇠 행을 지운다. (지운 행 수, 후보 행 수) — 조회 실패면 None.
 
+    지운 수가 후보 수보다 적으면 일부 지우기 요청이 실패한 것이다. 호출부(CLI)가
+    그걸 실패 종료로 바꿔 아침 점검 보고에 드러나게 한다.
+
     claim_once/claim_notify 가 만드는 중복 방지 열쇠(switch_*, cred-place:* 등)는
     한 번 확인되고 영영 안 지워져 표가 계속 큰다(2026-08-14 실측: 90행 중 75행).
     행이 늘면 이 표를 읽는 조회가 다 같이 느려지므로 아침 점검이 매일 부른다.
@@ -539,14 +542,16 @@ if __name__ == "__main__":
             days = float(sys.argv[sys.argv.index("--days") + 1])
         got = cleanup_meta(days, dry_run="--dry-run" in sys.argv)
         if got is None:
-            print("공유 저장소 응답 없음 — 청소 건너뜀")
+            print("공유 저장소 응답 없음, 청소 건너뜀")
             sys.exit(1)
         deleted, candidates = got
         if "--dry-run" in sys.argv:
             print(f"지울 후보 {candidates}행 (시험 조회만, 안 지움)")
-        else:
-            print(f"지움 {deleted}행 (후보 {candidates}행, 기준 {days:g}일)")
-        sys.exit(0)
+            sys.exit(0)
+        print(f"지움 {deleted}행 (후보 {candidates}행, 기준 {days:g}일)")
+        # 지우기 요청이 실패해 후보가 남았으면 실패로 끝낸다.
+        # 0 으로 끝내면 아침 점검이 "이상 없음" 으로 넘겨 실패가 조용히 묻힌다(코덱스 지적).
+        sys.exit(0 if deleted >= candidates else 1)
     rows = snapshot()
     if rows is None:
         print("공유 저장소에 접속하지 못했습니다. URL/키/네트워크를 확인하세요.")

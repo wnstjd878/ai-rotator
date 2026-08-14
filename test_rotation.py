@@ -1660,6 +1660,18 @@ def case_meta_cleanup():
 
         ss._request = lambda *a, **k: None
         check("조회 실패면 None(안 지움)", ss.cleanup_meta(7) is None)
+
+        # 지우기 요청만 실패하면 (지운 수 < 후보 수) 로 드러나야 한다.
+        # 조용히 (0, N) 이 성공처럼 지나가면 아침 점검이 실패를 영영 못 본다(코덱스 지적).
+        def get_ok_delete_fail(method, path, *, params="", body=None, headers=None):
+            if method == "GET":
+                return [{"key": "switch_A_B_1"}]
+            return None  # DELETE 실패
+
+        ss._request = get_ok_delete_fail
+        got = ss.cleanup_meta(7)
+        check("지우기 실패는 지운 수<후보 수로 드러남",
+              got == (0, 1) and got[0] < got[1], f"결과={got}")
     finally:
         ss._request = real_req
 
