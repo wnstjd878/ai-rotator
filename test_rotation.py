@@ -1601,6 +1601,25 @@ def case_scoped_shared(tmp):
     check("공유가 죽어도 로컬 칸 막힘 유지", st.is_scoped_blocked(state, "A", "Fable"))
     st.shared_state = None
 
+    # (7) 진짜 shared_state: 기존 값 조회가 실패하면 쓰지 않는다.
+    # 조회만 실패하고 쓰기가 성공하면 그 계정의 다른 칸 기록을 덮어 지우기 때문
+    # (코덱스 검수 지적). 못 읽으면 안 쓰고 False — 로컬 기록으로 물러난다.
+    import shared_state as ss
+    real_req = ss._request
+    calls = []
+
+    def broken_get(method, path, **kw):
+        calls.append(method)
+        return None  # 통신 실패 흉내
+
+    ss._request = broken_get
+    try:
+        got = ss.set_scoped_blocked("A", "Fable", time.time() + 3600)
+        check("조회 실패면 쓰기 중단(False)", got is False, f"결과={got}")
+        check("쓰기 요청 자체가 안 나감", "POST" not in calls, f"요청들={calls}")
+    finally:
+        ss._request = real_req
+
 
 def main():
     real_run = subprocess.run

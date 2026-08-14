@@ -377,6 +377,10 @@ def set_scoped_blocked(label: str, bucket: str, until_epoch: float,
     key = SCOPED_KEY_PREFIX + _provider_prefix(provider) + str(label)
     q = urllib.parse.quote(key, safe="")
     cur = _request("GET", META_TABLE, params=f"key=eq.{q}&select=value")
+    if cur is None:
+        # 기존 값을 못 읽었는데 그냥 쓰면 다른 칸 기록을 덮어 지운다(코덱스 검수 지적).
+        # 못 읽으면 안 쓴다 — 로컬 기록은 그대로라 예전 동작(첫 거절 한 번)으로 물러날 뿐이다.
+        return False
     box = {}
     if cur:
         try:
@@ -411,10 +415,14 @@ def get_scoped_blocked(now: float | None = None,
                        provider: str | None = None) -> dict | None:
     """{라벨: {칸: 해제시각}} 지금 막힌 칸만. 읽기 실패면 None(호출부가 로컬로 버틴다).
 
-    행 수가 몇 개뿐이라 전체를 받아 걸러낸다(get_usage_all 과 같은 방식).
+    봇 호출마다 도는 자리(prune_blocked)라 접두 필터로 scoped 행만 받는다.
+    rotator_meta 에는 알림 중복 방지 열쇠(claim_once)가 계속 쌓여서, 전체를 받으면
+    시간이 갈수록 느려진다(코덱스 검수 지적). limit 50 = 제공자 x 계정 수의 몇 배 여유.
     """
     now = time.time() if now is None else now
-    rows = _request("GET", META_TABLE, params="select=key,value")
+    like = urllib.parse.quote(SCOPED_KEY_PREFIX + "*", safe="")
+    rows = _request("GET", META_TABLE,
+                    params=f"select=key,value&key=like.{like}&limit=50")
     if rows is None:
         return None
     prefix = _provider_prefix(provider)
