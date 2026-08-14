@@ -132,6 +132,7 @@ class FakeShared:
 
     def __init__(self):
         self.blocked = {}
+        self.scoped = {}   # {라벨: {칸: 해제시각}} — 모델 칸별 막힘 공유 흉내
         self.notified = None
 
     def enabled(self):
@@ -146,6 +147,18 @@ class FakeShared:
 
     def clear_blocked(self, label):
         self.blocked.pop(label, None)
+        return True
+
+    def get_scoped_blocked(self, now=None, provider=None):
+        return {l: dict(b) for l, b in self.scoped.items()}
+
+    def set_scoped_blocked(self, label, bucket, until, provider=None):
+        box = self.scoped.setdefault(label, {})
+        box[bucket] = max(float(box.get(bucket) or 0.0), float(until))
+        return True
+
+    def clear_scoped_blocked(self, label, provider=None):
+        self.scoped.pop(label, None)
         return True
 
     def claim_notify(self, reset_at):
@@ -1526,6 +1539,69 @@ def case_scoped_no_reclaim(tmp):
     claude_pool.usage_check = None
 
 
+def case_scoped_shared(tmp):
+    """[37] 칸 막힘을 세 머신이 공유한다.
+
+    계정 단위 막힘은 원래 공유됐지만 칸 막힘은 로컬에만 남아, 한 머신이 겪은 Fable
+    소진을 다른 머신이 또 겪었다(거절 1번 + 전환 알림 1건 낭비). 이제 막을 때 공유
+    칠판에 올리고, prune_blocked 가 병합해 세 머신이 같은 칸 막힘을 본다.
+    """
+    print("\n[37] 칸 막힘을 세 머신이 공유한다")
+    setup(tmp, ["A", "B"], "B")
+
+    # (1) 이 머신이 칸을 막으면 공유에 올라간다
+    fake = FakeShared()
+    st.shared_state = fake
+    state = st.load_state()
+    st.mark_scoped_blocked(state, "A", "Fable", time.time() + 3600)
+    check("공유에 올라감", bool(fake.scoped.get("A", {}).get("Fable")), fake.scoped)
+
+    # (2) 다른 머신이 막은 칸이 병합돼 되돌림·선택에서 빠진다
+    other = FakeShared()  # 다른 머신이 올린 것만 있는 공유 칠판
+    other.scoped["A"] = {"Fable": time.time() + 1800}
+    st.shared_state = other
+    state = st.prune_blocked(st.load_state())  # 로컬엔 칸 막힘이 없는 상태에서 병합
+    check("다른 머신 칸 막힘이 병합됨", st.is_scoped_blocked(state, "A", "Fable"))
+    check("되돌림 후보에서도 빠짐",
+          st.better_candidate(state, "B", bucket="Fable") is None,
+          f"고른 것={st.better_candidate(state, 'B', bucket='Fable')}")
+    check("계정 단위로는 안 막힘", not st.is_blocked(state, label="A"))
+
+    # (3) 계정 목록에 없는 라벨(남의 값)은 안 받는다
+    other.scoped["Z"] = {"Fable": time.time() + 1800}
+    state = st.prune_blocked(st.load_state())
+    check("모르는 라벨은 안 받음", "Z" not in (state.get("scoped_blocked") or {}),
+          state.get("scoped_blocked"))
+
+    # (4) 지난 값은 병합에서 빠진다
+    other.scoped["A"] = {"Fable": time.time() - 10}
+    state = st.prune_blocked(st.load_state())
+    check("풀린 칸은 안 받음", not st.is_scoped_blocked(state, "A", "Fable"))
+
+    # (5) 수동 해제가 공유 기록도 지운다 (안 지우면 다음 병합이 도로 살린다)
+    other.scoped["A"] = {"Fable": time.time() + 1800}
+    state = st.prune_blocked(st.load_state())
+    st.clear_blocked_label(state, "A")
+    check("공유 칸 기록도 지워짐", "A" not in other.scoped, other.scoped)
+    check("로컬 칸 기록도 지워짐", not st.is_scoped_blocked(state, "A", "Fable"))
+    state = st.prune_blocked(state)
+    check("해제 후 되돌림 후보 복귀", st.better_candidate(state, "B", bucket="Fable") == "A",
+          f"고른 것={st.better_candidate(state, 'B', bucket='Fable')}")
+
+    # (6) 공유를 못 읽어도 로컬 기록으로 버틴다
+    class Down(FakeShared):
+        def get_scoped_blocked(self, now=None, provider=None):
+            return None  # 읽기 실패
+
+    down = Down()
+    st.shared_state = down
+    state = st.load_state()
+    st.mark_scoped_blocked(state, "A", "Fable", time.time() + 3600)
+    state = st.prune_blocked(state)
+    check("공유가 죽어도 로컬 칸 막힘 유지", st.is_scoped_blocked(state, "A", "Fable"))
+    st.shared_state = None
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1548,7 +1624,7 @@ def main():
                      case_keychain_self_fix, case_keychain_fresh_not_shadow,
                      case_mirror_both_ways, case_usage_after_reset,
                      case_stuck_on_dead_account, case_model_scoped_limit,
-                     case_scoped_no_reclaim):
+                     case_scoped_no_reclaim, case_scoped_shared):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

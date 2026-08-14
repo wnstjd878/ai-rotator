@@ -113,6 +113,7 @@ class FakeShared:
 
     def __init__(self):
         self.blocked = {}
+        self.scoped = {}   # {라벨: {칸: 해제시각}} — prune_blocked 가 병합을 시도한다
         self.notified = {}
         self.claimed = set()
 
@@ -128,6 +129,18 @@ class FakeShared:
 
     def clear_blocked(self, label):
         self.blocked.pop(label, None)
+        return True
+
+    def get_scoped_blocked(self, now=None, provider=None):
+        return {l: dict(b) for l, b in self.scoped.items()}
+
+    def set_scoped_blocked(self, label, bucket, until, provider=None):
+        box = self.scoped.setdefault(label, {})
+        box[bucket] = max(float(box.get(bucket) or 0.0), float(until))
+        return True
+
+    def clear_scoped_blocked(self, label, provider=None):
+        self.scoped.pop(label, None)
         return True
 
     def claim_notify(self, reset_at, meta_key="rotator_notified"):

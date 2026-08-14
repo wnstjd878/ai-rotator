@@ -205,6 +205,7 @@ def claim_once(key: str) -> bool:
 
 USAGE_KEY_PREFIX = "usage:"
 CURRENT_KEY_PREFIX = "current:"
+SCOPED_KEY_PREFIX = "scoped:"  # 모델 칸별 막힘. 값 = {"Fable": 해제시각(epoch)} JSON
 CURRENT_STALE = 6 * 3600  # 이 시간 넘게 소식 없는 머신은 그 계정을 쓴다고 보지 않는다
 
 # 기계 이름은 사람이 알아보기 어렵다. 화면에 찍을 때만 바꿔 쓴다(값 자체는 기계 이름 그대로).
@@ -354,6 +355,105 @@ def get_current_all(now: float | None = None,
     for labels in out.values():
         labels.sort()
     return out
+
+
+def set_scoped_blocked(label: str, bucket: str, until_epoch: float,
+                       provider: str | None = None) -> bool:
+    """계정의 특정 모델 칸 막힘을 공유 칠판에 적는다(세 머신이 같이 본다).
+
+    계정 단위 막힘(set_blocked)과 달리 rotator_meta 에 계정당 한 줄
+    (`scoped:<라벨>`, 값 = 칸별 해제시각 JSON)로 담는다. 이미 더 늦은 해제 시각이
+    있으면 늦은 쪽을 유지하고, 지난 값은 지워 행이 낡은 채로 크지 않게 한다.
+    두 머신이 같은 순간에 서로 다른 칸을 적으면 한쪽이 덮일 수 있는데, 잃는 쪽
+    머신엔 로컬 기록이 그대로 있고 다음 거절 한 번이면 다시 올라오므로 허용한다
+    (claim_notify 의 "경합 극단 허용"과 같은 태도).
+    """
+    if not label or not bucket:
+        return False
+    try:
+        until = float(until_epoch)
+    except (TypeError, ValueError):
+        return False
+    key = SCOPED_KEY_PREFIX + _provider_prefix(provider) + str(label)
+    q = urllib.parse.quote(key, safe="")
+    cur = _request("GET", META_TABLE, params=f"key=eq.{q}&select=value")
+    box = {}
+    if cur:
+        try:
+            got = json.loads((cur[0] or {}).get("value") or "{}")
+            if isinstance(got, dict):
+                box = got
+        except (ValueError, TypeError):
+            box = {}
+    prev = box.get(str(bucket))
+    try:
+        prev = float(prev)
+    except (TypeError, ValueError):
+        prev = None
+    box[str(bucket)] = max(prev, until) if prev else until
+    now = time.time()
+    alive = {}
+    for b, t in box.items():
+        try:
+            t = float(t)
+        except (TypeError, ValueError):
+            continue
+        if t > now:
+            alive[str(b)] = t
+    body = [{"key": key, "value": json.dumps(alive, ensure_ascii=False),
+             "updated_at": _to_iso(now)}]
+    res = _request("POST", META_TABLE, body=body,
+                   headers={"Prefer": "resolution=merge-duplicates"})
+    return res is not None
+
+
+def get_scoped_blocked(now: float | None = None,
+                       provider: str | None = None) -> dict | None:
+    """{라벨: {칸: 해제시각}} 지금 막힌 칸만. 읽기 실패면 None(호출부가 로컬로 버틴다).
+
+    행 수가 몇 개뿐이라 전체를 받아 걸러낸다(get_usage_all 과 같은 방식).
+    """
+    now = time.time() if now is None else now
+    rows = _request("GET", META_TABLE, params="select=key,value")
+    if rows is None:
+        return None
+    prefix = _provider_prefix(provider)
+    out = {}
+    for r in rows:
+        key = str(r.get("key") or "")
+        if not key.startswith(SCOPED_KEY_PREFIX):
+            continue
+        label = _split_provider(key[len(SCOPED_KEY_PREFIX):], prefix)
+        if not label:
+            continue
+        try:
+            box = json.loads(r.get("value") or "")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(box, dict):
+            continue
+        alive = {}
+        for b, t in box.items():
+            try:
+                t = float(t)
+            except (TypeError, ValueError):
+                continue
+            if t > now:
+                alive[str(b)] = t
+        if alive:
+            out[label] = alive
+    return out
+
+
+def clear_scoped_blocked(label: str, provider: str | None = None) -> bool:
+    """그 계정의 칸 막힘 공유 기록을 지운다(잘못 막힌 계정을 사람이 풀 때)."""
+    if not label:
+        return False
+    key = SCOPED_KEY_PREFIX + _provider_prefix(provider) + str(label)
+    body = [{"key": key, "value": "{}", "updated_at": _to_iso(time.time())}]
+    res = _request("POST", META_TABLE, body=body,
+                   headers={"Prefer": "resolution=merge-duplicates"})
+    return res is not None
 
 
 def snapshot() -> list | None:

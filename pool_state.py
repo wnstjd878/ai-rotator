@@ -259,6 +259,8 @@ def mark_scoped_blocked(state: dict, label: str, bucket: str, until_epoch: float
     box.setdefault(str(label), {})[str(bucket)] = max(float(prev), until) if prev else until
     state["scoped_blocked"] = box
     _push_history(state, label, "scoped_blocked", f"{bucket} 칸 소진")
+    if _shared_on():  # 세 머신이 같이 본다. 안 올리면 머신마다 첫 거절을 한 번씩 겪는다
+        shared_state.set_scoped_blocked(label, bucket, until, provider=NAMESPACE)
     return state
 
 
@@ -340,12 +342,24 @@ def prune_blocked(state: dict, now: float | None = None) -> dict:
 
     state["blocked"] = blocked
     # 모델 칸별 막힘도 같이 턴다. 안 털면 Fable 이 다시 채워져도 그 계정을 계속 건너뛴다.
-    # 이건 공유 저장소에 안 올린다 — 공유 쪽은 계정 단위 막힘만 다루는 구조다.
     scoped = {}
     for label, buckets in _clean_scoped(state.get("scoped_blocked")).items():
         alive = {name: until for name, until in buckets.items() if until > now}
         if alive:
             scoped[label] = alive
+    if _shared_on():
+        # 공유 저장소의 칸 막힘도 병합한다(2026-08-14). 안 하면 다른 머신이 이미 겪은
+        # 칸 소진을 이 머신이 또 겪는다(거절 1번 + 전환 알림 1건 낭비).
+        remote = shared_state.get_scoped_blocked(now, provider=NAMESPACE)
+        if remote is not None:  # 읽기 실패면 로컬만 유지
+            known = set(account_labels())
+            for label, buckets in remote.items():
+                if label not in known:
+                    continue  # 이 제공자 계정 목록에 없는 라벨은 안 받는다
+                for name, until in buckets.items():
+                    prev = scoped.get(label, {}).get(name)
+                    scoped.setdefault(label, {})[name] = \
+                        max(float(prev), float(until)) if prev else float(until)
     state["scoped_blocked"] = scoped
     if not blocked:
         state["notified_for"] = None  # 하나라도 풀렸으면 다음 소진 때 다시 알린다
@@ -404,12 +418,20 @@ def mark_blocked(state: dict, label: str, until_epoch: float, reason: str = "") 
 
 
 def clear_blocked_label(state: dict, label: str) -> dict:
-    """한 계정의 막힘을 푼다(로컬 + 공유). 사람이 --use 로 고른 계정 등."""
+    """한 계정의 막힘을 푼다(로컬 + 공유). 사람이 --use 로 고른 계정 등.
+
+    모델 칸별 막힘도 같이 푼다 — 공유 쪽을 안 지우면 다음 병합(prune_blocked)이
+    지운 값을 도로 살려낸다.
+    """
     blocked = dict(state.get("blocked") or {})
     blocked.pop(label, None)
     state["blocked"] = blocked
+    scoped = _clean_scoped(state.get("scoped_blocked"))
+    scoped.pop(str(label), None)
+    state["scoped_blocked"] = scoped
     if _shared_on():
         shared_state.clear_blocked(_to_shared(label))
+        shared_state.clear_scoped_blocked(label, provider=NAMESPACE)
     return state
 
 
