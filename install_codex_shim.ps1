@@ -1,18 +1,21 @@
-﻿# == 운영 맥락 ==
-# 용도: winserver(Windows)의 codex 실행 파일 자리에 순환 가로채기를 설치·해제한다.
-#       클로드 쪽 install_shim.ps1 과 같은 방식이다(원본을 옆으로 밀고 그 자리에 래퍼).
-# 실행: powershell -ExecutionPolicy Bypass -File install_codex_shim.ps1            설치
-#       powershell -ExecutionPolicy Bypass -File install_codex_shim.ps1 -Uninstall 해제
-#       powershell -ExecutionPolicy Bypass -File install_codex_shim.ps1 -Status    상태
-# 방식: 원본 codex.cmd -> codex-real.cmd 로 이동. 그 자리에 codex.cmd 래퍼 생성.
-#       래퍼는 CODEX_REAL_BIN 을 원본으로 가리키고 python 으로 codex_shim.py 를 부른다.
-#       codex 는 npm 전역 설치라 실행 파일이 .cmd 하나뿐이다(클로드는 .exe 였다).
-# 함정: 이 기계는 PowerShell 에서 .cmd 를 직접 부르면 조용히 죽는다(npm·codex 둘 다 확인).
-#       그래서 설치 확인은 cmd /c 로 부른다. 파이썬 subprocess 로는 정상이라
-#       순환기 본체(codex_shim.py)는 영향이 없다.
-# 되돌리기: -Uninstall 로 codex.cmd 를 지우고 codex-real.cmd 를 codex.cmd 로 되돌린다.
-#       node/codex 를 업데이트하면 원본 codex.cmd 가 되살아난다. 그때 설치를 다시 돌린다.
-# 마지막 점검: 2026-07-31
+# == Operational context ==
+# Purpose: install/uninstall the account-rotation interceptor over the codex launcher on Windows.
+#          Mirrors install_shim.ps1 (claude). Auto codex calls then go through account rotation.
+# Usage:   powershell -ExecutionPolicy Bypass -File install_codex_shim.ps1            install
+#          powershell -ExecutionPolicy Bypass -File install_codex_shim.ps1 -Uninstall revert
+#          powershell -ExecutionPolicy Bypass -File install_codex_shim.ps1 -Status    show
+# How:     codex ships THREE launchers in the node bin dir - codex.cmd, codex.ps1, and an
+#          extensionless codex (sh, for git-bash). Earlier this script only replaced codex.cmd,
+#          but PowerShell resolves `codex` to codex.ps1 first, so PowerShell/bots bypassed the
+#          shim and used one account until it hit its limit (2026-08-15, same class as the Mac
+#          nvm-shadow bug). Fix: codex.cmd becomes the shim; codex.ps1 is moved aside to
+#          codex-real.ps1 and NOT recreated, so PowerShell falls through to codex.cmd (a .cmd
+#          needs no ExecutionPolicy, unlike a .ps1 shim which the machine policy blocks); the
+#          extensionless codex (sh, git-bash) becomes a shim routing to codex_shim.py.
+#          Every shim uses CODEX_REAL_BIN pointing at codex-real.cmd (the form codex_shim.py runs).
+# Revert:  -Uninstall restores every launcher from its codex-real.* copy.
+#          A node/codex npm update recreates the real launchers; re-run this script afterward.
+# Last checked: 2026-08-15
 param(
   [switch]$Uninstall,
   [switch]$Status
@@ -23,21 +26,28 @@ $Dir  = $PSScriptRoot
 $Shim = Join-Path $Dir "codex_shim.py"
 
 function Get-BinDir {
-  # codex.cmd 가 사는 폴더. 가로채기를 이미 깔았으면 codex-real.cmd 로도 찾는다.
+  # Folder that holds codex.cmd. Also found via codex-real.cmd if the shim is already installed.
   $c = Get-Command codex -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($c) { return (Split-Path $c.Source) }
+  $c2 = Get-Command codex -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($c2 -and $c2.Source) { return (Split-Path $c2.Source) }
   foreach ($p in @(
       "$env:APPDATA\npm",
       "C:\Users\pc\AppData\Local\Microsoft\WinGet\Packages\OpenJS.NodeJS.LTS_Microsoft.Winget.Source_8wekyb3d8bbwe\node-v24.18.0-win-x64"
     )) {
     if (Test-Path (Join-Path $p "codex-real.cmd")) { return $p }
+    if (Test-Path (Join-Path $p "codex.cmd")) { return $p }
   }
-  throw "codex 를 못 찾았습니다. npm 전역 설치와 PATH 를 확인하세요."
+  throw "codex not found. Check the npm/WinGet node install on PATH."
 }
 
-$BinDir = Get-BinDir
-$Cmd    = Join-Path $BinDir "codex.cmd"
-$Real   = Join-Path $BinDir "codex-real.cmd"
+$BinDir  = Get-BinDir
+$Cmd     = Join-Path $BinDir "codex.cmd"
+$Real    = Join-Path $BinDir "codex-real.cmd"
+$Ps1     = Join-Path $BinDir "codex.ps1"
+$Ps1Real = Join-Path $BinDir "codex-real.ps1"
+$Sh      = Join-Path $BinDir "codex"
+$ShReal  = Join-Path $BinDir "codex-real"
 
 function Get-Python {
   $c = Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -45,70 +55,96 @@ function Get-Python {
   foreach ($p in @("C:\Program Files\Python312\python.exe", "C:\Program Files\Python311\python.exe")) {
     if (Test-Path $p) { return $p }
   }
-  throw "python 을 못 찾았습니다."
+  throw "python not found."
+}
+
+function Is-Shim($path) {
+  if (-not (Test-Path $path)) { return $false }
+  $b = Get-Content $path -Raw -ErrorAction SilentlyContinue
+  return ($b -match "codex_shim")
 }
 
 function Test-CodexRuns {
-  # .cmd 는 이 기계에서 PowerShell 직접 호출이 안 되므로 cmd /c 로 확인한다.
+  # .cmd must be called via cmd /c from PowerShell to run correctly.
   $out = cmd /c "`"$Cmd`" --version" 2>$null
   return ($out -join " ")
 }
 
 function Show-Status {
-  Write-Output ("codex.cmd      : " + (Test-Path $Cmd))
-  Write-Output ("codex-real.cmd : " + (Test-Path $Real))
-  if ((Test-Path $Cmd) -and (Test-Path $Real)) {
-    $body = Get-Content $Cmd -Raw -ErrorAction SilentlyContinue
-    if ($body -match "codex_shim") {
-      Write-Output "상태: 순환 가로채기 설치됨"
-      return
-    }
-  }
-  Write-Output "상태: 원래 codex (가로채기 없음)"
+  if (Is-Shim $Cmd) { Write-Output "codex.cmd : shim installed" }
+  elseif (Test-Path $Cmd) { Write-Output "codex.cmd : REAL (not shimmed)" }
+  else { Write-Output "codex.cmd : missing" }
+  # codex.ps1 should be moved aside so PowerShell falls through to codex.cmd.
+  if (Test-Path $Ps1) { Write-Output "codex.ps1 : present (should be moved aside)" }
+  else { Write-Output "codex.ps1 : moved aside (PowerShell falls through to codex.cmd)" }
+  if (Is-Shim $Sh) { Write-Output "codex(sh) : shim installed" }
+  elseif (Test-Path $Sh) { Write-Output "codex(sh) : REAL (not shimmed)" }
+  else { Write-Output "codex(sh) : missing" }
+  $resolved = Get-Command codex -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($resolved) { Write-Output ("PowerShell resolves codex -> " + $resolved.Source) }
+}
+
+function Restore-One($launcher, $realp) {
+  if ((Is-Shim $launcher) -and (Test-Path $realp)) { Remove-Item $launcher -Force }
+  if ((Test-Path $realp) -and -not (Test-Path $launcher)) { Move-Item $realp $launcher -Force }
 }
 
 function Do-Uninstall {
-  if ((Test-Path $Cmd) -and (Test-Path $Real)) {
-    $body = Get-Content $Cmd -Raw -ErrorAction SilentlyContinue
-    if ($body -match "codex_shim") { Remove-Item $Cmd -Force }
-  }
-  if ((Test-Path $Real) -and -not (Test-Path $Cmd)) { Move-Item $Real $Cmd -Force }
+  Restore-One $Cmd $Real
+  Restore-One $Ps1 $Ps1Real
+  Restore-One $Sh $ShReal
   $v = Test-CodexRuns
-  if (-not $v) { Write-Output "경고: 되돌린 뒤 codex 실행 확인 실패. 수동 점검 필요." }
-  else { Write-Output ("원래대로 되돌렸습니다. (" + $v.Trim() + ")") }
+  if (-not $v) { Write-Output "WARN: codex did not run after revert. Check the launchers." }
+  else { Write-Output ("Reverted. (" + $v.Trim() + ")") }
   Show-Status
 }
 
-function Do-Install {
-  if (-not (Test-Path $Shim)) { throw "codex_shim.py 가 없습니다: $Shim" }
-  $py = Get-Python
-
-  # 원본을 옆으로 민다. 이미 밀려 있으면(재설치) 새로 생긴 원본은 버리고 기존 real 을 지킨다.
-  if (Test-Path $Cmd) {
-    $body = Get-Content $Cmd -Raw -ErrorAction SilentlyContinue
-    if ($body -notmatch "codex_shim") {
-      if (Test-Path $Real) { Remove-Item $Cmd -Force }
-      else { Move-Item $Cmd $Real -Force }
+function Save-Real($launcher, $realp) {
+  # Move the real launcher aside once. If already a shim, leave the saved real intact.
+  if (Test-Path $launcher) {
+    if (-not (Is-Shim $launcher)) {
+      if (Test-Path $realp) { Remove-Item $launcher -Force }
+      else { Move-Item $launcher $realp -Force }
     }
   }
-  if (-not (Test-Path $Real)) { throw "원본 codex 를 못 찾았습니다(codex-real.cmd 없음)." }
+}
 
-  # 래퍼 생성. 인자는 %* 로 그대로 넘긴다(각 인자를 따옴표로 보존).
-  $lines = @(
+function Do-Install {
+  if (-not (Test-Path $Shim)) { throw "codex_shim.py missing: $Shim" }
+  $py = Get-Python
+
+  # 1) codex.cmd (primary; codex_shim.py runs CODEX_REAL_BIN which points here)
+  Save-Real $Cmd $Real
+  if (-not (Test-Path $Real)) { throw "real codex not found (codex-real.cmd missing)." }
+  $cmdLines = @(
     '@echo off',
     'setlocal',
     ('set "CODEX_REAL_BIN=' + $Real + '"'),
     ('"' + $py + '" "' + $Shim + '" %*')
   )
-  Set-Content -Path $Cmd -Value $lines -Encoding ASCII
+  Set-Content -Path $Cmd -Value $cmdLines -Encoding ASCII
+
+  # 2) codex.ps1: move aside and do NOT recreate. PowerShell then falls through to codex.cmd
+  #    (the shim). A .ps1 shim would be blocked by the machine ExecutionPolicy; a .cmd is not.
+  Save-Real $Ps1 $Ps1Real
+  if (Test-Path $Ps1) { Remove-Item $Ps1 -Force }   # in case a stale shim .ps1 exists
+
+  # 3) extensionless codex (git-bash/msys sh). Route through codex_shim.py.
+  Save-Real $Sh $ShReal
+  $shLines = @(
+    '#!/bin/sh',
+    '# codex_shim rotation launcher (auto-generated)',
+    ('CODEX_REAL_BIN="' + $Real + '" exec "' + $py + '" "' + $Shim + '" "$@"')
+  )
+  Set-Content -Path $Sh -Value $shLines -Encoding ASCII
 
   $v = Test-CodexRuns
   if (-not $v) {
-    Write-Output "설치 후 codex 실행 실패. 되돌립니다."
+    Write-Output "codex failed to run after install. Reverting."
     Do-Uninstall
-    throw "설치 실패"
+    throw "install failed"
   }
-  Write-Output ("설치했습니다. codex 단발 호출이 이제 계정 순환 보호를 받습니다. (" + $v.Trim() + ")")
+  Write-Output ("Installed. codex single-shot calls now go through account rotation. (" + $v.Trim() + ")")
   Show-Status
 }
 
