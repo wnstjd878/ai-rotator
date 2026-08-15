@@ -118,13 +118,41 @@ def label_of_email(email):
     return None
 
 
+def _rte(obj):
+    try:
+        return ((obj or {}).get("claudeAiOauth") or {}).get("refreshTokenExpiresAt")
+    except Exception:
+        return None
+
+
+def _label_by_rte(obj):
+    """재발급 열쇠 만료 시각으로 주인 라벨을 추정한다. 유일하게 일치할 때만 답한다.
+
+    이 값은 로그인 시점에 정해져 회전해도 안 바뀐다. 그래서 갱신된 자격(지문이 어느
+    저장본과도 안 맞는 값)도 서버 조회 없이 가려낼 수 있다.
+    """
+    mine = _rte(obj)
+    if not mine:
+        return None
+    hits = []
+    for f in sorted(CREDS_DIR.glob("*.json")):
+        try:
+            o = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if _rte(o) == mine:
+            hits.append(f.stem)
+    return hits[0] if len(hits) == 1 else None
+
+
 def live_label():
     """지금 실제로 꽂혀 있는 계정의 라벨. 못 알아내면 None.
 
     1순위는 서버에 직접 물어보기(cred_email). 사람이 순환기 모르게 로그인하면 기록이
     낡는데(사용량이 없어 계정을 바꾸는 건 흔한 일이다), 그 낡은 값을 믿고 되저장하면
     엉뚱한 라벨에 다른 계정 자격이 들어간다.
-    조회가 안 되면(연결 실패 등) 지문 대조로 떨어진다 — 갱신 안 된 자격은 이걸로 잡힌다.
+    조회가 안 되면(연결 실패 등) 지문 대조, 그것도 안 되면(회전된 자격) 재발급 열쇠
+    만료 시각의 유일 일치로 떨어진다.
     """
     label = label_of_email(cred_email(LIVE))
     if label:
@@ -135,7 +163,11 @@ def live_label():
     for f in sorted(CREDS_DIR.glob("*.json")):
         if _fingerprint(f) == live_fp:
             return f.stem
-    return None
+    try:
+        live = json.loads(LIVE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return _label_by_rte(live)
 
 
 def save_back(leaving) -> str:
@@ -162,7 +194,7 @@ def save_back(leaving) -> str:
             pulled = None
 
     def _done(msg: str) -> str:
-        return f"{pulled} — {msg}" if pulled else msg
+        return f"{pulled}. {msg}" if pulled else msg
 
     if not LIVE.exists():
         return _done("지금 쓰는 자격 파일이 없어 되저장 안 함")
@@ -285,12 +317,39 @@ def _write_owner_only(dest: Path, obj) -> None:
     os.replace(tmp, dest)
 
 
+def _owner_of(obj):
+    """이 자격의 주인 라벨. 지문 일치 → 서버 조회 → 재발급 열쇠 만료 시각 순으로 가린다."""
+    fp = _obj_fingerprint(obj)
+    if fp:
+        for f in sorted(CREDS_DIR.glob("*.json")):
+            if _fingerprint(f) == fp:
+                return f.stem
+    probe = CREDS_DIR / ".owner-probe.json"
+    label = None
+    try:
+        _write_owner_only(probe, obj)
+        label = label_of_email(cred_email(probe))
+    except Exception:
+        label = None
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except Exception:
+            pass
+    if label:
+        return label
+    return _label_by_rte(obj)
+
+
 def _pull_live_from_keychain():
     """(맥) 열쇠꾸러미 값이 파일보다 나중 것이면 자격 파일을 그 값으로 복원한다.
 
     실측(2026-08-15): 화면 세션의 클로드는 자격을 갱신하면 새 값을 열쇠꾸러미로 옮기고
     **자격 파일을 지워버린다.** 그 상태에서 파일만 보고 되저장하면 갱신분이 유실되고,
     그 계정으로 되돌아오는 순간 로그인이 풀린다(8/14 C·8/15 A 사망의 뿌리).
+
+    주인을 못 알아낸 값은 파일로 승격하지 않는다(코덱스 검수 2026-08-15) — 승격하면
+    뒤따르는 되저장이 엉뚱한 라벨을 덮을 수 있다. 그 값은 rescued/ 에 보관만 한다.
     """
     kc = read_keychain_value()
     if not kc:
@@ -301,6 +360,11 @@ def _pull_live_from_keychain():
         live = None
     if live and _issued_at(live) >= _issued_at(kc):
         return None
+    if not _owner_of(kc):
+        rescued = CREDS_DIR / "rescued"
+        rescued.mkdir(exist_ok=True)
+        _write_owner_only(rescued / f"kc-{int(time.time())}.json", kc)
+        return "열쇠꾸러미에 주인 미상의 더 새 값이 있어 creds/rescued/ 에 보관만 했습니다"
     _write_owner_only(LIVE, kc)
     return "열쇠꾸러미의 갱신분이 더 최신이라 자격 파일을 그 값으로 복원했습니다"
 
@@ -322,17 +386,7 @@ def _rescue_keychain_value(new_src: Path):
     for f in CREDS_DIR.glob("*.json"):
         if _fingerprint(f) == fp:
             return None  # 이미 라벨 저장본에 있다
-    # 주인 라벨을 서버에 물어본다(값은 0600 임시 파일로만 흐른다)
-    probe = CREDS_DIR / ".rescue-probe.json"
-    label = None
-    try:
-        _write_owner_only(probe, kc)
-        label = label_of_email(cred_email(probe))
-    finally:
-        try:
-            probe.unlink(missing_ok=True)
-        except Exception:
-            pass
+    label = _owner_of(kc)
     if label and (CREDS_DIR / f"{label}.json").exists():
         dest = CREDS_DIR / f"{label}.json"
         try:

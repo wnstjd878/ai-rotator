@@ -1075,7 +1075,10 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                         f"계정을 막지 않고 그대로 다시 시도합니다.")
                     st.save_state(state)
                     return used_label
-                if forced and strikes >= 2 and _quarantine_cred(used_label):
+                if forced and strikes >= 2 and not place_why and _quarantine_cred(used_label):
+                    # place_why 가 있으면 이 컴퓨터의 자격 자리 장애일 수 있다(여러 계정 동반
+                    # 거절 등). 그때 격리하면 멀쩡한 저장본이 빠진다 — 짧은 재움으로 넘긴다
+                    # (코덱스 검수 2026-08-15).
                     # 같은 계정이 하루 안에 두 번째 강제 교체 = 저장본이 진짜 죽은 것이다.
                     # 첫 번째는 되비추기가 스스로 고칠 수 있어 짧게 재우고 기회를 주지만,
                     # 그 뒤에도 또 걸리면 "5분 재움 → 1순위라 되돌아감 → 또 거절" 왕복이

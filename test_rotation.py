@@ -1760,6 +1760,16 @@ def case_keychain_pull_and_rescue(tmp):
                                    "expiresAt": 9_999_999_999_000}}
         sw.read_keychain_value = lambda: json.loads(json.dumps(fresh))
 
+        # (0) 주인을 못 알아내는 값은 파일로 승격하지 않는다(엉뚱한 라벨 오염 방지)
+        sw.cred_email = lambda p=None: None
+        sw.label_of_email = lambda e: None
+        note0 = sw._pull_live_from_keychain()
+        check("주인 미상 값은 rescued 보관만", note0 is not None and "보관만" in note0
+              and not sw.LIVE.exists(), f"note={note0}")
+
+        # 주인이 확인되면 파일로 복원한다
+        sw.cred_email = lambda p=None: "z@test"
+        sw.label_of_email = lambda e: "Z" if e == "z@test" else None
         note = sw._pull_live_from_keychain()
         check("파일 없음 → 열쇠꾸러미 값으로 복원", note is not None and sw.LIVE.exists())
         check("복원된 값이 열쇠꾸러미 것", "kc-new" in sw.LIVE.read_text(encoding="utf-8"))
