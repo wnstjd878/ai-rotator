@@ -209,10 +209,43 @@ def _ensure_shims() -> None:
     로드하면서 nvm 폴더의 codex 가 가로채기를 가려 jangsa-mkt 배포가 막혔다.
     이 검사는 homebrew·nvm 양쪽 링크가 다 가로채기를 가리키는지 보고, 하나라도 벗겨졌으면
     해당 설치 스크립트를 다시 돌린다. 어떤 문제가 생겨도 알림 작업을 멈추지 않는다(try 안).
+    winserver(Windows)는 실행 파일이 codex.cmd/codex.ps1/확장자없음이라, .cmd 가 가로채기가
+    아니면 .ps1 설치 스크립트를 다시 돌린다(node/codex 를 npm 으로 올리면 벗겨진다).
     """
     import glob
     import os
     import subprocess
+
+    if os.name == "nt":
+        win = [("codex", BASE / "install_codex_shim.ps1"),
+               ("claude", BASE / "install_shim.ps1")]
+        for tool, installer in win:
+            try:
+                if not installer.exists():
+                    continue
+                # tool.cmd 를 PATH(그리고 claude 는 ~/.local/bin)에서 찾는다
+                cmd_path = None
+                for d in (os.environ.get("PATH", "").split(os.pathsep)
+                          + [os.path.expanduser("~/.local/bin")]):
+                    if not d:
+                        continue
+                    p = os.path.join(d, tool + ".cmd")
+                    if os.path.exists(p):
+                        cmd_path = p
+                        break
+                if not cmd_path:
+                    continue
+                with open(cmd_path, encoding="utf-8", errors="ignore") as f:
+                    body = f.read()
+                if "_shim" in body:      # 이미 가로채기
+                    continue
+                print(f"[shim-guard] {installer.name}: 가로채기가 벗겨져 다시 설치한다")
+                subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                                "-File", str(installer)],
+                               capture_output=True, text=True, timeout=120)
+            except Exception as e:
+                print(f"[shim-guard] {installer.name} 재설치 실패(무시): {type(e).__name__}")
+        return
 
     tools = [
         (BASE / "codex_shim.sh", "/opt/homebrew/bin/codex",
