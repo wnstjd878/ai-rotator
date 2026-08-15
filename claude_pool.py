@@ -884,6 +884,58 @@ def _notify_cred_place(why: str, labels: list, account: str | None = None) -> No
     notify(head + body + "그래도 안 되면 개발 봇에 \"클로드 로그인 고쳐줘\" 라고 답장하세요.")
 
 
+def _quarantine_cred(label: str | None) -> bool:
+    """죽음이 굳어진 저장본을 creds/dead/ 로 옮겨 순환에서 뺀다(재로그인하면 자동 복귀).
+
+    pick_next 는 저장본 있는 라벨만 고르므로 옮기는 것만으로 순환에서 빠진다.
+    mark_blocked 를 쓰지 않는 이유: 막힘은 세 머신이 공유하는데 저장본 죽음은 이 머신만의
+    문제다. 공유로 올리면 멀쩡한 다른 머신의 같은 라벨까지 막힌다.
+    """
+    if not label:
+        return False
+    src = Path(st.CREDS_DIR) / f"{label}.json"
+    if not src.exists():
+        return False
+    dead = Path(st.CREDS_DIR) / "dead"
+    try:
+        dead.mkdir(parents=True, exist_ok=True)
+        src.replace(dead / src.name)
+    except OSError:
+        return False
+    return True
+
+
+def _relogin_hint(label: str) -> str:
+    """(머신 이름, 재로그인 명령) 짝. 실행 위치는 항상 본체의 ai-rotator 폴더다."""
+    try:
+        import shared_state as ss
+        where = ss.host_label(ss._hostname())
+    except Exception:
+        where = "?"
+    if where == "Mac":
+        cmd = f"python relogin.py --remote macmini {label}"
+    elif where == "winserver":
+        cmd = f"python relogin.py --remote winserver {label}"
+    else:
+        cmd = f"python relogin.py {label}"
+    return where, cmd
+
+
+def _notify_cred_dead(label: str) -> None:
+    """저장본이 죽어 격리했을 때, 하루 한 번만 할 일과 함께 알린다."""
+    if not st.claim_notice(f"cred-dead:{label}:{int(time.time() // 86400)}"):
+        return
+    where, cmd = _relogin_hint(label)
+    notify(
+        f"클로드 '{label}' 계정 로그인이 거듭 거절돼 순환에서 뺐습니다({where} 저장본만 격리).\n\n"
+        f"무슨 일: 이 컴퓨터에 저장된 '{label}' 로그인이 폐기된 옛 열쇠가 됐습니다. "
+        "다른 계정들은 그대로 돌아가고, 이 알림은 같은 일로 하루 한 번만 옵니다.\n\n"
+        "할 일: 본체 ai-rotator 폴더에서 아래 한 줄을 실행하고 브라우저 승인 한 번이면 "
+        "자동으로 저장·복귀합니다.\n"
+        f"  {cmd}"
+    )
+
+
 def _clear_auth_rejects(label: str | None) -> None:
     """호출이 성공하면 그 계정의 거절 횟수를 지운다.
 
@@ -976,7 +1028,9 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 # 반복했고, 계정을 갈아끼우자 바로 풀렸다.
                 rejects, stuck_for = st.note_auth_reject(state, used_label)
                 forced = rejects >= AUTH_REJECT_LIMIT and stuck_for >= AUTH_REJECT_STUCK
+                strikes = 0
                 if forced:
+                    strikes = st.note_forced_rotate(state, used_label)
                     log(f"'{used_label}' 이(가) {int(stuck_for // 60)}분 {int(stuck_for % 60)}초째 "
                         f"로그인 거절만 받고 있습니다(거절 {rejects}번). "
                         f"저장본 판정과 무관하게 다음 계정으로 넘깁니다.")
@@ -1021,16 +1075,25 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                         f"계정을 막지 않고 그대로 다시 시도합니다.")
                     st.save_state(state)
                     return used_label
-                # 잇단 거절로 강제로 넘기는 경우엔 짧게만 쉬게 한다. 원인이 계정이 아니라
-                # 이 컴퓨터의 자격 자리일 수도 있는데, 그때 네 계정을 30분씩 재우면
-                # 그동안 쓸 계정이 없어져 봇들이 종량제로 넘어간다.
-                cooldown = FORCED_ROTATE_COOLDOWN if forced else BROKEN_CRED_COOLDOWN
-                st.mark_blocked(state, used_label, time.time() + cooldown,
-                                limit_detect.short_reason(out, err))
-                _why = ("로그인이 만료됐습니다" if verdict == "dead" else "저장본이 상했습니다")
-                log(f"'{used_label}' {_why}(로그인 거절). "
-                    f"{cooldown // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
-                    f"그 계정으로 다시 로그인해 save_account.py 로 저장하세요.")
+                if forced and strikes >= 2 and _quarantine_cred(used_label):
+                    # 같은 계정이 하루 안에 두 번째 강제 교체 = 저장본이 진짜 죽은 것이다.
+                    # 첫 번째는 되비추기가 스스로 고칠 수 있어 짧게 재우고 기회를 주지만,
+                    # 그 뒤에도 또 걸리면 "5분 재움 → 1순위라 되돌아감 → 또 거절" 왕복이
+                    # 매시간 알림을 쏟아낸다(2026-08-15 A 사고). 여기서 격리로 끊는다.
+                    log(f"'{used_label}' 저장본을 creds/dead/ 로 격리했습니다. "
+                        f"재로그인 전까지 순환에서 뺍니다.")
+                    _notify_cred_dead(used_label)
+                else:
+                    # 잇단 거절로 강제로 넘기는 경우엔 짧게만 쉬게 한다. 원인이 계정이 아니라
+                    # 이 컴퓨터의 자격 자리일 수도 있는데, 그때 네 계정을 30분씩 재우면
+                    # 그동안 쓸 계정이 없어져 봇들이 종량제로 넘어간다.
+                    cooldown = FORCED_ROTATE_COOLDOWN if forced else BROKEN_CRED_COOLDOWN
+                    st.mark_blocked(state, used_label, time.time() + cooldown,
+                                    limit_detect.short_reason(out, err))
+                    _why = ("로그인이 만료됐습니다" if verdict == "dead" else "저장본이 상했습니다")
+                    log(f"'{used_label}' {_why}(로그인 거절). "
+                        f"{cooldown // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
+                        f"그 계정으로 다시 로그인해 save_account.py 로 저장하세요.")
 
         nxt = st.pick_next(state, exclude=used_label, bucket=bucket)
         if nxt is None:
@@ -1130,7 +1193,12 @@ def _notify_switch(used_label, nxt, verdict, state, bucket=None):
     """
     if not used_label:
         return  # 시작점 지정 등, 전환이 아니면 알리지 않는다
-    key = f"switch_{used_label}_{nxt}_{int(time.time() // 600)}"  # 10분 창당 1회
+    if verdict in ("dead", "auth"):
+        # 죽은 저장본이 낀 전환은 같은 내용이 왕복마다 반복된다(2026-08-15 매시간 도배).
+        # 같은 (어디서→어디로, 사유)는 하루 한 번만 알린다. 격리 카드가 본 신호다.
+        key = f"switch_{used_label}_{nxt}_{verdict}_{int(time.time() // 86400)}"
+    else:
+        key = f"switch_{used_label}_{nxt}_{int(time.time() // 600)}"  # 10분 창당 1회
     if not st.claim_notice(key):
         return
     notify(switch_message(used_label, nxt, verdict, state, bucket))

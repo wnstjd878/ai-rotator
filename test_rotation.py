@@ -1676,6 +1676,135 @@ def case_meta_cleanup():
         ss._request = real_req
 
 
+def case_dead_quarantine(tmp):
+    """[39] 로그인 거절이 하루 안에 두 번 굳으면 저장본을 격리하고 재로그인 카드를 보낸다.
+
+    2026-08-15 실사고: 죽은 A 를 5분 재우고 1순위라 계속 되돌아가는 왕복이 매시간
+    전환 알림을 쏟아냈다. 두 번째로 굳으면 creds/dead/ 격리로 왕복을 끊는다.
+    막힘 기록(mark_blocked)은 세 머신이 공유하므로 남기지 않는다 — 저장본 죽음은
+    이 머신만의 문제라 다른 머신의 같은 라벨까지 막으면 안 된다.
+    """
+    print("\n[39] 거절이 두 번 굳으면 저장본 격리 + 재로그인 카드")
+    dead = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "api_error_status": 401, "stop_reason": "stop_sequence",
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }, ensure_ascii=False)
+    real_alive = claude_pool._cred_alive
+    try:
+        claude_pool._cred_alive = lambda label: True
+        setup(tmp, ["A", "B", "C"], "A")
+        fake = Fake({"A": (1, dead, ""), "B": (0, OK_OUT, "")})
+        install(fake)
+        # 이미 한 번 강제 교체된 이력 + 4분째 거절이 이어지는 상태를 만든다
+        state = st.load_state()
+        state["auth_rejects"] = {"A": {"n": 5, "first": time.time() - 240, "last": time.time() - 5}}
+        state["forced_rotates"] = {"A": [time.time() - 3600]}
+        st.save_state(state)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("B 로 갈아타 성공", proc.returncode == 0 and fake.switches == ["B"],
+              f"switches={fake.switches}")
+        creds = Path(tmp) / "creds"
+        check("A 저장본이 dead/ 로 격리됨",
+              not (creds / "A.json").exists() and (creds / "dead" / "A.json").exists())
+        check("공유되는 막힘 기록은 안 남김", "A" not in st.load_state()["blocked"],
+              f"blocked={list(st.load_state()['blocked'])}")
+        cards = [n for n in fake.notices if "순환에서 뺐습니다" in n]
+        check("재로그인 카드 1건", len(cards) == 1, f"notices={len(fake.notices)}")
+        check("카드에 재로그인 명령이 담김", cards and "relogin.py" in cards[0])
+    finally:
+        claude_pool._cred_alive = real_alive
+
+
+def case_dead_alert_folded(tmp):
+    """[40] 죽은 저장본이 낀 전환 알림은 같은 (경로, 사유)면 하루 한 번으로 접힌다."""
+    print("\n[40] dead 전환 알림은 하루 1회로 접힘")
+    setup(tmp, ["A", "B"], "A")
+    fake = Fake({})
+    install(fake)
+    shared = FakeShared()
+    real_shared = st.shared_state
+    st.shared_state = shared
+    try:
+        state = st.load_state()
+        claude_pool._notify_switch("A", "D", "dead", state)
+        claude_pool._notify_switch("A", "D", "dead", state)
+        check("같은 dead 전환은 1건만", len(fake.notices) == 1, f"{len(fake.notices)}건")
+        claude_pool._notify_switch("A", "D", "limit", state)
+        check("한도 전환은 별개로 나감", len(fake.notices) == 2, f"{len(fake.notices)}건")
+        claude_pool._notify_switch("A", "D", "limit", state)
+        check("한도 전환도 10분 창 중복은 접힘", len(fake.notices) == 2, f"{len(fake.notices)}건")
+    finally:
+        st.shared_state = real_shared
+
+
+def case_keychain_pull_and_rescue(tmp):
+    """[41] 되저장이 열쇠꾸러미 갱신분을 놓치지 않는다.
+
+    실측(2026-08-15): 화면 세션의 클로드는 갱신값을 열쇠꾸러미로 옮기고 자격 파일을
+    지워버린다. 또 예약 전환이 열쇠꾸러미를 덮으면서 밤새 갱신된 값이 유실됐다(A 사망).
+    (1) 파일이 지워졌으면 열쇠꾸러미 값으로 복원하고 (2) 덮어쓰기 전엔 주인 라벨에 되저장한다.
+    """
+    print("\n[41] 열쇠꾸러미 최신값 복원 + 덮어쓰기 전 되저장")
+    import switch_account as sw
+    tmp = Path(tmp)
+    creds = tmp / "creds"
+    creds.mkdir(parents=True, exist_ok=True)
+    real_live, real_dir = sw.LIVE, sw.CREDS_DIR
+    real_read = sw.read_keychain_value
+    real_email, real_label = sw.cred_email, sw.label_of_email
+    try:
+        sw.LIVE = tmp / "live.json"
+        sw.CREDS_DIR = creds
+        fresh = {"claudeAiOauth": {"refreshToken": "kc-new", "accessToken": "x",
+                                   "expiresAt": 9_999_999_999_000}}
+        sw.read_keychain_value = lambda: json.loads(json.dumps(fresh))
+
+        note = sw._pull_live_from_keychain()
+        check("파일 없음 → 열쇠꾸러미 값으로 복원", note is not None and sw.LIVE.exists())
+        check("복원된 값이 열쇠꾸러미 것", "kc-new" in sw.LIVE.read_text(encoding="utf-8"))
+
+        newer = {"claudeAiOauth": {"refreshToken": "file-newest", "accessToken": "x",
+                                   "expiresAt": 9_999_999_999_500}}
+        sw.LIVE.write_text(json.dumps(newer), encoding="utf-8")
+        check("파일이 최신이면 그대로 둠",
+              sw._pull_live_from_keychain() is None
+              and "file-newest" in sw.LIVE.read_text(encoding="utf-8"))
+
+        (creds / "A.json").write_text(
+            json.dumps({"claudeAiOauth": {"refreshToken": "a-old", "expiresAt": 1_000}}),
+            encoding="utf-8")
+        (creds / "B.json").write_text(
+            json.dumps({"claudeAiOauth": {"refreshToken": "b-cur", "expiresAt": 2_000}}),
+            encoding="utf-8")
+        kc_a = {"claudeAiOauth": {"refreshToken": "a-new", "accessToken": "x",
+                                  "expiresAt": 9_999_999_999_000}}
+        sw.read_keychain_value = lambda: json.loads(json.dumps(kc_a))
+        sw.cred_email = lambda p=None: "a@test"
+        sw.label_of_email = lambda e: "A" if e == "a@test" else None
+        note = sw._rescue_keychain_value(creds / "B.json")
+        check("덮기 전 A 갱신분을 저장본에 되저장",
+              note is not None and "a-new" in (creds / "A.json").read_text(encoding="utf-8"),
+              f"note={note}")
+        check("이전 값은 prev 에 한 세대 보관", (creds / "prev" / "A.json").exists())
+
+        note2 = sw._rescue_keychain_value(creds / "B.json")
+        check("이미 저장된 값은 재작업 없음", note2 is None, f"note={note2}")
+
+        kc_x = {"claudeAiOauth": {"refreshToken": "who-knows", "accessToken": "x",
+                                  "expiresAt": 9_999_999_999_100}}
+        sw.read_keychain_value = lambda: json.loads(json.dumps(kc_x))
+        sw.cred_email = lambda p=None: None
+        note3 = sw._rescue_keychain_value(creds / "B.json")
+        check("주인 미상 값은 rescued/ 에 보관",
+              note3 is not None and any((creds / "rescued").glob("kc-*.json")),
+              f"note={note3}")
+    finally:
+        sw.LIVE, sw.CREDS_DIR = real_live, real_dir
+        sw.read_keychain_value = real_read
+        sw.cred_email, sw.label_of_email = real_email, real_label
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1698,7 +1827,9 @@ def main():
                      case_keychain_self_fix, case_keychain_fresh_not_shadow,
                      case_mirror_both_ways, case_usage_after_reset,
                      case_stuck_on_dead_account, case_model_scoped_limit,
-                     case_scoped_no_reclaim, case_scoped_shared):
+                     case_scoped_no_reclaim, case_scoped_shared,
+                     case_dead_quarantine, case_dead_alert_folded,
+                     case_keychain_pull_and_rescue):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

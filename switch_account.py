@@ -153,21 +153,32 @@ def save_back(leaving) -> str:
     (2) 그래도 지금 자격이 다른 라벨의 저장본과 같으면 덮어쓰지 않고 넘어간다.
     돌려주는 값은 기록용 한 줄이다.
     """
+    # (맥) 클로드가 갱신분을 열쇠꾸러미로 옮기고 파일을 지웠을 수 있다 — 먼저 복원한다.
+    pulled = None
+    if sys.platform == "darwin":
+        try:
+            pulled = _pull_live_from_keychain()
+        except Exception:
+            pulled = None
+
+    def _done(msg: str) -> str:
+        return f"{pulled} — {msg}" if pulled else msg
+
     if not LIVE.exists():
-        return "지금 쓰는 자격 파일이 없어 되저장 안 함"
+        return _done("지금 쓰는 자격 파일이 없어 되저장 안 함")
     if not leaving:
         leaving = live_label()  # 기록이 비었어도 실측으로 알아낼 수 있다
         if not leaving:
-            return "떠나는 계정을 몰라 되저장 안 함"
+            return _done("떠나는 계정을 몰라 되저장 안 함")
     dest = CREDS_DIR / f"{leaving}.json"
     if not dest.exists():
-        return f"'{leaving}' 저장본이 없어 되저장 안 함"
+        return _done(f"'{leaving}' 저장본이 없어 되저장 안 함")
 
     live_fp = _fingerprint(LIVE)
     if live_fp is None:
-        return "지금 자격을 못 읽어 되저장 안 함"
+        return _done("지금 자격을 못 읽어 되저장 안 함")
     if live_fp == _fingerprint(dest):
-        return f"'{leaving}' 자격에 변화 없음(되저장 불필요)"
+        return _done(f"'{leaving}' 자격에 변화 없음(되저장 불필요)")
 
     # 기록보다 실측이 우선. 사람이 /login 으로 계정을 바꿔 기록이 낡았을 수 있다.
     actual = live_label()
@@ -176,7 +187,7 @@ def save_back(leaving) -> str:
         leaving = actual
         dest = CREDS_DIR / f"{leaving}.json"
         if not dest.exists() or live_fp == _fingerprint(dest):
-            return f"{note} — 이미 최신이라 되저장 불필요"
+            return _done(f"{note} — 이미 최신이라 되저장 불필요")
     else:
         note = None
 
@@ -185,8 +196,8 @@ def save_back(leaving) -> str:
         if other.stem == leaving:
             continue
         if _fingerprint(other) == live_fp:
-            return (f"지금 자격은 '{leaving}' 이 아니라 '{other.stem}' 의 저장본과 같습니다. "
-                    f"덮어쓰지 않고 넘어갑니다")
+            return _done(f"지금 자격은 '{leaving}' 이 아니라 '{other.stem}' 의 저장본과 같습니다. "
+                         f"덮어쓰지 않고 넘어갑니다")
 
     # 한 세대 되돌리기용. creds/*.json 목록에 안 섞이도록 하위 폴더에 둔다
     prev_dir = CREDS_DIR / "prev"
@@ -194,7 +205,7 @@ def save_back(leaving) -> str:
     shutil.copy2(dest, prev_dir / f"{leaving}.json")
     shutil.copy2(LIVE, dest)
     done = f"'{leaving}' 의 갱신된 자격을 되저장했습니다"
-    return f"{note} — {done}" if note else done
+    return _done(f"{note} — {done}" if note else done)
 
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -222,6 +233,125 @@ def keychain_account():
     return None
 
 
+def read_keychain_value():
+    """열쇠꾸러미 값을 이 프로세스 안으로만 읽어 온다. 못 읽으면 None(원격 접속·화면 잠금 포함).
+
+    값은 디스크·화면·명령 인자에 안 남긴다(9.1). 임시 파일도 안 만든다.
+    """
+    import subprocess
+
+    if sys.platform != "darwin":
+        return None
+    acct = keychain_account()
+    if not acct:
+        return None
+    try:
+        r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
+                            "-a", acct, "-w"], capture_output=True, text=True, timeout=20)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        obj = json.loads((r.stdout or "").strip())
+    except Exception:
+        return None
+    if not isinstance(obj, dict) or not ((obj.get("claudeAiOauth") or {}).get("refreshToken")):
+        return None
+    return obj
+
+
+def _issued_at(obj) -> int:
+    """자격을 언제 받았는지 견줄 값(출입증 만료 시각 — 갱신마다 새로 받아 클수록 나중 것)."""
+    try:
+        v = ((obj or {}).get("claudeAiOauth") or {}).get("expiresAt")
+        return int(v) if v is not None else 0
+    except Exception:
+        return 0
+
+
+def _obj_fingerprint(obj):
+    token = ((obj or {}).get("claudeAiOauth") or {}).get("refreshToken") or ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest() if token else None
+
+
+def _write_owner_only(dest: Path, obj) -> None:
+    """자격을 담는 파일은 만들 때부터 소유자 전용(0600)으로 쓴다."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / ("." + dest.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj))
+    os.replace(tmp, dest)
+
+
+def _pull_live_from_keychain():
+    """(맥) 열쇠꾸러미 값이 파일보다 나중 것이면 자격 파일을 그 값으로 복원한다.
+
+    실측(2026-08-15): 화면 세션의 클로드는 자격을 갱신하면 새 값을 열쇠꾸러미로 옮기고
+    **자격 파일을 지워버린다.** 그 상태에서 파일만 보고 되저장하면 갱신분이 유실되고,
+    그 계정으로 되돌아오는 순간 로그인이 풀린다(8/14 C·8/15 A 사망의 뿌리).
+    """
+    kc = read_keychain_value()
+    if not kc:
+        return None
+    try:
+        live = json.loads(LIVE.read_text(encoding="utf-8")) if LIVE.exists() else None
+    except Exception:
+        live = None
+    if live and _issued_at(live) >= _issued_at(kc):
+        return None
+    _write_owner_only(LIVE, kc)
+    return "열쇠꾸러미의 갱신분이 더 최신이라 자격 파일을 그 값으로 복원했습니다"
+
+
+def _rescue_keychain_value(new_src: Path):
+    """열쇠꾸러미를 덮어쓰기 직전, 들어 있는 값이 최신 유일본이면 주인 라벨에 되저장한다.
+
+    실사고(2026-08-15 A): 예약 전환이 열쇠꾸러미를 덮으면서 밤새 갱신된 A 값이 유실됐고,
+    A 저장본에는 폐기된 옛 열쇠만 남아 계정이 죽었다. 덮기 전에 반드시 건져 둔다.
+    """
+    kc = read_keychain_value()
+    if not kc:
+        return None
+    fp = _obj_fingerprint(kc)
+    if not fp or fp == _fingerprint(new_src):
+        return None
+    if LIVE.exists() and fp == _fingerprint(LIVE):
+        return None  # 파일과 같은 값이면 save_back(파일 경유)이 책임진다
+    for f in CREDS_DIR.glob("*.json"):
+        if _fingerprint(f) == fp:
+            return None  # 이미 라벨 저장본에 있다
+    # 주인 라벨을 서버에 물어본다(값은 0600 임시 파일로만 흐른다)
+    probe = CREDS_DIR / ".rescue-probe.json"
+    label = None
+    try:
+        _write_owner_only(probe, kc)
+        label = label_of_email(cred_email(probe))
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except Exception:
+            pass
+    if label and (CREDS_DIR / f"{label}.json").exists():
+        dest = CREDS_DIR / f"{label}.json"
+        try:
+            cur = json.loads(dest.read_text(encoding="utf-8"))
+        except Exception:
+            cur = None
+        if cur and _issued_at(cur) >= _issued_at(kc):
+            return None  # 저장본이 이미 더 나중 것이다
+        prev_dir = CREDS_DIR / "prev"
+        prev_dir.mkdir(exist_ok=True)
+        shutil.copy2(dest, prev_dir / dest.name)
+        _write_owner_only(dest, kc)
+        return f"덮어쓰기 전에 열쇠꾸러미의 '{label}' 갱신분을 저장본에 되저장했습니다"
+    rescued = CREDS_DIR / "rescued"
+    rescued.mkdir(exist_ok=True)
+    _write_owner_only(rescued / f"kc-{int(time.time())}.json", kc)
+    return "덮어쓰기 전 열쇠꾸러미 값의 주인을 몰라 creds/rescued/ 에 보관했습니다"
+
+
 def switch_keychain(src: Path) -> str:
     """맥 열쇠꾸러미 항목도 같은 값으로 덮어쓴다. 결과를 한 줄로 돌려준다.
 
@@ -240,6 +370,13 @@ def switch_keychain(src: Path) -> str:
     # 이름이 다를 때 항목이 하나 더 생기고, 클로드는 먼저 걸린 옛 항목을 계속 읽는다.
     # 그러면 "바꿨습니다"라고 말해 놓고 봇 자리는 안 바뀐 상태가 된다(코덱스 검수 2026-07-30).
     acct = keychain_account() or os.environ.get("USER") or "kwon"
+    # 덮어쓰기 전 되저장 — 들어 있는 값이 최신 유일본이면 먼저 건져 둔다(유실 방지).
+    try:
+        rescue = _rescue_keychain_value(src)
+        if rescue:
+            print(f"[keychain] {rescue}")
+    except Exception:
+        pass  # 되저장 실패가 전환 자체를 막으면 안 된다
     try:
         payload = src.read_bytes()
         cmd = 'add-generic-password -U -a "%s" -s "%s" -X "%s"\n' % (

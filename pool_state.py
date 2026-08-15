@@ -470,16 +470,44 @@ def note_auth_reject(state: dict, label: str | None, now: float | None = None,
 
 
 def clear_auth_reject(state: dict, label: str | None = None) -> dict:
-    """거절 기록을 지운다. 라벨을 안 주면 전부."""
+    """거절 기록을 지운다. 라벨을 안 주면 전부. 강제 교체 누적도 같이 지운다(성공=회복)."""
     box = state.get("auth_rejects")
     if not isinstance(box, dict):
         state["auth_rejects"] = {}
-        return state
-    if label is None:
+    elif label is None:
         state["auth_rejects"] = {}
     else:
         box.pop(str(label), None)
+    forced = state.get("forced_rotates")
+    if isinstance(forced, dict):
+        if label is None:
+            state["forced_rotates"] = {}
+        else:
+            forced.pop(str(label), None)
     return state
+
+
+def note_forced_rotate(state: dict, label: str | None, now: float | None = None,
+                       window: float = 24 * 3600) -> int:
+    """로그인 거절로 강제 교체된 횟수를 계정별로 센다(창 안 누적, 이번 포함).
+
+    1회는 일시 문제(자격 자리 어긋남 등)로 되비추기가 스스로 고칠 수 있어 짧게 쉬게만 하고,
+    같은 계정이 창 안에서 또 걸리면 저장본이 진짜 죽은 것으로 보고 격리한다(호출부 판단).
+    성공하면 clear_auth_reject 가 같이 지운다. 잠금 안에서 부를 것 — 상태를 바꾼다.
+    """
+    if not label:
+        return 0
+    now = time.time() if now is None else now
+    box = state.get("forced_rotates")
+    if not isinstance(box, dict):
+        box = {}
+        state["forced_rotates"] = box
+    rec = box.get(str(label))
+    times = [t for t in rec if isinstance(t, (int, float)) and now - t < window] \
+        if isinstance(rec, list) else []
+    times.append(now)
+    box[str(label)] = times[-10:]
+    return len(times)
 
 
 def auth_reject_count(state: dict, label: str | None, now: float | None = None,
