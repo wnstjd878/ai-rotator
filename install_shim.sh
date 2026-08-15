@@ -17,6 +17,15 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHIM="$DIR/claude_shim.sh"
 ORIGINAL="$DIR/.original_claude_link"   # 설치 전 연결 대상을 적어둔다(되돌리기용)
 
+# nvm 로 깐 node 폴더에도 claude 심링크가 따로 있다. 봇·게이트가 빌드용으로 nvm 을 로드하면
+# nvm 의 bin 이 PATH 맨 앞에 와서 이 claude 가 /opt/homebrew/bin/claude(순환 가로채기)를 가려버린다.
+# 그러면 순환기를 건너뛰고 진짜 claude 를 바로 불러 한 계정만 쓰다 한도에 걸린다
+# (codex 에서 같은 사고 실측, 2026-08-15). 그래서 이 경로들도 같이 가로채기로 덮는다.
+NVM_TARGET="../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+nvm_claude_links() {
+  ls -d "$HOME"/.nvm/versions/node/*/bin/claude 2>/dev/null || true
+}
+
 status() {
   if [ -L "$LINK" ]; then
     echo "지금 연결: $(readlink "$LINK")"
@@ -31,6 +40,13 @@ status() {
   else
     echo "상태: 원래 claude (가로채기 없음)"
   fi
+  for l in $(nvm_claude_links); do
+    if [ "$(readlink "$l" 2>/dev/null || true)" = "$SHIM" ]; then
+      echo "nvm claude: 가로채기 덮임 ($l)"
+    else
+      echo "nvm claude: 안 덮임 — nvm 로드 환경에서 순환기를 건너뛸 수 있음 ($l)"
+    fi
+  done
 }
 
 uninstall() {
@@ -43,6 +59,10 @@ uninstall() {
     target="../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
   fi
   ln -sfn "$target" "$LINK"
+  # nvm 쪽 claude 도 표준 대상으로 복구한다.
+  for l in $(nvm_claude_links); do
+    [ "$(readlink "$l" 2>/dev/null || true)" = "$SHIM" ] && ln -sfn "$NVM_TARGET" "$l"
+  done
   if ! "$LINK" --version >/dev/null 2>&1; then
     echo "되돌린 뒤 claude 가 실행되지 않습니다. 연결 대상을 확인하세요: $target" >&2
     status
@@ -79,6 +99,10 @@ EOF
   fi
 
   ln -sfn "$SHIM" "$LINK"
+  # nvm 폴더의 claude 도 가로채기로 덮는다 (nvm 로드 환경에서도 순환기를 타게).
+  for l in $(nvm_claude_links); do
+    ln -sfn "$SHIM" "$l"
+  done
   if ! "$LINK" --version >/dev/null 2>&1; then
     echo "설치 후 claude 실행에 실패해 되돌립니다." >&2
     uninstall

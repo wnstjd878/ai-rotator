@@ -201,7 +201,45 @@ def refresh_order() -> int:
     return 0
 
 
+def _ensure_shims() -> None:
+    """순환 가로채기가 제자리에 있는지 확인하고, 벗겨졌으면 다시 깐다 (2026-08-15).
+
+    codex/claude 를 npm 으로 업데이트하면 실행 파일 링크가 순환 가로채기에서 원래 것으로
+    돌아가, 자동 호출이 한 계정만 쓰다 한도에 걸린다. 실제로 배포 검수 게이트가 nvm 을
+    로드하면서 nvm 폴더의 codex 가 가로채기를 가려 jangsa-mkt 배포가 막혔다.
+    이 검사는 homebrew·nvm 양쪽 링크가 다 가로채기를 가리키는지 보고, 하나라도 벗겨졌으면
+    해당 설치 스크립트를 다시 돌린다. 어떤 문제가 생겨도 알림 작업을 멈추지 않는다(try 안).
+    """
+    import glob
+    import os
+    import subprocess
+
+    tools = [
+        (BASE / "codex_shim.sh", "/opt/homebrew/bin/codex",
+         os.path.expanduser("~/.nvm/versions/node/*/bin/codex"),
+         BASE / "install_codex_shim.sh"),
+        (BASE / "claude_shim.sh", "/opt/homebrew/bin/claude",
+         os.path.expanduser("~/.nvm/versions/node/*/bin/claude"),
+         BASE / "install_shim.sh"),
+    ]
+    for shim, brew_link, nvm_glob, installer in tools:
+        try:
+            if not shim.exists() or not installer.exists():
+                continue
+            links = ([brew_link] if os.path.lexists(brew_link) else []) + glob.glob(nvm_glob)
+            if not links:
+                continue
+            covered = all(os.path.realpath(l) == os.path.realpath(str(shim)) for l in links)
+            if covered:
+                continue
+            print(f"[shim-guard] {installer.name}: 가로채기가 벗겨져 다시 설치한다")
+            subprocess.run(["bash", str(installer)], capture_output=True, text=True, timeout=60)
+        except Exception as e:
+            print(f"[shim-guard] {installer.name} 재설치 실패(무시): {type(e).__name__}")
+
+
 def main() -> int:
+    _ensure_shims()
     if "--refresh-order" in sys.argv:
         return refresh_order()
     preview = "--preview" in sys.argv
