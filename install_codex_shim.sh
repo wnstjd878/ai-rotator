@@ -18,6 +18,16 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHIM="$DIR/codex_shim.sh"
 ORIGINAL="$DIR/.original_codex_link"   # 설치 전 연결 대상을 적어둔다(되돌리기용)
 
+# nvm 로 깐 node 폴더에도 codex 심링크가 따로 있다. 배포 검수 게이트(verify_then_codex_review.sh)
+# 는 빌드용으로 nvm 을 로드하는데, 그러면 nvm 의 bin 이 PATH 맨 앞에 와서 이 codex 가
+# /opt/homebrew/bin/codex(순환 래퍼)를 가려버린다. 그 결과 게이트가 순환기를 건너뛰고 진짜
+# codex 를 바로 불러 한 계정만 쓰다 한도에 걸렸다(2026-08-15 실측, jangsa-mkt 배포 동결).
+# 그래서 이 경로들도 같이 래퍼로 덮는다. 되돌릴 때는 표준 node_modules 대상으로 복구한다.
+NVM_TARGET="../lib/node_modules/@openai/codex/bin/codex.js"
+nvm_codex_links() {
+  ls -d "$HOME"/.nvm/versions/node/*/bin/codex 2>/dev/null || true
+}
+
 find_real() {
   for c in /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js \
            /usr/local/lib/node_modules/@openai/codex/bin/codex.js; do
@@ -40,6 +50,13 @@ status() {
   else
     echo "상태: 원래 codex (가로채기 없음)"
   fi
+  for l in $(nvm_codex_links); do
+    if [ "$(readlink "$l" 2>/dev/null || true)" = "$SHIM" ]; then
+      echo "nvm codex: 래퍼 덮임 ($l)"
+    else
+      echo "nvm codex: 안 덮임 — 게이트가 순환기를 건너뛸 수 있음 ($l)"
+    fi
+  done
 }
 
 uninstall() {
@@ -49,6 +66,10 @@ uninstall() {
     target="../lib/node_modules/@openai/codex/bin/codex.js"
   fi
   ln -sfn "$target" "$LINK"
+  # nvm 쪽 codex 도 표준 대상으로 복구한다.
+  for l in $(nvm_codex_links); do
+    [ "$(readlink "$l" 2>/dev/null || true)" = "$SHIM" ] && ln -sfn "$NVM_TARGET" "$l"
+  done
   if ! "$LINK" --version >/dev/null 2>&1; then
     echo "되돌린 뒤 codex 가 실행되지 않습니다. 연결 대상을 확인하세요: $target" >&2
     status
@@ -80,6 +101,10 @@ EOF
   fi
 
   ln -sfn "$SHIM" "$LINK"
+  # nvm 폴더의 codex 도 래퍼로 덮는다 (게이트가 nvm 을 로드해도 순환기를 타게).
+  for l in $(nvm_codex_links); do
+    ln -sfn "$SHIM" "$l"
+  done
   if ! "$LINK" --version >/dev/null 2>&1; then
     echo "설치 후 codex 실행에 실패해 되돌립니다." >&2
     uninstall
