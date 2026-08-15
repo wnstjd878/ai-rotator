@@ -26,9 +26,11 @@
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 try:  # Windows 콘솔·파이프에서 한글 출력이 깨지지 않게
