@@ -219,7 +219,7 @@ def save_back(leaving) -> str:
         leaving = actual
         dest = CREDS_DIR / f"{leaving}.json"
         if not dest.exists() or live_fp == _fingerprint(dest):
-            return _done(f"{note} — 이미 최신이라 되저장 불필요")
+            return _done(f"{note}. 이미 최신이라 되저장 불필요")
     else:
         note = None
 
@@ -237,7 +237,7 @@ def save_back(leaving) -> str:
     shutil.copy2(dest, prev_dir / f"{leaving}.json")
     shutil.copy2(LIVE, dest)
     done = f"'{leaving}' 의 갱신된 자격을 되저장했습니다"
-    return _done(f"{note} — {done}" if note else done)
+    return _done(f"{note}. {done}" if note else done)
 
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
