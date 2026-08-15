@@ -409,7 +409,9 @@ def switch_file(src: Path, leaving=None, label=None) -> bool:
     print(f"[save-back] {save_back(leaving)}")
     if LIVE.exists():
         shutil.copy2(LIVE, LIVE.with_suffix(".json.bak"))  # 되돌리기용 백업
-    shutil.copy2(src, LIVE)
+    # 열쇠꾸러미를 먼저 처리한다. 덮어쓰기 전 되저장(_rescue_keychain_value)이 갈아탈 라벨의
+    # 저장본(src)을 더 새 값으로 갱신할 수 있는데, 파일을 먼저 깔면 그 갱신 전 값이
+    # 자격 파일에 남아 다음 호출이 거절받는다. 열쇠꾸러미 다음에 src 를 읽어야 최신이 깔린다.
     if sys.platform == "darwin":
         note = switch_keychain(src)
         print(f"[keychain] {note}")
@@ -420,6 +422,7 @@ def switch_file(src: Path, leaving=None, label=None) -> bool:
                 PENDING.unlink(missing_ok=True)
             except Exception:
                 pass
+    shutil.copy2(src, LIVE)
     return True
 
 
