@@ -61,6 +61,7 @@ AUTH_FAIL_WINDOW = 10 * 60      # 이 시간 안에 서로 다른 계정이 거�
 AUTH_REJECT_LIMIT = 3           # 강제 교체에 필요한 최소 거절 횟수(이 횟수 + 아래 시간 둘 다)
 AUTH_REJECT_STUCK = 3 * 60      # 같은 계정이 이 시간을 넘겨 계속 거절받으면 판정을 믿지 말고 갈아탄다
 FORCED_ROTATE_COOLDOWN = 5 * 60  # 그렇게 강제로 넘길 때 그 계정을 쉬게 할 시간(초)
+BARRED_COOLDOWN = 24 * 3600     # 조직 설정 차단(barred) 계정을 쉬게 할 시간. 관리자가 다시 켤 수 있어 하루 뒤 재확인
 KEYCHAIN_FIX_COOLDOWN = 60 * 60  # 열쇠꾸러미를 스스로 지운 뒤, 다시 지우기까지 두는 시간
 KEYCHAIN_STAMP = BASE / ".keychain-cleared"  # 마지막으로 스스로 지운 시각
 CLAUDE_BINS = (
@@ -1019,6 +1020,16 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 else:
                     st.mark_blocked(state, used_label, until, limit_detect.short_reason(out, err))
                     log(f"'{used_label}' 한도 도달. {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
+            elif verdict == "barred":
+                # 조직 설정이 Claude Code 구독 접근을 껐다(403). 자격은 멀쩡해서 재로그인·격리는
+                # 소용없고 갈아타면 바로 풀린다. dead 경로로 보내면 저장본 생존 확인이
+                # "살아 있으니 그대로 재시도"로 눌러앉는다(2026-08-18 실사고: C 계정이 이 상태인데
+                # 'error' 분류로 갈아타지 않고 재시도 58번, 마케팅위키 답변 30분 전패).
+                st.mark_blocked(state, used_label, time.time() + BARRED_COOLDOWN,
+                                "조직이 Claude Code 구독 접근 차단(403)")
+                log(f"'{used_label}' 은(는) 조직 설정으로 Claude Code 구독 접근이 꺼져 있습니다. "
+                    f"{BARRED_COOLDOWN // 3600}시간 재우고 다음 계정으로 넘깁니다. "
+                    f"계속 쓰려면 claude.ai 에서 그 계정의 조직 설정을 확인하세요.")
             else:  # dead(로그인 거절) 또는 갈아끼운 저장본이 상한 auth
                 # 같은 계정이 짧은 시간에 거듭 거절받으면 아래 우회 갈래를 더 믿지 않는다.
                 # 저장본 조회가 되고 재발급 열쇠 날짜가 남아 있어도 실제 갱신은 거부될 수 있다
@@ -1282,7 +1293,7 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
             time.sleep(2)
             continue
 
-        # limit, 또는 갈아끼운 저장본이 상한 auth → 계정 교체 후 재시도
+        # limit·barred, 또는 갈아끼운 저장본이 상한 auth → 계정 교체 후 재시도
         try:
             nxt = _rotate_after_failure(used_label, verdict, proc.stdout, proc.stderr,
                                         bucket=bucket)

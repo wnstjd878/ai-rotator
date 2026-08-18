@@ -4,7 +4,7 @@
       한도가 언제 풀리는지(해제 시각)를 문구에서 뽑아낸다.
       claude_pool.py 가 계정을 바꿀지 말지 결정하는 근거로 쓴다.
 입력: 종료 코드 + 표준출력/오류출력 문자열
-출력: classify() → "ok" | "limit" | "auth" | "error"
+출력: classify() → "ok" | "limit" | "barred" | "dead" | "auth" | "error"
       reset_epoch() → 한도 해제 시각(epoch 초). 못 읽으면 기본값(5시간 뒤).
 오판을 막는 두 겹:
       (1) 실패인지 판정할 때 claude 자신의 결과 껍데기(type=="result")만 인정한다.
@@ -79,6 +79,15 @@ DEAD_PATTERNS = [
     r"refresh token (is )?(invalid|expired|revoked)",
 ]
 
+# 계정이 서비스 쪽 설정으로 차단된 경우(자격은 멀쩡). 재로그인·격리는 소용없고
+# 갈아타면 바로 풀린다. dead 와 갈라야 한다 — dead 경로는 저장본 생존을 확인하고
+# "살아 있으니 그대로 재시도"로 눌러앉는데, 이 상태는 저장본이 살아 있어도 호출이
+# 전부 거절된다(2026-08-18 실사고: C 계정이 이 403 인데 'error' 로 분류돼 갈아타지
+# 않고 재시도만 58번, 마케팅위키 답변 30분 전패).
+BARRED_PATTERNS = [
+    r"organization has disabled\s+claude\s+subscription access",
+]
+
 # 계정을 바꿔도 안 풀리는 "한도" 들. 판정 전에 본문에서 지운다.
 # claude 실행 파일 안에 실제로 들어 있는 표기들이며, 그냥 두면 프롬프트가 길거나
 # 예산 상한에 걸렸을 때 멀쩡한 계정을 줄줄이 막아버린다.
@@ -102,6 +111,7 @@ IGNORE_PATTERNS = [
 _LIMIT_RE = [re.compile(p, re.I) for p in LIMIT_PATTERNS]
 _AUTH_RE = [re.compile(p, re.I) for p in AUTH_PATTERNS]
 _DEAD_RE = [re.compile(p, re.I) for p in DEAD_PATTERNS]
+_BARRED_RE = [re.compile(p, re.I) for p in BARRED_PATTERNS]
 _IGNORE_RE = re.compile("|".join(IGNORE_PATTERNS), re.I)
 
 
@@ -195,8 +205,9 @@ def strip_ignored(text: str) -> str:
 
 
 def classify(returncode: int, stdout: str = "", stderr: str = "") -> str:
-    """호출 결과를 ok / limit / dead / auth / error 중 하나로 판정.
+    """호출 결과를 ok / limit / barred / dead / auth / error 중 하나로 판정.
 
+    barred = 계정이 조직 설정으로 차단됨(자격은 멀쩡, 갈아타면 풀린다, 재로그인 무용)
     dead = 그 계정 저장본이 죽음(갈아타면 풀린다)
     auth = 로그인 자체가 안 된 상태(갈아타도 소용없다)
     """
@@ -204,6 +215,11 @@ def classify(returncode: int, stdout: str = "", stderr: str = "") -> str:
         return "ok"
 
     text = failure_text(stdout, stderr)
+    # 조직 차단을 가장 먼저 본다. 문구가 좁아 오판 여지가 없고, dead/auth 로 흘리면
+    # 저장본 생존 확인 경로가 "살아 있으니 재시도"로 눌러앉는다.
+    for rx in _BARRED_RE:
+        if rx.search(text):
+            return "barred"
     # 죽은 저장본을 먼저 본다. auth 보다 좁고 뜻이 분명하다.
     for rx in _DEAD_RE:
         if rx.search(text):
@@ -309,7 +325,7 @@ def reset_epoch(stdout: str = "", stderr: str = "", now: float | None = None) ->
 def short_reason(stdout: str = "", stderr: str = "", limit: int = 160) -> str:
     """기록용 사유 한 줄. 자격정보가 섞이지 않도록 길이를 자른다."""
     text = failure_text(stdout, stderr).strip().replace("\n", " ")
-    for rx in _LIMIT_RE + _AUTH_RE:
+    for rx in _BARRED_RE + _LIMIT_RE + _AUTH_RE:
         m = rx.search(text)
         if m:
             start = max(0, m.start() - 40)

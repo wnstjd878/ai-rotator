@@ -1815,6 +1815,37 @@ def case_keychain_pull_and_rescue(tmp):
         sw.cred_email, sw.label_of_email = real_email, real_label
 
 
+def case_barred(tmp):
+    """[42] 조직 차단(403)이면 그 계정을 하루 재우고 다음 계정으로 갈아탄다.
+
+    2026-08-18 실사고: C 계정이 "Your organization has disabled Claude subscription
+    access for Claude Code" 403 을 받는데 'error'(한도 무관)로 분류돼 갈아타지 않고
+    같은 계정으로 재시도만 58번, 마케팅위키 답변이 30분 전패했다. 자격은 멀쩡한
+    상태라 dead 경로(저장본 생존 확인 → 눌러앉기)로도 못 다룬다.
+    """
+    print("\n[42] 조직 차단(403)은 하루 재우고 갈아탄다")
+    setup(tmp, ["A", "B"], "A")
+    barred_out = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "api_error_status": 403,
+        "result": ("Your organization has disabled Claude subscription access for "
+                   "Claude Code · Use an Anthropic API key instead, or ask your "
+                   "admin to enable access"),
+    }, ensure_ascii=False)
+    fake = Fake({"A": (1, barred_out, ""), "B": (0, OK_OUT, "")})
+    install(fake)
+    check("판정이 barred", limit_detect.classify(1, barred_out, "") == "barred")
+    proc = claude_pool.run(["claude", "-p", "안녕"])
+    check("갈아탄 뒤 성공", proc.returncode == 0)
+    check("B 로 교체됨", fake.switches == ["B"], f"switches={fake.switches}")
+    state = st.load_state()
+    check("A 가 막힘", "A" in state["blocked"], f"{state['blocked']}")
+    left = float(state["blocked"]["A"]) - time.time()
+    check("하루 안팎 재움", 20 * 3600 < left <= 25 * 3600, f"left={left / 3600:.1f}h")
+    check("저장본 격리 안 함(자격은 멀쩡)",
+          (Path(tmp) / "creds" / "A.json").exists())
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1839,7 +1870,7 @@ def main():
                      case_stuck_on_dead_account, case_model_scoped_limit,
                      case_scoped_no_reclaim, case_scoped_shared,
                      case_dead_quarantine, case_dead_alert_folded,
-                     case_keychain_pull_and_rescue):
+                     case_keychain_pull_and_rescue, case_barred):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
