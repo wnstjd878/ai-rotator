@@ -543,6 +543,16 @@ def finish_common(p, code, label, before):
         restore_previous(before, keep)
         return 1
     print(f"[relogin] '{label}' 재로그인 완료.")
+    if before == label:
+        # 지금 쓰던 계정을 그 자리에서 갱신한 경우. 여기서 keep(시작 때 떠둔 옛 자격)으로
+        # 되돌리면 방금 받은 새 자격을 활성 자리와 저장본 양쪽에서 옛것으로 도로 덮는다 —
+        # B 를 세 번 갱신해도 만료가 7일대 그대로였던 원인(2026-08-18 실측). 새 자격이
+        # 이미 활성 자리와 저장본에 있으므로 되돌릴 것 없이 떠둔 파일만 지운다.
+        # 실패 경로들(로그인 미완/라벨 불일치/저장 실패)은 되돌리는 게 맞아 그대로 둔다.
+        if keep:
+            Path(keep).unlink(missing_ok=True)
+        print(f"[relogin] '{label}' 을(를) 쓰던 중이라 되돌리기 없이 새 자격을 그대로 씁니다.")
+        return 0
     restore_previous(before, keep)
     return 0
 
