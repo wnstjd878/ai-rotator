@@ -42,17 +42,25 @@ def audit():
     try:
         accounts = json.loads((BASE / "accounts.json").read_text(encoding="utf-8"))
         labels = [x["label"] for x in accounts if x.get("label")]
+        # 구독을 해지해 일부러 뺀 계정(accounts.json 의 "retired": true).
+        # 점검 대상에서 통째로 제외한다 — 안 그러면 저장본 없음이 dead 로 집계돼
+        # 아침 점검이 매일 "죽음 C, relogin 필요" 를 보낸다(2026-08-18 C 해지).
+        # 재구독하면 retired 를 지우고 save_account.py 로 저장하면 점검이 되살아난다.
+        retired = [x["label"] for x in accounts if x.get("label") and x.get("retired")]
     except Exception:
         labels = sorted(f.stem for f in sa.CREDS_DIR.glob("*.json"))
+        retired = []
 
     out = {"labels": {}, "dead": [], "wrong": [], "soon": [], "unknown": [],
-           "odd": [], "current": None}
+           "odd": [], "retired": retired, "current": None}
     try:
         out["current"] = sa.live_label()
     except Exception:
         pass
 
     for label in labels:
+        if label in retired:
+            continue  # 해지 계정은 labels 결과에도 안 넣는다(아침 봇의 "정상 N개" 계산 오염 방지)
         f = sa.CREDS_DIR / f"{label}.json"
         info = {"state": "ok", "days": None, "actual": None}
         if not f.exists():
@@ -130,6 +138,8 @@ def main():
             print(f"  {label}: 정상(지금은 사용량만 조회 불가, 출입증 8시간 만료){days}")
         else:
             print(f"  {label}: 자격 죽음(조회 실패, 재발급 열쇠도 만료){days}")
+    for label in r.get("retired") or []:
+        print(f"  {label}: 제외(해지 계정, 점검 안 함)")
     print("판정:", "확인 필요" if r["bad"] else "전부 정상")
     return 0
 
