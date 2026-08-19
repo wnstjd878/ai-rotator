@@ -228,7 +228,10 @@ def status_text() -> str:
     shared = _shared_usage()   # 다른 머신이 자기 계정에서 읽어 올린 값
     holders = _shared_current() or {}  # 어느 머신이 어느 계정에 물려 있는지
     seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
+    hidden = set(st.retired_labels())  # 구독 해지 계정은 목록에서 뺀다(현재 계정이면 예외로 보여줌)
     for label in st.account_labels():
+        if label in hidden and label != cur:
+            continue
         marks = []
         who = holders.get(label) or []
         if label == cur:

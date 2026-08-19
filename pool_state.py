@@ -196,6 +196,15 @@ def account_labels() -> list[str]:
     return [str(a["label"]).strip() for a in load_accounts()]
 
 
+def retired_labels() -> list[str]:
+    """구독을 해지해 일부러 뺀 계정(accounts.json 의 "retired": true).
+
+    creds_audit 는 점검에서 빼고, status_text 는 목록 표시에서 뺀다.
+    재구독하면 retired 를 지우고 save_account.py 로 저장해 되살린다.
+    """
+    return [str(a["label"]).strip() for a in load_accounts() if a.get("retired")]
+
+
 SAVED_LABELS_FN = None  # 제공자가 "쓸 수 있는 계정"을 다르게 판단할 때 끼우는 자리
 
 
