@@ -35,7 +35,8 @@ while true; do
   # 켜기 직전 계정별 사용량을 화면에 먼저 보여준다. claude 안에서는 이 값을 볼 수 없다.
   echo ""
   echo "[계정 사용량]"
-  "$PY" "$POOL" --status
+  # 여기도 인자를 넘긴다 — 쓰려는 모델 칸이 전 계정에서 바닥이면 그 한 줄을 같이 찍는다.
+  "$PY" "$POOL" --status "${run_args[@]}"
   echo ""
 
   "$CLAUDE_BIN" "${run_args[@]}"

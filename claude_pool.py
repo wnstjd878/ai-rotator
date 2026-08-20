@@ -62,6 +62,7 @@ AUTH_REJECT_LIMIT = 3           # 강제 교체에 필요한 최소 거절 횟�
 AUTH_REJECT_STUCK = 3 * 60      # 같은 계정이 이 시간을 넘겨 계속 거절받으면 판정을 믿지 말고 갈아탄다
 FORCED_ROTATE_COOLDOWN = 5 * 60  # 그렇게 강제로 넘길 때 그 계정을 쉬게 할 시간(초)
 BARRED_COOLDOWN = 24 * 3600     # 조직 설정 차단(barred) 계정을 쉬게 할 시간. 관리자가 다시 켤 수 있어 하루 뒤 재확인
+SCOPED_LOW_LEFT = 5.0           # 모델 칸이 이만큼 이하로 남으면 바닥으로 본다(which_limit 의 95% 와 같은 선)
 KEYCHAIN_FIX_COOLDOWN = 60 * 60  # 열쇠꾸러미를 스스로 지운 뒤, 다시 지우기까지 두는 시간
 KEYCHAIN_STAMP = BASE / ".keychain-cleared"  # 마지막으로 스스로 지운 시각
 CLAUDE_BINS = (
@@ -1368,7 +1369,8 @@ def main():
         print(__doc__.strip())
         return 0
     if argv[0] == "--status":
-        print(status_text())
+        # 뒤에 붙은 인자(`--model ...`)까지 본다. 안 주면 settings.json 고정값을 쓴다.
+        print(status_text(intended_model(argv[1:])))
         return 0
     if argv[0] == "--next":
         return next_account(model=intended_model(argv[1:]))

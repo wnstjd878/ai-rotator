@@ -1902,6 +1902,45 @@ def case_scoped_usage_shared():
     check("칸 없는 옛 기록은 그냥 안 적는다", "Fable" not in line, line)
 
 
+def case_scoped_all_empty_notice():
+    """[44] 쓰려는 모델 칸이 전 계정에서 바닥이면 켤 때 한 줄로 먼저 알린다.
+
+    2026-08-20 사용자 요청: 지금은 계정을 하나씩 건너뛰다 마지막 계정에서야
+    '전 계정 한도' 를 알게 된다. 표시 전용이고 계정을 막지는 않는다.
+    """
+    print("\n[44] 전 계정 모델 칸 소진은 켤 때 한 줄로 알린다")
+    import usage_view
+    now = time.time()
+    soon_reset, late_reset = now + 3600, now + 7200
+
+    line = claude_pool._scoped_notice(
+        "Fable", [("A", 0.0, late_reset), ("B", 0.0, soon_reset), ("D", 2.0, None)], now)
+    check("전부 바닥이면 알린다", bool(line) and "전부 바닥" in line, line)
+    check("계정이 다 적힌다", "A, B, D" in (line or ""), line)
+    check("가장 빨리 풀리는 계정을 짚는다", "가장 빨리 풀리는 건 B" in (line or ""), line)
+
+    check("한 계정이라도 여유면 안 알린다",
+          claude_pool._scoped_notice(
+              "Fable", [("A", 0.0, soon_reset), ("B", 40.0, soon_reset)], now) is None)
+    check("근거가 하나도 없으면 안 알린다",
+          claude_pool._scoped_notice("Fable", [("A", None, None)], now) is None)
+
+    mixed = claude_pool._scoped_notice(
+        "Fable", [("A", 0.0, soon_reset), ("C", None, None)], now)
+    check("모르는 계정은 바닥으로 안 세고 따로 적는다",
+          bool(mixed) and "잔량 모르는 계정: C" in mixed, mixed)
+
+    # 잔량 뽑기 규칙: 초기화 시각이 지난 기록은 그 칸이 다시 채워졌다는 뜻이다.
+    passed = {"scoped": {"Fable": {"pct": 100.0, "reset": now - 10}}}
+    check("초기화 지난 칸은 남은 100%",
+          usage_view.scoped_left(passed, "Fable", now)[0] == 100.0)
+    live = {"scoped": {"Fable": {"pct": 100.0, "reset": now + 10}}}
+    check("아직 안 풀린 칸은 남은 0%",
+          usage_view.scoped_left(live, "Fable", now)[0] == 0.0)
+    check("칸 정보가 없으면 모름(0% 아님)",
+          usage_view.scoped_left({}, "Fable", now) == (None, None))
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1932,6 +1971,7 @@ def main():
         case_shared_iso_roundtrip()
         case_meta_cleanup()
         case_scoped_usage_shared()
+        case_scoped_all_empty_notice()
         case_shim_prompt_argument()
     finally:
         claude_pool.subprocess.run = real_run

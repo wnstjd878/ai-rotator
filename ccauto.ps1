@@ -18,7 +18,8 @@ while ($true) {
     # claude 안에서는 이 값을 볼 수 없어서, 감싸는 코드가 뜨기 전에 찍는 자리가 유일하다.
     Write-Host ""
     Write-Host "[계정 사용량]" -ForegroundColor Cyan
-    python $POOL --status
+    # 여기도 인자를 넘긴다 — 쓰려는 모델 칸이 전 계정에서 바닥이면 그 한 줄을 같이 찍는다.
+    python $POOL --status @runArgs
     Write-Host ""
     claude @runArgs
 
