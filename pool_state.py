@@ -283,6 +283,16 @@ def is_scoped_blocked(state: dict, label: str, bucket: str | None,
     return bool(until and until > now)
 
 
+def scoped_blocked_buckets(state: dict, label: str, now: float | None = None) -> set:
+    """그 계정에서 지금 막혀 있는 모델 칸 이름들. 없으면 빈 집합.
+
+    알림 문구가 '다른 모델로 켜면 된다' 고 단정하기 전에 확인하는 데 쓴다.
+    """
+    now = time.time() if now is None else now
+    box = _clean_scoped(state.get("scoped_blocked")).get(str(label)) or {}
+    return {name for name, until in box.items() if until > now}
+
+
 def load_state() -> dict:
     """상태 파일을 읽는다. 없거나 깨졌으면 기본값으로 시작한다(예외를 올리지 않는다)."""
     if not STATE_FILE.exists():
@@ -370,8 +380,12 @@ def prune_blocked(state: dict, now: float | None = None) -> dict:
                     scoped.setdefault(label, {})[name] = \
                         max(float(prev), float(until)) if prev else float(until)
     state["scoped_blocked"] = scoped
-    if not blocked:
-        state["notified_for"] = None  # 하나라도 풀렸으면 다음 소진 때 다시 알린다
+    if not blocked and not scoped:
+        # 계정 막힘도 칸 막힘도 다 풀렸을 때만 지운다. 칸만 막힌 소진은 blocked 가
+        # 늘 비어 있어서, 예전 조건이면 표시가 매번 지워져 같은 알림이 봇 호출마다
+        # 나갔다(2026-08-20 코덱스 지적, 재현됨. 공유가 켜져 있으면 공유 쪽
+        # claim_notify 가 막아줘서 실전에서는 안 터졌다).
+        state["notified_for"] = None
     return state
 
 
@@ -754,7 +768,11 @@ def earliest_reset(state: dict, bucket: str | None = None) -> float | None:
         return min(vals) if vals else None
 
     scoped = _clean_scoped(state.get("scoped_blocked"))
-    usable = set(saved_labels()) - set(retired_labels())
+    # 후보 기준은 실제로 계정을 고르는 pick_next 와 **똑같아야 한다**. 여기서만
+    # 구독 해지(retired) 를 빼면, 그 계정이 먼저 풀릴 때 pick_next 는 그 계정을
+    # 고르는데 알림은 다른 계정 시각을 말하는 어긋남이 생긴다(2026-08-20 코덱스 지적,
+    # 재현됨). 해지 계정은 저장본을 creds/dead/ 로 옮겨 saved_labels 에서 빠진다.
+    usable = set(saved_labels())
     times = []
     for label in account_labels():
         if label not in usable:
