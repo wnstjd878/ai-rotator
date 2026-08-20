@@ -265,16 +265,17 @@ def _exhausted_message(state: dict, bucket: str | None, when: str,
             saved = set(st.saved_labels())
             free = [l for l in st.account_labels()
                     if l in saved and not st.is_blocked(state, l)]
-            # 그 계정의 **다른 칸까지** 막혀 있으면 다른 모델을 쓸 수 있다고 단정하지
-            # 않는다. 확인한 것은 '계정 단위 한도는 아니다' 까지다(2026-08-20
-            # 코덱스 지적, 재현됨).
-            openable = [l for l in free
-                        if not (st.scoped_blocked_buckets(state, l) - {bucket})]
+            # 다른 칸도 막혀 있으면 그 사실을 덧붙인다. 다만 '다른 모델은 안 된다' 로
+            # 말하지는 않는다 — 기록에 없는 칸(Sonnet 등)은 안 막힌 것이고 그 모델로는
+            # 지금도 쓸 수 있다(2026-08-20 코덱스 재검수 지적, 재현됨).
+            others = sorted(set().union(
+                *(st.scoped_blocked_buckets(state, l) for l in free)) - {bucket})
         except Exception:
-            free, openable = [], []
+            free, others = [], []
         if free:
-            tail = ("다른 모델로 켜면 지금도 쓸 수 있습니다." if openable
-                    else "계정 단위 한도는 아니지만 다른 모델 칸도 막혀 있습니다.")
+            tail = "다른 모델로 켜면 지금도 쓸 수 있습니다."
+            if others:
+                tail += " 다만 " + ", ".join(others) + " 칸도 바닥이라 그 모델은 빼야 합니다."
             return (f"{lead}{bucket} 칸이 계정 전부 바닥입니다(계정 주간은 여유 있음). "
                     f"{tail} "
                     f"{bucket} 칸이 가장 빨리 풀리는 시각: {when}")

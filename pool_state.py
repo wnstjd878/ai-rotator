@@ -225,6 +225,20 @@ def saved_labels() -> list[str]:
     return sorted(f.stem for f in CREDS_DIR.glob("*.json") if f.stat().st_size > 0)
 
 
+def usable_labels() -> list[str]:
+    """지금 순환에 넣을 수 있는 계정. 저장본이 있고 구독을 해지하지 않은 것.
+
+    **고르는 함수(pick_next/better_candidate)와 알리는 함수(earliest_reset)가 같은
+    기준을 써야 한다.** 한쪽만 바꾸면 알림이 말한 계정과 실제로 고르는 계정이 어긋난다
+    (2026-08-20 코덱스 검수에서 두 번 지적, 둘 다 재현됨). 그래서 기준을 여기 한 벌만 둔다.
+    구독 해지(retired) 계정은 골라 봐야 거절만 받는다. 재구독하면 accounts.json 의
+    retired 를 지우고 save_account.py 로 저장해 되살린다.
+    """
+    saved = set(saved_labels())
+    retired = set(retired_labels())
+    return [l for l in account_labels() if l in saved and l not in retired]
+
+
 def _blank_state() -> dict:
     return {"current": None, "blocked": {}, "switched_at": None, "history": [],
             "notified_for": None, "notified_at": None,
@@ -668,9 +682,8 @@ def pick_next(state: dict, exclude: str | None = None, now: float | None = None,
     공유 저장소가 켜져 있으면(prune_blocked 가 병합) 세 머신이 같은 막힘을 보고 같은 계정을 고른다.
     """
     now = time.time() if now is None else now
-    saved = set(saved_labels())
-    candidates = [l for l in account_labels()
-                  if l != exclude and l in saved and not is_blocked(state, label=l, now=now)
+    candidates = [l for l in usable_labels()
+                  if l != exclude and not is_blocked(state, label=l, now=now)
                   and not is_scoped_blocked(state, l, bucket, now)]
     order = priority_order(state, candidates, now)
     return order[0] if order else None
@@ -718,8 +731,8 @@ def better_candidate(state: dict, cur: str | None, now: float | None = None,
     saved = set(saved_labels())
     if cur not in saved or is_blocked(state, label=cur, now=now):
         return None  # 지금 계정이 막혔으면 되돌리기가 아니라 일반 교체가 처리한다
-    candidates = [l for l in account_labels()
-                  if l in saved and not is_blocked(state, label=l, now=now)
+    candidates = [l for l in usable_labels()
+                  if not is_blocked(state, label=l, now=now)
                   and not is_scoped_blocked(state, l, bucket, now)]
     order = priority_order(state, candidates, now)
     if not order or order[0] == cur:
@@ -768,15 +781,9 @@ def earliest_reset(state: dict, bucket: str | None = None) -> float | None:
         return min(vals) if vals else None
 
     scoped = _clean_scoped(state.get("scoped_blocked"))
-    # 후보 기준은 실제로 계정을 고르는 pick_next 와 **똑같아야 한다**. 여기서만
-    # 구독 해지(retired) 를 빼면, 그 계정이 먼저 풀릴 때 pick_next 는 그 계정을
-    # 고르는데 알림은 다른 계정 시각을 말하는 어긋남이 생긴다(2026-08-20 코덱스 지적,
-    # 재현됨). 해지 계정은 저장본을 creds/dead/ 로 옮겨 saved_labels 에서 빠진다.
-    usable = set(saved_labels())
+    # 후보 기준은 실제로 계정을 고르는 pick_next 와 **한 벌을 같이 쓴다**(usable_labels).
     times = []
-    for label in account_labels():
-        if label not in usable:
-            continue
+    for label in usable_labels():
         until = max(_num(blocked.get(label)), _num((scoped.get(label) or {}).get(bucket)))
         if until > 0:
             times.append(until)

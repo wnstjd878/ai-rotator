@@ -2077,20 +2077,27 @@ def case_scoped_exhausted_message(tmp):
     check("거절받은 계정을 통째로 막지 않는다", not st.is_blocked(after, label="B"),
           f"blocked={after.get('blocked')}")
 
-    # (6) 코덱스 교차검수 2026-08-20 지적 3건 — 전부 재현돼서 고쳤다
+    # (6) 코덱스 교차검수 2026-08-20 지적 5건 — 전부 재현한 뒤 고쳤다
     st.STATE_FILE.unlink()
     setup(tmp, ["A", "B"], "B")
     (Path(tmp) / "accounts.json").write_text(json.dumps(
         [{"label": "A", "retired": True}, {"label": "B"}]), encoding="utf-8")
     state = st.load_state()
     state["scoped_blocked"] = {"A": {"Fable": now + 60}, "B": {"Fable": now + 3600}}
-    # 알리는 시각과 실제로 고르는 계정의 기준이 어긋나면 안 된다: A 가 먼저 풀리는데
-    # 알림은 B 시각을 말하고, 정작 풀린 뒤엔 pick_next 가 A 를 고르던 어긋남.
-    check("해제 시각 기준이 계정 고르는 기준과 같다",
-          abs(st.earliest_reset(state, bucket="Fable") - (now + 60)) < 2,
+    # 알리는 시각과 실제로 고르는 계정은 **같은 후보 기준**을 써야 한다. 한쪽만
+    # 구독 해지를 빼면, 해지 계정이 먼저 풀릴 때 알림과 실제 선택이 어긋난다.
+    check("해지 계정 시각을 알리지 않는다",
+          abs(st.earliest_reset(state, bucket="Fable") - (now + 3600)) < 2,
           st.earliest_reset(state, bucket="Fable") - now)
-    later = now + 120
-    check("그 시각이 지나면 실제로 그 계정을 고른다",
+    later = now + 120   # 해지 계정 A 의 칸이 풀린 뒤
+    check("해지 계정을 고르지도 않는다",
+          st.pick_next(st.prune_blocked(dict(state), now=later), bucket="Fable", now=later) is None)
+    check("되돌리기 후보에서도 뺀다",
+          st.better_candidate(st.prune_blocked(dict(state), now=later), "B",
+                              bucket="Fable", now=later) is None)
+    (Path(tmp) / "accounts.json").write_text(json.dumps(
+        [{"label": x} for x in ("A", "B")]), encoding="utf-8")
+    check("해지 표시를 지우면 다시 후보가 된다",
           st.pick_next(st.prune_blocked(dict(state), now=later), bucket="Fable", now=later) == "A")
 
     # 칸만 막힌 소진은 blocked 가 늘 비어 있다. 그때 알림 표시를 지우면 봇 호출마다
@@ -2104,16 +2111,19 @@ def case_scoped_exhausted_message(tmp):
     check("다 풀리면 표시를 지운다",
           st.prune_blocked(state).get("notified_for") is None)
 
-    # 다른 칸까지 막혔으면 '다른 모델로 켜면 된다' 고 단정하지 않는다.
+    # 다른 칸이 막혔다고 '다른 모델은 안 된다' 로 말하면 그것도 거짓이다 — 기록에
+    # 없는 칸(Sonnet 등)은 안 막힌 것이고 그 모델로는 지금도 쓸 수 있다.
     state = st.load_state()
     state["scoped_blocked"] = {l: {"Fable": now + 3600, "Opus": now + 3600}
-                                for l in ("A", "B")}
+                               for l in ("A", "B")}
     msg3 = claude_pool._exhausted_message(state, "Fable", "08월 21일 16:00")
-    check("다른 칸도 막혔으면 쓸 수 있다고 말하지 않는다",
-          "다른 모델로 켜면" not in msg3 and "다른 모델 칸도 막혀 있습니다" in msg3, msg3)
+    check("안 막힌 모델로는 쓸 수 있다는 안내를 지우지 않는다",
+          "다른 모델로 켜면" in msg3 and st.pick_next(state, bucket="Sonnet") is not None, msg3)
+    check("같이 막힌 칸은 이름을 적는다", "다만 Opus 칸도 바닥" in msg3, msg3)
     state["scoped_blocked"] = {l: {"Fable": now + 3600} for l in ("A", "B")}
-    check("그 칸만 막혔으면 예전대로 쓸 수 있다고 말한다",
-          "다른 모델로 켜면" in claude_pool._exhausted_message(state, "Fable", "08월 21일 16:00"))
+    msg4 = claude_pool._exhausted_message(state, "Fable", "08월 21일 16:00")
+    check("그 칸만 막혔으면 군더더기를 안 붙인다",
+          "다른 모델로 켜면" in msg4 and "다만" not in msg4, msg4)
 
 
 def main():
