@@ -248,6 +248,30 @@ def _scoped_notice(bucket: str, rows, now: float) -> str | None:
     return "  " + " ".join(parts)
 
 
+def _exhausted_message(state: dict, bucket: str | None, when: str,
+                       lead: str = "클로드 ") -> str:
+    """쓸 계정이 없을 때의 문구. **모델 칸만 바닥난 경우를 갈라 말한다.**
+
+    2026-08-20 사고: Fable 칸만 A·B·D 전부 바닥인데 "구독 계정이 전부 한도에 걸렸습니다"
+    로 텔레그램이 나가 구독이 통째로 떨어진 것처럼 읽혔다. 실제로는 주간이 22~47% 남아
+    Opus 는 멀쩡히 쓸 수 있었다. 전환 알림(switch_message)은 2026-08-14 에 갈라 말하게
+    고쳤는데 이 알림만 안 고쳐져 있었다.
+
+    판별은 실제로 고르는 함수에 맡긴다 — 그 칸을 빼고 물었을 때 쓸 계정이 나오면
+    계정 자체는 살아 있는 것이다(표시용 잔량 값으로 판단하지 않는다).
+    """
+    if bucket:
+        try:
+            account_left = st.pick_next(state) is not None
+        except Exception:
+            account_left = False
+        if account_left:
+            return (f"{lead}{bucket} 칸이 계정 전부 바닥입니다(계정 주간은 여유 있음). "
+                    f"다른 모델로 켜면 지금도 쓸 수 있습니다. "
+                    f"{bucket} 칸이 가장 빨리 풀리는 시각: {when}")
+    return f"{lead}구독 계정이 전부 한도에 걸렸습니다. 가장 빨리 풀리는 시각: {when}"
+
+
 def status_text(model: str | None = None) -> str:
     state = st.prune_blocked(st.load_state())
     cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
@@ -347,9 +371,9 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN,
         nxt = st.pick_next(state, exclude=cur, bucket=bucket)
         if nxt is None:
             st.save_state(state)
-            reset_at = st.earliest_reset(state)
+            reset_at = st.earliest_reset(state, bucket=bucket)
             when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
-            print(f"쓸 수 있는 계정이 없습니다. 가장 빨리 풀리는 시각: {when}")
+            print(_exhausted_message(state, bucket, when, lead=""))
             print(st.describe(state))
             return 2
         if not _switch(nxt, leaving=cur):
@@ -437,10 +461,10 @@ def ensure_usable(model: str | None = None) -> int:
             nxt = st.pick_next(state, exclude=cur, bucket=bucket)
             if nxt is None:
                 st.save_state(state)
-                reset_at = st.earliest_reset(state)
+                reset_at = st.earliest_reset(state, bucket=bucket)
                 when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
                 print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진. 갈아탈 계정이 없습니다. "
-                      f"가장 빨리 풀리는 시각: {when}")
+                      + _exhausted_message(state, bucket, when, lead=""))
                 return 2
             if not _switch(nxt, leaving=cur):
                 st.save_state(state)
@@ -1157,9 +1181,11 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
 
         nxt = st.pick_next(state, exclude=used_label, bucket=bucket)
         if nxt is None:
-            reset_at = st.earliest_reset(state)
+            # 해제 시각도 그 칸까지 봐야 맞다. 계정 단위 막힘만 보면 5시간 한도가 풀리는
+            # 시각이 찍혀 실제보다 몇 시간 이른 시각을 알린다(2026-08-20).
+            reset_at = st.earliest_reset(state, bucket=bucket)
             when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
-            msg = f"클로드 구독 계정이 전부 한도에 걸렸습니다. 가장 빨리 풀리는 시각: {when}"
+            msg = _exhausted_message(state, bucket, when)
             log(msg)
             # 소진 구간마다 한 건만 알린다. 봇 55곳이 각자 부르면 알림이 쏟아진다.
             should_notify = st.mark_notified(state, reset_at)

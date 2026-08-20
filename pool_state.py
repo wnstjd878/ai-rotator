@@ -729,12 +729,45 @@ def note_reclaim(state: dict, now: float | None = None) -> dict:
     return state
 
 
-def earliest_reset(state: dict) -> float | None:
-    """막힌 계정 중 가장 빨리 풀리는 시각(epoch). 막힌 게 없으면 None."""
+def earliest_reset(state: dict, bucket: str | None = None) -> float | None:
+    """막힌 계정이 가장 빨리 다시 쓸 수 있게 되는 시각(epoch). 없으면 None.
+
+    `bucket` 을 주면 **그 모델 칸이 풀리는 시각까지 같이 본다**. 계정 단위 막힘만 보면
+    Fable 칸이 세 계정 다 바닥인데도 5시간 한도가 풀리는 시각이 찍혀 13시간이나 이른
+    시각을 알린다(2026-08-20 사용자 지적: 알림엔 08/21 03:51, 실제로 Fable 이 풀리는
+    가장 이른 시각은 08/21 16:00). 한 계정을 그 모델로 다시 쓰려면 계정 막힘과 그 칸
+    막힘이 **둘 다** 풀려야 하므로 계정마다 늦은 쪽을 취하고, 그중 가장 이른 것을 고른다.
+    저장본이 없거나 구독을 해지한 계정은 후보에서 뺀다 — 영영 안 돌아오는 계정의 시각을
+    '가장 빨리 풀림' 으로 알리면 안 된다.
+    """
     blocked = state.get("blocked") or {}
-    if not blocked:
-        return None
-    return min(float(v) for v in blocked.values())
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if not bucket:
+        vals = [_num(v) for v in blocked.values()]
+        vals = [v for v in vals if v > 0]
+        return min(vals) if vals else None
+
+    scoped = _clean_scoped(state.get("scoped_blocked"))
+    usable = set(saved_labels()) - set(retired_labels())
+    times = []
+    for label in account_labels():
+        if label not in usable:
+            continue
+        until = max(_num(blocked.get(label)), _num((scoped.get(label) or {}).get(bucket)))
+        if until > 0:
+            times.append(until)
+    if times:
+        return min(times)
+    # 쓸 수 있는 계정이 하나도 없는 드문 경우(저장본이 전부 빠짐)엔 예전 방식으로 떨어진다
+    vals = [_num(v) for v in blocked.values()]
+    vals = [v for v in vals if v > 0]
+    return min(vals) if vals else None
 
 
 def describe(state: dict, now: float | None = None) -> str:
