@@ -2144,6 +2144,83 @@ def case_scoped_exhausted_message(tmp):
           and "구독 계정이 전부 한도에 걸렸습니다" in msg6, msg6)
 
 
+def case_scoped_reopen(tmp):
+    """[47] 막혔던 모델 칸이 다시 열리면 한 번 알린다.
+
+    2026-08-21 사용자 요청: 소진 알림에 해제 시각이 적히긴 해도 그때까지 사람이 시각을
+    외워두고 기다려야 했다. 주기 작업(usage_alert, winserver 10분 / Mac 1시간)이
+    막힘 목록을 보고 열린 칸을 알린다.
+    """
+    print("\n[47] 칸이 다시 열리면 알린다")
+    import usage_alert
+
+    setup(tmp, ["A", "B"], "B")
+    now = time.time()
+    state = st.load_state()
+    for label in ("A", "B"):
+        st.mark_scoped_blocked(state, label, "Fable", now + 3600)
+    st.save_state(state)
+
+    # (1) 바닥인 동안은 기록만 하고 알리지 않는다
+    state = st.load_state()
+    check("바닥일 땐 알릴 게 없다", st.note_scoped_full(state) == [])
+    check("바닥이라고 적어둔다",
+          abs(float((state.get("scoped_full") or {}).get("Fable", 0)) - (now + 3600)) < 2,
+          state.get("scoped_full"))
+    st.save_state(state)
+
+    # (2) 시간이 지나 칸이 풀리면 그때 알린다
+    later = now + 3700
+    state = st.prune_blocked(st.load_state(), now=later)
+    opened = st.note_scoped_full(state, now=later)
+    check("풀린 칸을 짚는다", [b for b, _ in opened] == ["Fable"], opened)
+    check("적어둔 기록은 지운다", not state.get("scoped_full"), state.get("scoped_full"))
+    st.save_state(state)
+
+    # (3) 다음 회차엔 또 알리지 않는다
+    state = st.prune_blocked(st.load_state(), now=later + 60)
+    check("같은 회복을 두 번 알리지 않는다",
+          st.note_scoped_full(state, now=later + 60) == [])
+
+    # (4) 계정이 통째로 막혀 후보가 없는 것은 칸 소진이 아니다.
+    #     이걸 안 가르면 계정이 풀릴 때마다 안 막혔던 칸이 열렸다고 알린다.
+    state = st.load_state()
+    state["scoped_blocked"] = {}
+    st.mark_blocked(state, "A", now + 3600, "주간 한도")
+    st.mark_blocked(state, "B", now + 3600, "주간 한도")
+    check("계정 막힘은 칸 바닥으로 안 센다", st.note_scoped_full(state) == []
+          and not state.get("scoped_full"), state.get("scoped_full"))
+
+    # (5) 실제 알림 문구 — 받은 사람이 할 수 있는 행동이 들어간다
+    st.STATE_FILE.unlink()
+    setup(tmp, ["A", "B"], "B")
+    state = st.load_state()
+    st.mark_scoped_blocked(state, "A", "Fable", now - 10)   # 이미 지난 막힘
+    st.mark_scoped_blocked(state, "B", "Fable", now - 10)
+    state["scoped_full"] = {"Fable": now - 10}
+    st.save_state(state)
+
+    sent = []
+    real_notify = usage_alert.notify
+    class _FakeNotify:
+        @staticmethod
+        def send(msg):
+            sent.append(msg)
+    usage_alert.notify = _FakeNotify
+    try:
+        got = usage_alert.check_scoped_reopen()
+    finally:
+        usage_alert.notify = real_notify
+
+    check("알림을 보낸다", got == ["Fable"] and len(sent) == 1, f"{got} / {sent}")
+    body = sent[0] if sent else ""
+    check("어느 칸이 열렸는지 말한다", "Fable 칸이 다시 열렸습니다" in body, body)
+    check("쓸 수 있는 계정을 적는다", "A, B" in body, body)
+    check("할 수 있는 행동을 적는다", "cc 를 다시 켜세요" in body, body)
+    check("떠 있는 창은 안 바뀐다고 알린다", "이미 떠 있는 창" in body, body)
+    check("두 번째 회차엔 조용하다", usage_alert.check_scoped_reopen() == [])
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -2169,7 +2246,7 @@ def main():
                      case_scoped_no_reclaim, case_scoped_shared,
                      case_dead_quarantine, case_dead_alert_folded,
                      case_keychain_pull_and_rescue, case_barred,
-                     case_scoped_exhausted_message):
+                     case_scoped_exhausted_message, case_scoped_reopen):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
