@@ -218,11 +218,40 @@ def _shared_current() -> dict | None:
         return None
 
 
-def status_text() -> str:
+def _scoped_notice(bucket: str, rows, now: float) -> str | None:
+    """쓰려는 모델 칸이 어느 계정에도 안 남았으면 한 줄로 먼저 알린다.
+
+    없으면 None(여유가 있거나 판단할 근거가 없을 때). 이게 없으면 계정을 하나씩
+    건너뛰다 마지막 계정에서야 '전 계정 한도' 를 알게 된다(2026-08-20 사용자 요청).
+    **잔량을 모르는 계정은 바닥으로 세지 않는다** — 모르는 걸 소진으로 보면 멀쩡한
+    계정을 버린다(2026-07-29 에 A~D 가 줄줄이 막힌 사고가 그 종류였다). 대신 따로 적는다.
+    표시 전용이다. 계정을 고르거나 막는 판단은 지금처럼 실제 거절로만 한다.
+    """
+    known = [(label, left, reset) for label, left, reset in rows if left is not None]
+    if not known or any(left > SCOPED_LOW_LEFT for _, left, _ in known):
+        return None
+    parts = [f"쓰려는 모델 칸({bucket})이 "
+             + ", ".join(label for label, _, _ in known) + " 전부 바닥입니다."]
+    soon = [(reset, label) for label, _, reset in known if reset]
+    if soon:
+        reset, label = min(soon)
+        parts.append(f"가장 빨리 풀리는 건 {label}"
+                     f" ({time.strftime('%m/%d %H:%M', time.localtime(reset))}).")
+    unknown = [label for label, left, _ in rows if left is None]
+    if unknown:
+        parts.append("잔량 모르는 계정: " + ", ".join(unknown) + ".")
+    return "  " + " ".join(parts)
+
+
+def status_text(model: str | None = None) -> str:
     state = st.prune_blocked(st.load_state())
     cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
     now = time.time()
     saved = set(st.saved_labels())
+    # 이 창이 쓸 모델의 칸(대개 settings.json 고정값). 못 알아내면 요약 줄을 안 만든다.
+    bucket = (usage_check.bucket_for_model(model or intended_model())
+              if usage_check else None)
+    scoped_rows = []
     lines = [f"현재 계정: {cur}"]
     _share_current(state.get("current"))  # 이 머신이 어디 물려 있는지 먼저 올린다
     shared = _shared_usage()   # 다른 머신이 자기 계정에서 읽어 올린 값
@@ -254,8 +283,17 @@ def status_text() -> str:
                 _share_usage(label, u)
             else:
                 marks.append(_last_seen_usage(state, shared, label, now))
+                u = usage_view.pick_entry(state, shared, label)[1]
+            if bucket:
+                # 화면에 적은 것과 같은 기록에서 칸 잔량을 뽑는다(둘이 어긋나면 안 된다).
+                left, reset = usage_view.scoped_left(u, bucket, now)
+                scoped_rows.append((label, left, reset))
         lines.append(f"  {label}: " + ", ".join(marks))
     st.remember_usage(seen)
+    if bucket:
+        notice = _scoped_notice(bucket, scoped_rows, now)
+        if notice:
+            lines.append(notice)
     return "\n".join(lines)
 
 

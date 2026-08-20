@@ -113,12 +113,11 @@ def _at(entry) -> float:
     return _num((entry or {}).get("at")) or 0.0
 
 
-def last_seen(state: dict, shared: dict | None, label: str, now: float) -> str:
-    """지금 서버에서 못 읽을 때 화면에 적을 글.
+def pick_entry(state: dict, shared: dict | None, label: str):
+    """이 기계의 기록과 다른 기계가 올린 값 중 더 최신인 것. (누가, 기록).
 
-    이 기계의 기록과 다른 기계가 올린 값 중 더 최신 것을 쓴다. 언제 어디서 읽은
-    값인지 같이 적는다(낡은 값을 지금 값으로 오해하면 안 된다). 초기화 시각이 지나
-    100% 로 되살린 값이면 그 사실을 대신 적는다.
+    둘 다 없으면 (None, None). 화면 글자와 모델 칸 요약이 **같은 기록**을 보게 하려고
+    따로 뺐다. 서로 다른 기록을 보면 화면에는 남았다고 적히고 요약은 바닥이라고 말한다.
     """
     cands = []
     local = (state.get("usage_seen") or {}).get(label)
@@ -128,9 +127,40 @@ def last_seen(state: dict, shared: dict | None, label: str, now: float) -> str:
     if remote:
         cands.append((host_label(remote.get("host")), remote))
     if not cands:
-        return "사용량 못 읽음"
+        return None, None
+    return max(cands, key=lambda pair: _at(pair[1]))
 
-    who, best = max(cands, key=lambda pair: _at(pair[1]))
+
+def scoped_left(entry: dict | None, bucket: str | None, now: float):
+    """그 모델 칸의 남은 %와 다시 채워지는 시각. 정보가 없으면 (None, None).
+
+    초기화 시각이 지난 기록은 다시 채워졌다는 뜻이라 남은 100% 로 본다(usage_parts 와 같은 규칙).
+    **정보가 없는 것을 0% 로 보면 안 된다** — 멀쩡한 계정을 바닥으로 몰아 버린다.
+    """
+    if not entry or not bucket:
+        return None, None
+    row = (entry.get("scoped") or {}).get(bucket)
+    if not isinstance(row, dict):
+        return None, None
+    pct = _num(row.get("pct"))
+    if pct is None:
+        return None, None
+    reset = _num(row.get("reset"))
+    if reset is not None and reset <= now:
+        return 100.0, reset
+    return max(0.0, 100.0 - pct), reset
+
+
+def last_seen(state: dict, shared: dict | None, label: str, now: float) -> str:
+    """지금 서버에서 못 읽을 때 화면에 적을 글.
+
+    이 기계의 기록과 다른 기계가 올린 값 중 더 최신 것을 쓴다. 언제 어디서 읽은
+    값인지 같이 적는다(낡은 값을 지금 값으로 오해하면 안 된다). 초기화 시각이 지나
+    100% 로 되살린 값이면 그 사실을 대신 적는다.
+    """
+    who, best = pick_entry(state, shared, label)
+    if best is None:
+        return "사용량 못 읽음"
     parts, reset_at = usage_parts(best, now)
     line = format_parts(parts)
     if not line:
