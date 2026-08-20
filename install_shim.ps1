@@ -33,6 +33,15 @@ function Get-Python {
   throw "python 을 못 찾았습니다."
 }
 
+function Get-ClaudeVersion($path) {
+  # "2.1.237 (Claude Code)" 에서 판 번호만. 못 읽으면 $null.
+  try {
+    $out = & $path --version 2>$null
+    if ($out -match '(\d+\.\d+\.\d+)') { return [version]$Matches[1] }
+  } catch { }
+  return $null
+}
+
 function Show-Status {
   Write-Output ("claude.exe   : " + (Test-Path $Link))
   Write-Output ("claude-real.exe: " + (Test-Path $Real))
@@ -60,9 +69,23 @@ function Do-Install {
   if (-not (Test-Path $Shim)) { throw "claude_shim.py 가 없습니다: $Shim" }
   $py = Get-Python
 
-  # 원본을 옆으로 민다(이미 밀려 있으면 유지)
+  # 원본을 옆으로 민다(이미 밀려 있으면 판 번호가 높은 쪽을 남긴다).
+  # 예전에는 재설치 때 새로 생긴 claude.exe 를 무조건 버렸다. 그런데 claude 가 스스로
+  # 갱신하면 새 판을 claude.exe 자리에 깔기 때문에, 벗겨진 가로채기를 다시 씌울 때마다
+  # 갱신분이 사라져 옛 판에 갇혔다(winserver 가 2026-07-26 판 2.1.220 에 그대로 있었다).
+  # 낡은 CLI 는 모델 별칭도 낡게 푼다 — 2.1.219 미만에서는 `opus` 가 Opus 4.8 을 가리킨다.
   if (Test-Path $Link) {
-    if (Test-Path $Real) { Remove-Item $Link -Force }  # 재설치: 새 claude.exe 는 버리고 기존 real 유지
+    if (Test-Path $Real) {
+      $newVer = Get-ClaudeVersion $Link
+      $oldVer = Get-ClaudeVersion $Real
+      if ($newVer -and (-not $oldVer -or $newVer -gt $oldVer)) {
+        Remove-Item $Real -Force
+        Move-Item $Link $Real -Force
+        Write-Output ("새 판을 받았습니다: " + $oldVer + " -> " + $newVer)
+      } else {
+        Remove-Item $Link -Force
+      }
+    }
     else { Move-Item $Link $Real -Force }
   }
   if (-not (Test-Path $Real)) { throw "원본 claude 를 못 찾았습니다(claude-real.exe 없음)." }
