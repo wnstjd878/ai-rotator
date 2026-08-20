@@ -262,14 +262,17 @@ def _exhausted_message(state: dict, bucket: str | None, when: str,
     """
     if bucket:
         try:
-            saved = set(st.saved_labels())
-            free = [l for l in st.account_labels()
-                    if l in saved and not st.is_blocked(state, l)]
+            # 후보 기준은 실제로 계정을 고르는 쪽과 같은 한 벌을 쓴다(구독 해지 제외).
+            free = [l for l in st.usable_labels() if not st.is_blocked(state, l)]
             # 다른 칸도 막혀 있으면 그 사실을 덧붙인다. 다만 '다른 모델은 안 된다' 로
             # 말하지는 않는다 — 기록에 없는 칸(Sonnet 등)은 안 막힌 것이고 그 모델로는
             # 지금도 쓸 수 있다(2026-08-20 코덱스 재검수 지적, 재현됨).
-            others = sorted(set().union(
-                *(st.scoped_blocked_buckets(state, l) for l in free)) - {bucket})
+            # **모든 후보에서 막힌 칸만 적는다** — 한 계정만 막힌 칸은 다른 계정으로
+            # 쓸 수 있어서, 합집합으로 모으면 멀쩡한 모델을 못 쓴다고 알린다
+            # (2026-08-21 코덱스 3차 지적, 재현됨).
+            common = (set.intersection(
+                *(st.scoped_blocked_buckets(state, l) for l in free)) if free else set())
+            others = sorted(common - {bucket})
         except Exception:
             free, others = [], []
         if free:

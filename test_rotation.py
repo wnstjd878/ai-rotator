@@ -2125,6 +2125,24 @@ def case_scoped_exhausted_message(tmp):
     check("그 칸만 막혔으면 군더더기를 안 붙인다",
           "다른 모델로 켜면" in msg4 and "다만" not in msg4, msg4)
 
+    # 3차 검수: 한 계정만 막힌 칸은 다른 계정으로 쓸 수 있다. 합집합으로 모으면
+    # 멀쩡한 모델을 못 쓴다고 알린다.
+    state["scoped_blocked"] = {"A": {"Fable": now + 3600, "Opus": now + 3600},
+                               "B": {"Fable": now + 3600}}
+    msg5 = claude_pool._exhausted_message(state, "Fable", "08월 21일 16:00")
+    check("한 계정만 막힌 칸은 못 쓴다고 하지 않는다",
+          "Opus" not in msg5 and st.pick_next(state, bucket="Opus") == "B", msg5)
+
+    # 3차 검수: 해지 계정을 "쓸 수 있는 계정" 으로 세면 안 된다.
+    (Path(tmp) / "accounts.json").write_text(json.dumps(
+        [{"label": "A", "retired": True}, {"label": "B"}]), encoding="utf-8")
+    state["blocked"] = {"B": now + 3600}   # 살아 있는 계정은 계정 단위로 막힘
+    state["scoped_blocked"] = {l: {"Fable": now + 3600} for l in ("A", "B")}
+    msg6 = claude_pool._exhausted_message(state, "Fable", "08월 21일 16:00")
+    check("해지 계정만 남았으면 쓸 수 있다고 하지 않는다",
+          "다른 모델로 켜면" not in msg6
+          and "구독 계정이 전부 한도에 걸렸습니다" in msg6, msg6)
+
 
 def main():
     real_run = subprocess.run
