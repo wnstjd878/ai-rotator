@@ -271,11 +271,53 @@ def _ensure_shims() -> None:
             print(f"[shim-guard] {installer.name} 재설치 실패(무시): {type(e).__name__}")
 
 
+def check_scoped_reopen(preview: bool = False) -> list:
+    """막혀 있던 모델 칸이 다시 열리면 한 번 알린다. 알린 칸 목록을 돌려준다.
+
+    사용자 요청 2026-08-21: 소진 알림에 해제 시각이 적히기는 하지만, 그때까지 사람이
+    시각을 외워두고 기다려야 했다. 이 확인은 사용량 조회와 무관하므로(막힘 목록만 본다)
+    현재 계정 자격이 없거나 조회가 실패해도 그대로 돈다. 그래서 main 맨 앞에 둔다.
+
+    세 머신이 각자 돌므로 claim_notice 로 통틀어 한 번만 보낸다.
+    """
+    try:
+        with st.with_lock():
+            state = st.prune_blocked(st.load_state())
+            opened = st.note_scoped_full(state)
+            if not preview:
+                st.save_state(state)
+            free = {b: [l for l in st.usable_labels()
+                        if not st.is_blocked(state, l)
+                        and not st.is_scoped_blocked(state, l, b)]
+                    for b, _ in opened}
+    except Exception as exc:   # 이 확인이 실패해도 사용량 경고 본 작업은 계속한다
+        print(f"칸 회복 확인 실패: {exc}")
+        return []
+
+    sent = []
+    for bucket, until in opened:   # 전송은 잠금 밖에서
+        if preview:
+            print(f"[미리보기] {bucket} 칸이 다시 열렸습니다. 쓸 계정: {free.get(bucket)}")
+            continue
+        if not st.claim_notice(f"scoped-open:{bucket}:{round(until)}"):
+            continue
+        who = ", ".join(free.get(bucket) or []) or "확인 필요"
+        notify.send(f"클로드 {bucket} 칸이 다시 열렸습니다. 쓸 수 있는 계정: {who}. "
+                    f"{bucket} 로 쓰려면 cc 를 다시 켜세요 "
+                    f"(이미 떠 있는 창은 계정이 안 바뀝니다).")
+        sent.append(bucket)
+        print(f"칸 회복 알림 보냄: {bucket}")
+    return sent
+
+
 def main() -> int:
     _ensure_shims()
+    preview = "--preview" in sys.argv
+    # 막혔던 모델 칸이 열렸는지 먼저 본다. 사용량 조회와 무관해서, 자격이 없거나
+    # 조회가 실패해 아래에서 일찍 빠지는 회차에도 이건 지나가야 한다.
+    check_scoped_reopen(preview)
     if "--refresh-order" in sys.argv:
         return refresh_order()
-    preview = "--preview" in sys.argv
     state = st.prune_blocked(st.load_state())
     label = state.get("current") or st.pick_next(state)
     if not label:

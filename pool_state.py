@@ -795,6 +795,36 @@ def earliest_reset(state: dict, bucket: str | None = None) -> float | None:
     return min(vals) if vals else None
 
 
+def note_scoped_full(state: dict, now: float | None = None) -> list:
+    """그 모델 칸으로 쓸 계정이 하나도 없는 상태를 적어두고, **다시 열린 칸**을 알려준다.
+
+    돌려주는 값: [(칸 이름, 직전에 적어둔 해제 시각)] — 직전 회차엔 전부 바닥이었는데
+    이번 회차에 쓸 계정이 생긴 칸들. 주기 작업(usage_alert)이 이걸 보고 한 번 알린다.
+    사용자 요청 2026-08-21: 소진 알림만 오고, 언제 다시 쓸 수 있는지는 사람이 시각을
+    외워두고 기다려야 했다.
+
+    **그 칸 때문에 막힌 계정이 있을 때만 바닥으로 센다.** 계정이 통째로 막혀서 후보가
+    없는 것까지 칸 소진으로 세면, 계정이 풀릴 때마다 안 막혔던 칸이 열렸다고 알린다.
+    """
+    now = time.time() if now is None else now
+    prev = state.get("scoped_full") or {}
+    scoped = _clean_scoped(state.get("scoped_blocked"))
+    buckets = set(prev) | {b for box in scoped.values() for b in box}
+    usable = usable_labels()
+    fresh, opened = {}, []
+    for bucket in sorted(buckets):
+        by_bucket = any(is_scoped_blocked(state, l, bucket, now) for l in usable)
+        if by_bucket and pick_next(state, bucket=bucket, now=now) is None:
+            fresh[bucket] = float(earliest_reset(state, bucket=bucket) or 0.0)
+        elif bucket in prev:
+            try:
+                opened.append((bucket, float(prev.get(bucket) or 0.0)))
+            except (TypeError, ValueError):
+                opened.append((bucket, 0.0))
+    state["scoped_full"] = fresh
+    return opened
+
+
 def describe(state: dict, now: float | None = None) -> str:
     """사람이 읽는 현재 상태 한 덩어리."""
     now = time.time() if now is None else now
