@@ -42,6 +42,22 @@ function Get-ClaudeVersion($path) {
   return $null
 }
 
+function Move-OldAside($path) {
+  # 옛 판을 자리에서 치운다. 윈도가 삭제를 막는 때가 있는데(잠김·권한) 이름 변경은 되므로,
+  # 지우기가 막히면 옆으로 밀어두고 다음 실행 때 정리한다. 여기서 멈추면 갱신이 통째로 막힌다.
+  try { Remove-Item $path -Force -ErrorAction Stop; return } catch { }
+  $aside = $path + ".old.exe"
+  if (Test-Path $aside) { $aside = $path + ".old." + (Get-Random) + ".exe" }
+  Move-Item $path $aside -Force
+  Write-Output ("옛 판을 지우지 못해 옆으로 옮겼습니다: " + $aside)
+}
+
+function Clear-OldAside {
+  # 지난번에 못 지우고 밀어둔 옛 판을 치운다(한 개 265MB 넘는다). 실패는 넘긴다.
+  Get-ChildItem (Join-Path $BinDir "claude-real.old*.exe") -ErrorAction SilentlyContinue |
+    ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
+}
+
 function Show-Status {
   Write-Output ("claude.exe   : " + (Test-Path $Link))
   Write-Output ("claude-real.exe: " + (Test-Path $Real))
