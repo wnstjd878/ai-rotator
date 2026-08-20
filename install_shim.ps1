@@ -46,8 +46,11 @@ function Move-OldAside($path) {
   # 옛 판을 자리에서 치운다. 윈도가 삭제를 막는 때가 있는데(잠김·권한) 이름 변경은 되므로,
   # 지우기가 막히면 옆으로 밀어두고 다음 실행 때 정리한다. 여기서 멈추면 갱신이 통째로 막힌다.
   try { Remove-Item $path -Force -ErrorAction Stop; return } catch { }
-  $aside = $path + ".old.exe"
-  if (Test-Path $aside) { $aside = $path + ".old." + (Get-Random) + ".exe" }
+  # 이름은 Clear-OldAside 가 찾는 규칙(claude-real.old*.exe)에 맞춘다. 확장자 뒤에 덧붙이면
+  # 다음 실행에서 못 찾아 265MB 짜리가 계속 쌓인다(2026-08-20 코덱스 검수 지적).
+  $stem = Join-Path ([IO.Path]::GetDirectoryName($path)) ([IO.Path]::GetFileNameWithoutExtension($path))
+  $aside = $stem + ".old.exe"
+  if (Test-Path $aside) { $aside = $stem + ".old." + (Get-Random) + ".exe" }
   Move-Item $path $aside -Force
   Write-Output ("옛 판을 지우지 못해 옆으로 옮겼습니다: " + $aside)
 }

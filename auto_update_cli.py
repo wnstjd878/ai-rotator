@@ -63,7 +63,9 @@ MACHINES = [
         "shim_install": ["ssh", "macmini",
                          "export PATH=/opt/homebrew/bin:$PATH; "
                          "bash ~/projects/ai-rotator/install_shim.sh"],
-        "shim_status": ["ssh", "macmini", "ls -l /opt/homebrew/bin/claude"],
+        # PATH 의 claude 말고 nvm 폴더의 claude 까지 봐야 한다. 봇이 빌드하려고 nvm 을
+        # 불러오면 그쪽 claude 가 앞에 와서 순환기를 건너뛴다(install_shim.sh 가 둘 다 덮는다).
+        "shim_status": ["ssh", "macmini", "bash ~/projects/ai-rotator/install_shim.sh --status"],
     },
     {
         "name": "winserver",
@@ -109,6 +111,20 @@ def as_text(ver) -> str:
     return ".".join(str(x) for x in ver) if ver else "확인 불가"
 
 
+def judge_shim(name: str, out: str) -> bool:
+    """상태 출력 글에서 가로채기가 제자리인지 가린다(통신 없이 글자만 본다 — 시험용)."""
+    if name == "Mac":
+        # 연결이 가로채기 파일을 가리켜야 하고, nvm 쪽에 '안 덮임' 이 하나도 없어야 한다.
+        return "claude_shim.sh" in out and "안 덮임" not in out
+    # winserver: 원래 실행 파일이 밀려 있고(claude.exe 없음) 래퍼가 있어야 한다.
+    # 저쪽 한글은 이 통로를 지나며 깨지므로 True/False 줄로만 판정한다.
+    hidden = re.search(r"claude\.exe\s*:\s*(True|False)", out)
+    wrapper = re.search(r"claude\.cmd\s*:\s*(True|False)", out)
+    if not hidden or not wrapper:
+        return False
+    return hidden.group(1) == "False" and wrapper.group(1) == "True"
+
+
 def shim_ok(machine) -> bool | None:
     """가로채기가 제자리에 있는지. 볼 필요가 없는 기계는 None."""
     cmd = machine.get("shim_status")
@@ -117,16 +133,23 @@ def shim_ok(machine) -> bool | None:
     r = run(cmd, SHORT_TIMEOUT)
     if r is None:
         return False
-    out = (r.stdout or "") + (r.stderr or "")
-    if machine["name"] == "Mac":
-        # PATH 의 claude 가 가로채기 파일을 가리켜야 한다.
-        return "claude_shim.sh" in out
-    # winserver: 원래 실행 파일이 밀려 있고(claude.exe 없음) 래퍼가 있어야 한다.
-    hidden = re.search(r"claude\.exe\s*:\s*(True|False)", out)
-    wrapper = re.search(r"claude\.cmd\s*:\s*(True|False)", out)
-    if not hidden or not wrapper:
-        return False
-    return hidden.group(1) == "False" and wrapper.group(1) == "True"
+    return judge_shim(machine["name"], (r.stdout or "") + (r.stderr or ""))
+
+
+def verdict(ver, ok, install_failed: bool = False) -> str | None:
+    """이 기계 상태를 한 줄 사유로. 문제 없으면 None.
+
+    재설치 명령이 실패하면 상태 확인이 통과해도 문제로 본다. install_shim.sh 는 자리를
+    여러 곳(PATH·nvm) 덮는데 일부만 실패할 수 있어서, 명령 실패를 기록만 하고 넘기면
+    '문제 0건' 으로 끝난다(2026-08-20 코덱스 검수 지적).
+    """
+    if ver is None:
+        return "판 번호를 못 읽습니다"
+    if ok is False:
+        return "계정 순환 가로채기가 벗겨졌습니다"
+    if install_failed:
+        return "가로채기 재설치 명령이 실패했습니다"
+    return None
 
 
 def handle(machine, dry: bool):
@@ -136,7 +159,10 @@ def handle(machine, dry: bool):
     log(f"{name}: 지금 {as_text(before)}")
 
     if dry:
-        return name, before, shim_ok(machine), None
+        # 확인만 하는 회차에도 판정은 똑같이 한다. 여기서 '문제 없음' 으로 흘리면
+        # 사람이 확인하려고 돌린 회차가 오히려 거짓 안심을 준다(코덱스 검수 지적).
+        ok = shim_ok(machine)
+        return name, before, ok, verdict(before, ok)
 
     r = run(machine["update"], UPDATE_TIMEOUT)
     if r is None or r.returncode != 0:
@@ -146,23 +172,27 @@ def handle(machine, dry: bool):
 
     # 갱신은 가로채기를 벗긴다(Mac 은 심볼릭을 덮어쓰고, winserver 는 원래 이름을 되살린다).
     # 그래서 갱신에 성공했든 이미 최신이었든 항상 다시 씌운다.
+    install_failed = False
     if machine.get("shim_install"):
         s = run(machine["shim_install"], SHORT_TIMEOUT)
         if s is None or s.returncode != 0:
+            install_failed = True
             log(f"{name}: 가로채기 재설치 실패")
 
     after = version_of(machine["version"])
     ok = shim_ok(machine)
+    if ok is False and machine.get("shim_install"):
+        # 갱신 직후에는 자리가 아직 정리되는 중일 수 있다. 2026-08-20 실측으로 Mac 의
+        # nvm 쪽 claude 가 한 번 덮이지 않은 채 남았고, 다시 씌우니 바로 붙었다.
+        log(f"{name}: 가로채기가 아직 벗겨져 있어 한 번 더 씌웁니다")
+        run(machine["shim_install"], SHORT_TIMEOUT)
+        ok = shim_ok(machine)
     if before and after and after > before:
         log(f"{name}: {as_text(before)} -> {as_text(after)} 로 올렸습니다")
     else:
         log(f"{name}: {as_text(after)} (그대로)")
 
-    if after is None:
-        return name, after, ok, "판 번호를 못 읽습니다"
-    if ok is False:
-        return name, after, ok, "계정 순환 가로채기가 벗겨졌습니다"
-    return name, after, ok, None
+    return name, after, ok, verdict(after, ok, install_failed)
 
 
 def main() -> int:
@@ -178,6 +208,8 @@ def main() -> int:
             problems.append(f"{name}: {as_text(ver)} 로 뒤처졌습니다"
                             f"(가장 높은 판 {as_text(newest)})")
 
+    for p in problems:  # 개수만 적으면 기록만 보고는 뭐가 걸렸는지 알 수 없다
+        log(f"  문제: {p}")
     log(f"끝. 가장 높은 판 {as_text(newest)}, 문제 {len(problems)}건")
 
     if problems and not dry:

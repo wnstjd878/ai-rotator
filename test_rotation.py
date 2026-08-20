@@ -1945,6 +1945,42 @@ def case_scoped_all_empty_notice():
           usage_view.scoped_left({}, "Fable", now) == (None, None))
 
 
+def case_cli_update_verdict():
+    """[45] CLI 자동 갱신 점검이 조용히 '문제 없음' 으로 끝나지 않는다.
+
+    2026-08-20 코덱스 검수 지적(재현 확인): 가로채기 재설치 명령이 실패해도 기록만 남기고
+    문제로 세지 않아 '문제 0건' 으로 끝날 수 있었다. install_shim.sh 는 자리를 여러 곳
+    (PATH·nvm) 덮으므로 일부만 실패하면 상태 확인은 통과한다. 확인만 하는 회차(--dry-run)도
+    판정을 건너뛰어 거짓 안심을 줬다.
+    """
+    print("\n[45] CLI 갱신 점검 판정")
+    import auto_update_cli as up
+
+    check("판을 못 읽으면 문제", up.verdict(None, True) is not None)
+    check("가로채기 벗겨지면 문제", up.verdict((2, 1, 237), False) is not None)
+    check("재설치 실패는 상태가 멀쩡해도 문제",
+          up.verdict((2, 1, 237), True, install_failed=True) is not None)
+    check("다 정상이면 조용", up.verdict((2, 1, 237), True) is None)
+
+    # Mac: PATH 쪽만 덮이고 nvm 쪽이 안 덮이면 nvm 을 불러온 봇이 순환기를 건너뛴다.
+    mac_ok = ("지금 연결: /Users/kwon/projects/ai-rotator/claude_shim.sh\n"
+              "상태: 순환 가로채기 설치됨\n"
+              "nvm claude: 가로채기 덮임 (/Users/kwon/.nvm/versions/node/v24.18.0/bin/claude)")
+    mac_partial = mac_ok.replace("가로채기 덮임", "안 덮임 — 순환기를 건너뛸 수 있음")
+    check("Mac 전부 덮이면 정상", up.judge_shim("Mac", mac_ok))
+    check("Mac nvm 이 안 덮이면 문제", not up.judge_shim("Mac", mac_partial))
+    check("Mac 원래 claude 면 문제",
+          not up.judge_shim("Mac", "지금 연결: /opt/homebrew/lib/node_modules/x/claude.exe"))
+
+    # winserver: 한글이 이 통로를 지나며 깨져 와도 True/False 줄만으로 갈려야 한다.
+    ws_ok = ("claude.exe   : False\nclaude-real.exe: True\nclaude.cmd   : True\n"
+             "����: ����")
+    ws_bypass = ws_ok.replace("claude.exe   : False", "claude.exe   : True")
+    check("winserver 밀려 있으면 정상", up.judge_shim("winserver", ws_ok))
+    check("winserver 원래 파일 되살아나면 문제", not up.judge_shim("winserver", ws_bypass))
+    check("winserver 출력을 못 읽으면 문제", not up.judge_shim("winserver", "연결 실패"))
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1976,6 +2012,7 @@ def main():
         case_meta_cleanup()
         case_scoped_usage_shared()
         case_scoped_all_empty_notice()
+        case_cli_update_verdict()
         case_shim_prompt_argument()
     finally:
         claude_pool.subprocess.run = real_run
