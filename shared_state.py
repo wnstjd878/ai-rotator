@@ -257,6 +257,12 @@ def put_usage(label: str, usage: dict, host: str | None = None,
     그런데 세 머신이 서로 다른 계정에 앉아 있으므로, 각자 읽은 값을 여기 올려두면
     아무 머신에서나 계정 넷의 잔여량을 다 볼 수 있다. 자격을 새로 발급받을 필요가 없다.
     **계정을 고르거나 막는 판단에는 쓰지 않는다** — 남의 머신이 읽은 시점의 값이라 낡을 수 있다.
+
+    모델 칸(`scoped`, 화면 표시 'Fable')도 같이 올린다. 이걸 빼면 계정 주간이 40% 남았어도
+    그 계정으로 Fable 이 되는지 알 수가 없다. 화면은 로컬 기록과 이 값 중 더 최신 것을 쓰는데,
+    남의 머신이 올린 값이 늘 더 새것이라 칸을 뺀 채로 올리면 로컬에 남아 있던 칸 값까지
+    덮여 사라진다(2026-08-20 실측: 현재 계정 A 만 Fable 이 보이고 B·D 는 안 보였다).
+    지피티 쪽은 이 칸이 없어 빈 것으로 올라가고, 읽는 쪽은 빈 칸을 그냥 안 적는다.
     """
     if not usage:
         return False
@@ -267,6 +273,7 @@ def put_usage(label: str, usage: dict, host: str | None = None,
             "session_pct": usage.get("session_pct"),
             "weekly_reset": usage.get("weekly_reset"),
             "session_reset": usage.get("session_reset"),
+            "scoped": usage.get("scoped") or {},
             "at": round(time.time()),
             "host": (host or _hostname())[:40],
         }, ensure_ascii=False),

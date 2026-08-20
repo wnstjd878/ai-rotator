@@ -1846,6 +1846,62 @@ def case_barred(tmp):
           (Path(tmp) / "creds" / "A.json").exists())
 
 
+def case_scoped_usage_shared():
+    """[43] 계정별 모델 칸(Fable)도 공유 칠판에 올린다.
+
+    2026-08-20 실사고: put_usage 가 주간·세션만 올려서 `cc` 화면에 현재 계정 A 만
+    Fable 이 보이고 B·D 는 안 보였다. 화면은 로컬 기록과 공유 값 중 더 최신 것을 쓰는데
+    남의 머신이 올린 값이 늘 더 새것이라, 칸을 뺀 채로 올리면 로컬에 남아 있던 칸 값까지
+    덮여 사라진다. 지금 안 쓰는 계정은 출입증이 8시간이라 실측이 안 되므로 이 길이 유일하다.
+    """
+    print("\n[43] 모델 칸(Fable)도 공유 칠판에 올린다")
+    import shared_state as ss
+    import usage_view
+    real_req = ss._request
+    sent = []
+
+    def capture(method, path, *, params="", body=None, headers=None):
+        if method == "POST":
+            sent.append(body)
+        return []
+
+    ss._request = capture
+    try:
+        now = time.time()
+        usage = {"weekly_pct": 40.0, "session_pct": 10.0,
+                 "weekly_reset": now + 3600, "session_reset": now + 3600,
+                 "scoped": {"Fable": {"pct": 100.0, "reset": now + 3600}}}
+        check("올리기 성공", ss.put_usage("B", usage))
+        val = json.loads(sent[0][0]["value"])
+        check("본문에 모델 칸이 실린다", val.get("scoped") == usage["scoped"],
+              f"{val.get('scoped')}")
+
+        sent.clear()
+        ss.put_usage("B", {"weekly_pct": 5.0, "weekly_reset": now + 3600})
+        val = json.loads(sent[0][0]["value"])
+        check("칸이 없는 도구(지피티)는 빈 칸으로", val.get("scoped") == {},
+              f"{val.get('scoped')}")
+    finally:
+        ss._request = real_req
+
+    # 화면: 남의 머신이 올린 값이 더 최신이어도 Fable 줄이 살아 있어야 한다.
+    now = time.time()
+    local = {"usage_seen": {"B": {"weekly_pct": 40.0, "weekly_reset": now + 3600,
+                                  "scoped": {"Fable": {"pct": 20.0, "reset": now + 3600}},
+                                  "at": now - 86400}}}
+    fresh = {"B": {"weekly_pct": 40.0, "weekly_reset": now + 3600,
+                   "scoped": {"Fable": {"pct": 100.0, "reset": now + 3600}},
+                   "at": now - 60, "host": "gwon-ui-Macmini"}}
+    line = usage_view.last_seen(local, fresh, "B", now)
+    check("남의 머신 값에서도 Fable 이 보인다", "Fable 남은 0%" in line, line)
+
+    # 옛 기록(칸 없음)이 더 최신이면 예전 화면 그대로 — 없는 칸을 지어내지 않는다.
+    old = {"B": {"weekly_pct": 40.0, "weekly_reset": now + 3600,
+                 "at": now - 10, "host": "gwon-ui-Macmini"}}
+    line = usage_view.last_seen(local, old, "B", now)
+    check("칸 없는 옛 기록은 그냥 안 적는다", "Fable" not in line, line)
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -1875,6 +1931,7 @@ def main():
                 case(tmp)
         case_shared_iso_roundtrip()
         case_meta_cleanup()
+        case_scoped_usage_shared()
         case_shim_prompt_argument()
     finally:
         claude_pool.subprocess.run = real_run
