@@ -1981,6 +1981,111 @@ def case_cli_update_verdict():
     check("winserver 출력을 못 읽으면 문제", not up.judge_shim("winserver", "연결 실패"))
 
 
+def case_scoped_exhausted_message(tmp):
+    """[46] 모델 칸만 바닥난 소진은 그렇게 말하고, 해제 시각도 그 칸으로 읽는다.
+
+    2026-08-20 실사고: Fable 칸만 A·B·D 전부 바닥인데 텔레그램엔 "클로드 구독 계정이
+    전부 한도에 걸렸습니다. 가장 빨리 풀리는 시각: 08월 21일 03:51" 이 나갔다.
+    계정 주간은 22~47% 남아 Opus 는 멀쩡했고, 03:51 은 B 의 5시간 한도가 풀리는
+    시각이라 Fable 이 실제로 풀리는 시각(08/21 16:00)보다 12시간 넘게 일렀다.
+    문구는 2026-08-14 에 전환 알림만 갈라 말하게 고쳤고 이 알림은 빠져 있었다.
+    """
+    print("\n[46] 칸만 바닥이면 그렇게 알리고 시각도 그 칸으로")
+    setup(tmp, ["A", "B", "D"], "B")
+    now = time.time()
+    fable_a, fable_b, fable_d = now + 46 * 3600, now + 17 * 3600, now + 75 * 3600
+    session_b = now + 5 * 3600   # B 는 5시간 한도로 계정 자체도 잠깐 막혀 있었다
+
+    state = st.load_state()
+    st.mark_blocked(state, "B", session_b, "세션 한도")
+    for label, until in (("A", fable_a), ("B", fable_b), ("D", fable_d)):
+        st.mark_scoped_blocked(state, label, "Fable", until)
+    st.save_state(state)
+    state = st.load_state()
+
+    # (1) 해제 시각
+    check("칸을 안 주면 예전대로 계정 막힘만 본다",
+          abs(st.earliest_reset(state) - session_b) < 2, st.earliest_reset(state))
+    got = st.earliest_reset(state, bucket="Fable")
+    check("칸을 주면 그 칸이 실제로 풀리는 시각", got is not None and abs(got - fable_b) < 2,
+          f"got={got} 기대={fable_b}")
+    check("계정 막힘보다 이른 시각을 알리지 않는다", got is not None and got > session_b,
+          f"got={got} session_b={session_b}")
+
+    # (2) 후보 판정 — 그 칸으로는 없고 계정 단위로는 남아 있다
+    check("그 칸으로는 쓸 계정이 없다", st.pick_next(state, bucket="Fable") is None)
+    check("계정 단위로는 아직 쓸 계정이 있다", st.pick_next(state) is not None,
+          st.pick_next(state))
+
+    # (3) 문구
+    msg = claude_pool._exhausted_message(state, "Fable", "08월 21일 16:00")
+    check("칸이 바닥이라고 말한다", "Fable 칸이 계정 전부 바닥" in msg, msg)
+    check("구독이 통째로 떨어진 것처럼 말하지 않는다", "구독 계정이 전부 한도" not in msg, msg)
+    check("받은 사람이 할 수 있는 행동을 적는다", "다른 모델로 켜면" in msg, msg)
+
+    blocked_all = st.load_state()
+    for label in ("A", "D"):
+        st.mark_blocked(blocked_all, label, now + 3 * 3600, "주간 한도")
+    msg2 = claude_pool._exhausted_message(blocked_all, "Fable", "08월 21일 16:00")
+    check("진짜 전 계정 소진이면 예전 문구 그대로",
+          "구독 계정이 전부 한도에 걸렸습니다" in msg2, msg2)
+    check("칸이 없어도 예전 문구",
+          "구독 계정이 전부 한도에 걸렸습니다"
+          in claude_pool._exhausted_message(state, None, "08월 21일 16:00"))
+
+    # (4) 영영 안 돌아올 계정의 시각을 '가장 빨리 풀림' 으로 알리지 않는다
+    state["scoped_blocked"]["Z"] = {"Fable": now + 60}       # 계정 목록에 없는 라벨
+    check("목록에 없는 라벨은 안 센다",
+          abs(st.earliest_reset(state, bucket="Fable") - fable_b) < 2)
+    state["scoped_blocked"]["A"]["Fable"] = now + 120        # A 가 가장 이르지만…
+    (Path(tmp) / "accounts.json").write_text(json.dumps(
+        [{"label": "A", "retired": True}, {"label": "B"}, {"label": "D"}]), encoding="utf-8")
+    check("구독을 해지한 계정 시각은 안 센다",
+          abs(st.earliest_reset(state, bucket="Fable") - fable_b) < 2,
+          st.earliest_reset(state, bucket="Fable"))
+    (Path(tmp) / "accounts.json").write_text(json.dumps(
+        [{"label": x} for x in ("A", "B", "D")]), encoding="utf-8")
+    (Path(tmp) / "creds" / "A.json").unlink()
+    check("저장본이 빠진 계정 시각도 안 센다",
+          abs(st.earliest_reset(state, bucket="Fable") - fable_b) < 2,
+          st.earliest_reset(state, bucket="Fable"))
+
+    # (5) 실제 거절 경로로 태워 본다 — 알림에 실려 나가는 문구와 시각까지
+    st.STATE_FILE.unlink()   # 앞 블록의 막힘 기록을 물려받지 않는다
+    setup(tmp, ["A", "B", "D"], "B")
+    state = st.load_state()
+    for label, until in (("A", fable_a), ("D", fable_d)):
+        st.mark_scoped_blocked(state, label, "Fable", until)
+    st.save_state(state)
+
+    import usage_check as uc
+    claude_pool.usage_check = uc
+    real_get = uc.get_usage
+    # 통신 없이 그 계정의 사용량을 흉내낸다: 주간은 여유, Fable 칸만 바닥.
+    uc.get_usage = lambda path: {"weekly_pct": 78.0, "session_pct": 12.0,
+                                 "weekly_reset": None, "session_reset": None,
+                                 "scoped": {"Fable": {"pct": 100.0, "reset": fable_b}}}
+    raised = None
+    try:
+        claude_pool._rotate_after_failure("B", "limit", LIMIT_OUT, "", bucket="Fable")
+    except claude_pool.AllAccountsExhausted as e:
+        raised = e
+    finally:
+        uc.get_usage = real_get
+        claude_pool.usage_check = None
+
+    check("쓸 계정이 없다고 올린다", raised is not None)
+    text = (raised.notify_message or "") if raised else ""
+    check("알림도 칸 소진으로 나간다", "Fable 칸이 계정 전부 바닥" in text, text)
+    check("알림 시각이 그 칸이 풀리는 시각",
+          raised is not None and raised.reset_at is not None
+          and abs(raised.reset_at - fable_b) < 2,
+          f"reset_at={raised.reset_at if raised else None} 기대={fable_b}")
+    after = st.load_state()
+    check("거절받은 계정을 통째로 막지 않는다", not st.is_blocked(after, label="B"),
+          f"blocked={after.get('blocked')}")
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -2005,7 +2110,8 @@ def main():
                      case_stuck_on_dead_account, case_model_scoped_limit,
                      case_scoped_no_reclaim, case_scoped_shared,
                      case_dead_quarantine, case_dead_alert_folded,
-                     case_keychain_pull_and_rescue, case_barred):
+                     case_keychain_pull_and_rescue, case_barred,
+                     case_scoped_exhausted_message):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
