@@ -84,6 +84,7 @@ function Do-Uninstall {
 function Do-Install {
   if (-not (Test-Path $Shim)) { throw "claude_shim.py 가 없습니다: $Shim" }
   $py = Get-Python
+  Clear-OldAside
 
   # 원본을 옆으로 민다(이미 밀려 있으면 판 번호가 높은 쪽을 남긴다).
   # 예전에는 재설치 때 새로 생긴 claude.exe 를 무조건 버렸다. 그런데 claude 가 스스로
@@ -95,7 +96,7 @@ function Do-Install {
       $newVer = Get-ClaudeVersion $Link
       $oldVer = Get-ClaudeVersion $Real
       if ($newVer -and (-not $oldVer -or $newVer -gt $oldVer)) {
-        Remove-Item $Real -Force
+        Move-OldAside $Real
         Move-Item $Link $Real -Force
         Write-Output ("새 판을 받았습니다: " + $oldVer + " -> " + $newVer)
       } else {
