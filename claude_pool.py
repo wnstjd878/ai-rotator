@@ -231,14 +231,18 @@ def _scoped_notice(bucket: str, rows, now: float) -> str | None:
     known = [(label, left, reset) for label, left, reset in rows if left is not None]
     if not known or any(left > SCOPED_LOW_LEFT for _, left, _ in known):
         return None
-    parts = [f"쓰려는 모델 칸({bucket})이 "
-             + ", ".join(label for label, _, _ in known) + " 전부 바닥입니다."]
+    labels = ", ".join(label for label, _, _ in known)
+    unknown = [label for label, left, _ in rows if left is None]
+    if unknown:
+        # 모르는 계정이 섞여 있으면 '쓸 계정이 없다' 고 단정하지 않는다. 확인한 범위만 말한다.
+        parts = [f"쓰려는 모델 칸({bucket}): 잔량을 확인한 계정({labels})은 모두 바닥입니다."]
+    else:
+        parts = [f"쓰려는 모델 칸({bucket}): 쓸 수 있는 계정이 없습니다({labels} 모두 바닥)."]
     soon = [(reset, label) for label, _, reset in known if reset]
     if soon:
         reset, label = min(soon)
         parts.append(f"가장 빨리 풀리는 건 {label}"
                      f" ({time.strftime('%m/%d %H:%M', time.localtime(reset))}).")
-    unknown = [label for label, left, _ in rows if left is None]
     if unknown:
         parts.append("잔량 모르는 계정: " + ", ".join(unknown) + ".")
     return "  " + " ".join(parts)

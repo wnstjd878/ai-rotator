@@ -1915,8 +1915,8 @@ def case_scoped_all_empty_notice():
 
     line = claude_pool._scoped_notice(
         "Fable", [("A", 0.0, late_reset), ("B", 0.0, soon_reset), ("D", 2.0, None)], now)
-    check("전부 바닥이면 알린다", bool(line) and "전부 바닥" in line, line)
-    check("계정이 다 적힌다", "A, B, D" in (line or ""), line)
+    check("전부 바닥이면 알린다", bool(line) and "쓸 수 있는 계정이 없습니다" in line, line)
+    check("계정이 다 적힌다", "A, B, D 모두 바닥" in (line or ""), line)
     check("가장 빨리 풀리는 계정을 짚는다", "가장 빨리 풀리는 건 B" in (line or ""), line)
 
     check("한 계정이라도 여유면 안 알린다",
@@ -1929,6 +1929,10 @@ def case_scoped_all_empty_notice():
         "Fable", [("A", 0.0, soon_reset), ("C", None, None)], now)
     check("모르는 계정은 바닥으로 안 세고 따로 적는다",
           bool(mixed) and "잔량 모르는 계정: C" in mixed, mixed)
+    # 확인 못 한 계정이 있는데 '쓸 계정이 없다' 고 단정하면 안 된다(2026-08-20 코덱스 지적, 재현됨).
+    check("모르는 계정이 섞이면 확인한 범위만 말한다",
+          "잔량을 확인한 계정(A)은 모두 바닥" in (mixed or "")
+          and "쓸 수 있는 계정이 없습니다" not in (mixed or ""), mixed)
 
     # 잔량 뽑기 규칙: 초기화 시각이 지난 기록은 그 칸이 다시 채워졌다는 뜻이다.
     passed = {"scoped": {"Fable": {"pct": 100.0, "reset": now - 10}}}
