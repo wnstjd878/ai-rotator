@@ -121,12 +121,10 @@ LOCK_TIMEOUT = 60  # 잠금 대기 상한(초). 넘으면 예외로 알린다.
 RECLAIM_MIN_GAP = 10 * 60  # 앞순위 계정으로 되돌리는 시도의 최소 간격(초)
 # 떠 있는 창의 표시를 최대 이만큼만 믿는다. 프로세스 번호는 언젠가 재사용되므로,
 # 생존 확인이 통과해도 너무 오래된 표시는 남의 것일 수 있다고 보고 걷어낸다.
-# **살아 있는 창이 잘리면 안 되므로 넉넉히 둔다** — 상태줄이 창이 떠 있는 동안 한 시간마다
-# 표시를 다시 찍어(statusline.keep_window_claim) 시각이 갱신되기 때문에, 실사용에서 이 상한에
-# 닿는 건 상태줄이 안 도는 자리뿐이다(2026-08-22 코덱스 검수: 12시간이면 하루 열어둔 창이 풀린다).
+# **살아 있는 창이 잘리면 안 되므로 넉넉히 둔다** — prune_claims 가 살아 있는 창의 시각을
+# 매번 다시 찍으므로, 이 상한에 닿는 건 그 확인 자체가 오랫동안 안 돈 기계뿐이다
+# (2026-08-22 코덱스 검수: 12시간이면 하루 열어둔 창이 보호에서 빠졌다).
 CLAIM_MAX_AGE = 7 * 24 * 3600
-# 상태줄이 표시를 다시 찍는 간격. 이보다 오래된 표시는 모델이 그대로여도 한 번 갱신한다.
-CLAIM_REFRESH = 3600
 
 
 class LockTimeout(RuntimeError):
@@ -442,7 +440,15 @@ def drop_session_claim(state: dict, pid) -> dict:
 
 
 def prune_claims(state: dict, now: float | None = None) -> dict:
-    """죽은 창과 너무 오래된 예약을 걷어낸다. prune_blocked 가 매번 같이 부른다."""
+    """죽은 창과 너무 오래된 표시를 걷어낸다. prune_blocked 가 매번 같이 부른다.
+
+    **살아 있는 창은 여기서 시각을 다시 찍는다.** 그래야 하루 종일 열어둔 창이 상한에
+    걸려 보호에서 빠지지 않는다(2026-08-22 코덱스 검수: 상태줄이 대신 찍어주리라 기대했는데,
+    그건 이 저장소 밖 코드라 여기서 자급자족하는 게 맞다). 봇 호출이 지날 때마다 도는
+    자리라 창이 살아 있는 한 시각은 늘 새것으로 남는다.
+    상한은 그래서 "이 확인 자체가 오랫동안 안 돈 기계" 의 찌꺼기를 치우는 안전망일 뿐이고,
+    죽은 창은 상한과 무관하게 생존 확인에서 바로 걷힌다.
+    """
     now = time.time() if now is None else now
     alive = {}
     for key, item in _clean_claims(state.get("session_claims")).items():
@@ -450,6 +456,7 @@ def prune_claims(state: dict, now: float | None = None) -> dict:
             continue
         if not _pid_alive(key):
             continue
+        item["at"] = now   # 살아 있음을 확인한 시각으로 갱신
         alive[key] = item
     state["session_claims"] = alive
     return state

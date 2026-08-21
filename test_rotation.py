@@ -2341,11 +2341,28 @@ def case_window_claim_edges(tmp):
         else:
             os.environ["CLAUDE_ROTATOR_CLAIM_PID"] = real_env
 
-    # (3) 오래 열어둔 창이 상한에 안 걸린다(상태줄이 한 시간마다 다시 찍는 전제)
+    # (3) 오래 열어둔 창은 상한에 안 걸린다 — 살아 있으면 확인할 때마다 시각을 다시 찍는다
     check("상한은 하루보다 넉넉하다", st.CLAIM_MAX_AGE >= 24 * 3600,
           f"CLAIM_MAX_AGE={st.CLAIM_MAX_AGE}")
-    check("다시 찍는 간격이 상한보다 훨씬 짧다", st.CLAIM_REFRESH * 24 <= st.CLAIM_MAX_AGE,
-          f"{st.CLAIM_REFRESH} / {st.CLAIM_MAX_AGE}")
+    real_alive2 = st._pid_alive
+    st._pid_alive = lambda pid: True
+    try:
+        old = time.time() - st.CLAIM_MAX_AGE + 60   # 상한 직전까지 오래된 표시
+        s = {"session_claims": {"4242": {"bucket": "Fable", "at": old,
+                                         "label": "B", "model": "fable"}}}
+        st.prune_claims(s)
+        got = (s["session_claims"].get("4242") or {}).get("at")
+        check("살아 있는 창은 시각이 새로 찍힌다", got is not None and got > old + 60,
+              f"at={got}, 이전={old}")
+        # 여러 번 지나가도 살아 있는 한 계속 남는다(상한에 영영 안 닿는다)
+        for _ in range(3):
+            st.prune_claims(s)
+        check("여러 회차를 지나도 남아 있다", "4242" in s["session_claims"])
+        st._pid_alive = lambda pid: False
+        st.prune_claims(s)
+        check("죽으면 상한과 무관하게 바로 걷힌다", s["session_claims"] == {})
+    finally:
+        st._pid_alive = real_alive2
 
 
 def case_pid_alive():
