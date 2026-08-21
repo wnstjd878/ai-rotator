@@ -2221,6 +2221,102 @@ def case_scoped_reopen(tmp):
     check("두 번째 회차엔 조용하다", usage_alert.check_scoped_reopen() == [])
 
 
+def case_window_claim(tmp):
+    """[48] 사람이 쓰는 창이 잡은 모델 칸을 봇 호출이 뺏지 않는다.
+
+    2026-08-22 실사고: Fable 로 켠 창이 B 를 쓰고 있는데, Opus 로 부르는 봇 호출이
+    "앞순위 A 는 안 막혔다"며 7~10분마다 A 로 되돌렸다. A 는 Fable 칸만 바닥이라
+    계정 단위로는 멀쩡해 보였고, 자격은 이 컴퓨터에 한 벌뿐이라 창까지 A 로 끌려가
+    사용자는 계정을 바꿨다는 알림을 받고도 계속 Fable 한도 문구를 봤다.
+    """
+    print("\n[48] 떠 있는 창의 모델 칸을 봇이 안 뺏는다")
+    import usage_check as uc
+
+    setup(tmp, ["A", "B"], "B")     # 자동 전환으로 B 에 앉아 있는 상황
+    claude_pool.usage_check = uc    # run() 이 칸 이름을 뽑게 한다(순수 함수만 탄다)
+    state = st.load_state()
+    st.mark_scoped_blocked(state, "A", "Fable", time.time() + 3600)
+    state["reclaim_at"] = None      # 간격 제한이 판정을 가리지 않게
+    st.save_state(state)
+
+    real_alive = st._pid_alive
+    alive = {"4242"}                # 이 번호의 창이 떠 있다고 친다
+    st._pid_alive = lambda pid: str(pid) in alive
+    try:
+        # (1) 창이 Fable 로 떠 있다고 표시한다
+        got = claude_pool.claim_session(4242, model="claude-fable-5[1m]")
+        check("표시한 칸이 Fable", got == "Fable", f"got={got}")
+        check("창 칸이 보인다", st.claimed_buckets(st.load_state()) == ("Fable",),
+              f"칸={st.claimed_buckets(st.load_state())}")
+
+        # (2) 사고 재현: Opus 봇 호출이 앞순위 A 로 되돌리지 않는다
+        fake = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+        install(fake)
+        proc = claude_pool.run(["claude", "-p", "안녕", "--model", "opus[1m]"])
+        check("봇 호출 성공", proc.returncode == 0)
+        check("창이 안 밀린다(B 유지)", st.load_state()["current"] == "B",
+              f"현재={st.load_state()['current']}")
+        check("교체 자체가 없다", fake.switches == [], f"switches={fake.switches}")
+
+        # (3) 창이 닫히면 예전처럼 앞순위 A 로 되돌아간다(순차 소진은 그대로)
+        alive.clear()
+        s = st.load_state()
+        s["reclaim_at"] = None
+        st.save_state(s)
+        fake2 = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+        install(fake2)
+        proc = claude_pool.run(["claude", "-p", "안녕", "--model", "opus[1m]"])
+        check("창이 닫히면 A 로 되돌아간다", st.load_state()["current"] == "A",
+              f"현재={st.load_state()['current']}")
+        check("죽은 창 표시는 걷힌다", st.load_state().get("session_claims") == {},
+              f"표시={st.load_state().get('session_claims')}")
+
+        # (4) 둘 다 만족하는 계정이 없으면 봇을 멈추지 않는다(창이 밀리더라도)
+        alive.add("4242")
+        s = st.load_state()
+        st.set_current(s, "B", "시험 준비")
+        st.mark_blocked(s, "B", time.time() + 3600, "시험: B 통째로 막힘")
+        s["reclaim_at"] = None
+        st.save_state(s)
+        claude_pool.claim_session(4242, model="claude-fable-5[1m]")
+        fake3 = Fake({"A": (0, OK_OUT, ""), "B": (0, OK_OUT, "")})
+        install(fake3)
+        proc = claude_pool.run(["claude", "-p", "안녕", "--model", "opus[1m]"])
+        check("봇은 멈추지 않는다", proc.returncode == 0)
+        check("다른 수가 없으면 A 로 간다", st.load_state()["current"] == "A",
+              f"현재={st.load_state()['current']}")
+
+        # (5) 표시 지우기
+        claude_pool.release_session(4242)
+        check("표시가 지워진다", st.claimed_buckets(st.load_state()) == (),
+              f"칸={st.claimed_buckets(st.load_state())}")
+    finally:
+        st._pid_alive = real_alive
+
+
+def case_pid_alive():
+    """[49] 프로세스 생존 확인이 실제로 맞는지(창 표시가 영영 안 걷히면 계정이 좁아진다)."""
+    print("\n[49] 프로세스 생존 확인")
+    import os
+
+    check("나 자신은 살아 있다", st._pid_alive(os.getpid()) is True)
+    # 끝난 자식의 번호는 죽은 것으로 나와야 한다(좀비가 안 남게 wait 까지 한다)
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    check("끝난 프로세스는 죽은 것으로 본다", st._pid_alive(child.pid) is False,
+          f"pid={child.pid}")
+    check("이상한 값은 죽은 것으로 본다",
+          st._pid_alive(0) is False and st._pid_alive("없음") is False
+          and st._pid_alive(-1) is False)
+
+    # 오래된 표시는 프로세스가 살아 있어도 걷어낸다(번호 재사용 대비)
+    state = {"session_claims": {str(os.getpid()): {
+        "bucket": "Fable", "at": time.time() - st.CLAIM_MAX_AGE - 60, "label": "A"}}}
+    st.prune_claims(state)
+    check("너무 오래된 표시는 걷어낸다", state["session_claims"] == {},
+          f"남은 것={state['session_claims']}")
+
+
 def main():
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -2246,7 +2342,8 @@ def main():
                      case_scoped_no_reclaim, case_scoped_shared,
                      case_dead_quarantine, case_dead_alert_folded,
                      case_keychain_pull_and_rescue, case_barred,
-                     case_scoped_exhausted_message, case_scoped_reopen):
+                     case_scoped_exhausted_message, case_scoped_reopen,
+                     case_window_claim):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -2255,6 +2352,7 @@ def main():
         case_scoped_all_empty_notice()
         case_cli_update_verdict()
         case_shim_prompt_argument()
+        case_pid_alive()
     finally:
         claude_pool.subprocess.run = real_run
         claude_pool._switch = real_switch

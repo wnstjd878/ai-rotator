@@ -71,6 +71,7 @@ AUTH_REJECT_STUCK = 3 * 60      # 같은 계정이 이 시간을 넘겨 계속 �
 FORCED_ROTATE_COOLDOWN = 5 * 60  # 그렇게 강제로 넘길 때 그 계정을 쉬게 할 시간(초)
 BARRED_COOLDOWN = 24 * 3600     # 조직 설정 차단(barred) 계정을 쉬게 할 시간. 관리자가 다시 켤 수 있어 하루 뒤 재확인
 SCOPED_LOW_LEFT = 5.0           # 모델 칸이 이만큼 이하로 남으면 바닥으로 본다(which_limit 의 95% 와 같은 선)
+CLAIM_LOCK_TIMEOUT = 5          # 창 표시를 적을 때 잠금을 기다리는 상한(초). 창 켜기를 늦추지 않는다
 KEYCHAIN_FIX_COOLDOWN = 60 * 60  # 열쇠꾸러미를 스스로 지운 뒤, 다시 지우기까지 두는 시간
 KEYCHAIN_STAMP = BASE / ".keychain-cleared"  # 마지막으로 스스로 지운 시각
 CLAUDE_BINS = (
@@ -389,7 +390,7 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN,
                     scoped_only = True
             if not scoped_only:
                 st.mark_blocked(state, cur, time.time() + cooldown, "사람이 한도 도달로 지정")
-        nxt = st.pick_next(state, exclude=cur, bucket=bucket)
+        nxt = _pick_account(state, exclude=cur, bucket=bucket)
         if nxt is None:
             st.save_state(state)
             reset_at = st.earliest_reset(state, bucket=bucket)
@@ -1510,6 +1511,21 @@ def main():
             print("사용법: python claude_pool.py --use <라벨>")
             return 1
         return use(argv[1].strip())
+    if argv[0] == "--claim":
+        # 뒤에 붙는 건 켜려는 claude 의 인자다. --model 이 없으면 settings.json 고정값을 본다.
+        if len(argv) < 2:
+            print("사용법: python claude_pool.py --claim <프로세스번호> [claude 인자...]")
+            return 1
+        got = claim_session(argv[1], argv=argv[2:])
+        if got:
+            print(f"[창 표시] 이 창이 {got} 칸을 씁니다. 봇 호출이 이 칸을 뺏지 않습니다.")
+        return 0
+    if argv[0] == "--unclaim":
+        if len(argv) < 2:
+            print("사용법: python claude_pool.py --unclaim <프로세스번호>")
+            return 1
+        release_session(argv[1])
+        return 0
     if argv[0] == "--":
         try:
             proc = run_claude(argv[1:])

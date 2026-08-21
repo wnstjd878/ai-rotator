@@ -8,12 +8,18 @@ $fails = 0
 # 첫 실행은 사용자가 준 인자 그대로. 한도로 갈아탄 뒤 다시 켤 때만 --continue 를 붙여
 # 직전 대화를 이어받는다. (처음부터 --continue 를 박으면 새 대화를 못 연다)
 $runArgs = @($args)
+# 이 창이 쓰는 모델 칸을 표시해 둔다(2026-08-22). 봇 단발 호출이 계정을 갈아끼울 때
+# 이 칸이 막힌 계정으로는 안 넘어간다. 창이 끝나면 지우고, 못 지워도 이 프로세스가
+# 죽으면 순환기가 알아서 걷어낸다.
+try {
 while ($true) {
     # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
     # (감싸는 코드는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
     # 인자를 같이 넘긴다 — 그래야 --model 을 보고 그 모델 칸(예: Fable)까지 확인한다.
     # 인자에 없으면 순환기가 settings.json 에 고정된 모델을 대신 본다.
     python $POOL --ensure @runArgs
+    # 계정이 정해진 뒤에 이 창의 모델 칸을 표시한다(같은 번호로 다시 부르면 갱신된다).
+    python $POOL --claim $PID @runArgs
     # 켜기 직전 계정별 사용량을 화면에 먼저 보여준다(사용자 요구 2026-07-29).
     # claude 안에서는 이 값을 볼 수 없어서, 감싸는 코드가 뜨기 전에 찍는 자리가 유일하다.
     Write-Host ""
@@ -51,4 +57,7 @@ while ($true) {
         Write-Host "[자동순환] 정상 종료." -ForegroundColor Cyan
         break
     }
+}
+} finally {
+    python $POOL --unclaim $PID | Out-Null
 }

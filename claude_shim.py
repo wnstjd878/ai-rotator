@@ -5,7 +5,9 @@
 설치: /opt/homebrew/bin/claude 심볼릭 링크를 install_shim.sh 로 이 스크립트를 가리키게 바꾼다.
       되돌리기: install_shim.sh --uninstall
 동작: 아래 어느 하나라도 해당하면 아무것도 안 하고 진짜 claude 로 그대로 넘긴다(투명).
-      - 대화형 실행 (-p / --print 가 없음): 사람이 쓰는 창은 건드리지 않는다
+      - 대화형 실행 (-p / --print 가 없음): 사람이 쓰는 창은 건드리지 않는다.
+        다만 그 창이 쓰는 모델 칸만 상태 파일에 표시한다(claim_window) — 봇 호출이
+        계정을 갈아끼울 때 그 칸이 막힌 계정으로 넘어가 창을 못 쓰게 만드는 걸 막는다.
       - 자격 저장본이 2개 미만: 순환할 계정이 없으니 끼어들 이유가 없다
       - CLAUDE_ROTATOR_DISABLED=1 : 손으로 끈 경우
       - 이미 순환기 안에서 부른 호출 (되돌이 방지)
@@ -94,6 +96,33 @@ def passthrough(argv):
     os.execv(REAL_CLAUDE, [REAL_CLAUDE, *argv])
 
 
+# 창이 아니라 잠깐 돌고 끝나는 호출들. 여기에 표시를 남길 이유가 없다.
+NOT_A_WINDOW = {"--version", "-v", "--help", "-h", "doctor", "update", "mcp", "config",
+                "install", "migrate-installer", "setup-token", "plugin", "agents"}
+
+
+def claim_window(argv) -> None:
+    """사람이 쓰는 창이 어느 모델 칸을 쓰는지 표시한다. 실패해도 그냥 넘어간다.
+
+    자격은 이 컴퓨터에 한 벌뿐이라, 창이 떠 있는 동안 봇 단발 호출이 계정을 갈아끼우면
+    창까지 끌려가 한도 문구를 받는다(2026-08-22 실사고: Fable 창이 B 를 쓰는데 봇이
+    10분마다 A 로 되돌려 창이 계속 거절받았다). 표시해두면 계정을 고르는 자리가
+    그 칸이 막힌 계정을 피한다.
+    유닉스는 execv 가 프로세스 번호를 그대로 물려받고, 윈도우는 이 프로세스가 자식을
+    끝까지 기다린다. 그래서 어느 쪽이든 여기 적은 번호의 수명이 곧 창의 수명이다.
+    """
+    if any(a in NOT_A_WINDOW for a in argv):
+        return
+    try:
+        if ROTATOR_DIR not in sys.path:
+            sys.path.insert(0, ROTATOR_DIR)
+        import claude_pool
+
+        claude_pool.claim_session(os.getpid(), argv=argv)
+    except Exception:
+        pass
+
+
 def is_single_shot(argv) -> bool:
     for a in argv:
         if a in PRINT_FLAGS:
@@ -148,6 +177,7 @@ def main():
     if os.environ.get(GUARD_ENV) or os.environ.get(DISABLE_ENV):
         passthrough(argv)
     if not is_single_shot(argv):
+        claim_window(argv)  # 사람 창이 쓰는 모델 칸을 봇이 뺏지 못하게 표시만 남긴다
         passthrough(argv)
 
     # 여기서부터 순환 대상. 순환기를 못 불러오면 그냥 원래대로 넘긴다.
