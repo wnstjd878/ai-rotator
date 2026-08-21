@@ -2481,6 +2481,25 @@ def case_limit_with_split_cred(tmp):
         check("그래도 아무 계정도 안 막는다", not st.load_state().get("blocked"),
               f"막힘={st.load_state().get('blocked')}")
 
+        # (5) 예약을 마무리해 정착시킨 계정을 다음 시도가 곧바로 앞순위로 되돌리면 안 된다.
+        #     되돌리면 재시도가 또 옛 계정으로 나가 헛돈다(재시도 횟수가 적으면 그대로 실패).
+        setup(tmp, ["A", "B"], "A")
+        s = st.load_state()
+        s["blocked"], s["reclaim_at"] = {}, None
+        st.save_state(s)
+        claude_pool._settle_pending_switch = lambda: (True, "B")
+        fake5 = Fake({"A": (0, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
+        install(fake5)
+        proc = claude_pool.run(["claude", "-p", "안녕"], max_attempts=2)
+        ok = False
+        try:
+            ok = json.loads(proc.stdout or "{}").get("is_error") is False
+        except Exception:
+            ok = False
+        check("두 번째 시도는 정착한 계정으로 나간다", ok, f"응답={(proc.stdout or '')[:60]}")
+        check("정착한 계정에 그대로 있다", st.load_state().get("current") == "B",
+              f"현재={st.load_state().get('current')}")
+
         # (4) 실물 함수: 예약 마무리가 찍는 줄이 봇 답변 쪽으로 새면 안 된다
         #     (봇은 이 호출의 출력을 그대로 JSON 으로 읽는다)
         setup(tmp, ["A", "B"], "A")

@@ -1220,6 +1220,10 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                 # 막으면 멀쩡한 계정이 몇 시간 잠긴다(2026-08-22 B 계정 실사고).
                 log(f"자격 파일과 열쇠꾸러미가 어긋나 있었습니다. 방금 맞췄고 "
                     f"'{used_label}' 은 막지 않습니다. 같은 계정으로 다시 시도합니다.")
+                # 방금 정착시킨 계정을 다음 시도가 곧바로 앞순위로 되돌리면 재시도가 헛돈다
+                # (2026-08-22 코덱스 검수, 재현: 두 번 다 옛 계정으로 나가 실패로 끝났다).
+                # 되돌리기 간격을 지금부터 새로 센다.
+                st.note_reclaim(state)
                 if settled_label and settled_label != current:
                     # 지금 실제로 꽂힌 자격은 예약에 적혀 있던 계정이다. 상태를 안 맞추면
                     # 다음 거절이 또 엉뚱한 계정에 찍힌다(예약은 손 작업으로도 생긴다).
