@@ -528,11 +528,15 @@ def note_session_claim(state: dict, pid, bucket: str, label: str | None = None,
         return state
     claims = _clean_claims(state.get("session_claims"))
     prev = claims.get(key) or {}
+    # 그 창이 맞는지 나중에 알아보려고 시작 시각도 적는다(번호는 재사용된다).
+    # **지금 값을 먼저 읽는다** — 예전 값을 그냥 물려주면, 번호가 재사용된 자리에서 새 창의
+    # 표시에 남의 시작 시각이 붙어 다음 정리 때 통째로 지워진다(2026-08-22 코덱스 검수).
+    started = _pid_started(key)
+    if started is None:
+        started = prev.get("started")
     claims[key] = {"bucket": str(bucket),
                    "at": time.time() if now is None else now,
-                   # 그 창이 맞는지 나중에 알아보려고 시작 시각도 적는다(번호는 재사용된다).
-                   "started": prev.get("started") if prev.get("started") is not None
-                   else _pid_started(key),
+                   "started": started,
                    "label": str(label) if label else None,
                    "model": str(model) if model else None}
     state["session_claims"] = claims
@@ -581,8 +585,9 @@ def prune_claims(state: dict, now: float | None = None) -> dict:
 def claimed_buckets(state: dict, now: float | None = None) -> tuple:
     """지금 떠 있는 창들이 잡고 있는 모델 칸 이름들.
 
-    죽은 창은 세지 않는다(prune_claims 를 안 거친 상태로 불려도 맞게 답하도록
-    여기서도 한 번 더 본다).
+    죽은 창과 번호가 재사용된 찌꺼기는 세지 않는다. prune_claims 를 안 거친 상태로
+    불려도 맞게 답해야 하므로 여기서도 같은 기준으로 한 번 더 본다
+    (2026-08-22 코덱스 검수: 정리보다 먼저 불리면 없는 창의 칸을 세고 있었다).
     """
     now = time.time() if now is None else now
     names = []
@@ -590,6 +595,8 @@ def claimed_buckets(state: dict, now: float | None = None) -> tuple:
         if now - item["at"] > CLAIM_MAX_AGE:
             continue
         if not _pid_alive(key):
+            continue
+        if _same_process(key, item.get("started")) is False:
             continue
         if item["bucket"] not in names:
             names.append(item["bucket"])
