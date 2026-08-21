@@ -394,16 +394,20 @@ def _clean_claims(raw) -> dict:
         except (TypeError, ValueError):
             at = 0.0
         label = item.get("label")
+        model = item.get("model")
         out[key] = {"bucket": bucket, "at": at,
-                    "label": str(label) if label else None}
+                    "label": str(label) if label else None,
+                    "model": str(model) if model else None}
     return out
 
 
 def note_session_claim(state: dict, pid, bucket: str, label: str | None = None,
-                       now: float | None = None) -> dict:
+                       now: float | None = None, model: str | None = None) -> dict:
     """사람이 쓰는 창이 이 모델 칸을 잡고 있다고 적는다(이 머신 안에서만 쓴다).
 
     같은 프로세스 번호로 다시 부르면 갱신한다(창 안에서 /model 로 모델을 바꾼 경우).
+    `model` 은 그때 본 모델 이름 원문이다. 상태줄이 "지금 모델이 적힌 것과 다른가"를
+    문자열 하나로 값싸게 판단하는 데 쓴다(칸 변환 규칙을 두 벌로 두지 않으려고).
     """
     if not bucket:
         return state
@@ -414,7 +418,8 @@ def note_session_claim(state: dict, pid, bucket: str, label: str | None = None,
     claims = _clean_claims(state.get("session_claims"))
     claims[key] = {"bucket": str(bucket),
                    "at": time.time() if now is None else now,
-                   "label": str(label) if label else None}
+                   "label": str(label) if label else None,
+                   "model": str(model) if model else None}
     state["session_claims"] = claims
     return state
 

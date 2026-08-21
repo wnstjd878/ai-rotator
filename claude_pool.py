@@ -532,7 +532,7 @@ def claim_session(pid, model: str | None = None, argv=None) -> str | None:
         with st.with_lock(timeout=CLAIM_LOCK_TIMEOUT):
             state = st.load_state()
             st.prune_claims(state)
-            st.note_session_claim(state, pid, bucket, state.get("current"))
+            st.note_session_claim(state, pid, bucket, state.get("current"), model=want)
             st.save_state(state)
     except Exception:
         return None

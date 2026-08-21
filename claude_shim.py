@@ -36,6 +36,9 @@ for _stream in (sys.stdin, sys.stdout, sys.stderr):
         pass
 
 GUARD_ENV = "CLAUDE_ROTATOR_ACTIVE"
+# 이 창의 표시가 어느 프로세스 번호로 적혀 있는지. 창 안에서 도는 상태줄이 읽어
+# /model 로 바뀐 모델을 그 번호의 표시에 갱신한다.
+CLAIM_PID_ENV = "CLAUDE_ROTATOR_CLAIM_PID"
 DISABLE_ENV = "CLAUDE_ROTATOR_DISABLED"
 FALLBACK_ENV = "CLAUDE_API_FALLBACK"   # 이 값이 "1" 인 호출만 직접 호출로 대체
 ROTATOR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -113,12 +116,17 @@ def claim_window(argv) -> None:
     """
     if any(a in NOT_A_WINDOW for a in argv):
         return
+    if os.environ.get(CLAIM_PID_ENV):
+        return  # ccauto 가 이미 이 창을 표시했다(그 번호가 창의 대표 번호다)
     try:
         if ROTATOR_DIR not in sys.path:
             sys.path.insert(0, ROTATOR_DIR)
         import claude_pool
 
-        claude_pool.claim_session(os.getpid(), argv=argv)
+        if claude_pool.claim_session(os.getpid(), argv=argv):
+            # 창 안에서 도는 상태줄이 "내 표시가 어느 번호인지" 알게 물려준다.
+            # /model 로 모델을 바꾸면 상태줄이 이 번호의 표시를 갱신한다.
+            os.environ[CLAIM_PID_ENV] = str(os.getpid())
     except Exception:
         pass
 
