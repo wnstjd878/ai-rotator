@@ -10,6 +10,11 @@
       history      : 최근 교체 기록 20건 (라벨, 시각, 사유)
       manual       : 사람이 --use 로 직접 고른 계정 (있으면 되돌리기가 건드리지 않는다)
       reclaim_at   : 마지막 되돌리기 시도 시각(epoch) — 잦은 왕복을 막는 간격 기준
+      session_claims: 지금 떠 있는 사람 창이 잡고 있는 모델 칸
+                     {프로세스번호: {bucket, label, at}} — 이 머신 안에서만 쓴다.
+                     자격은 머신마다 한 벌뿐이라, 봇 호출이 계정을 갈아끼우면 떠 있는
+                     창까지 같이 끌려간다. 그 창이 쓰는 칸이 막힌 계정으로는 안 넘어가려고
+                     적어둔다(2026-08-22 수리).
 동시성: with_lock() 안에서만 상태를 바꾼다. 잠금은 state.lock 파일이며
       macOS/리눅스는 fcntl, Windows 는 msvcrt 로 건다.
 외부 의존: 없음 (표준 라이브러리만)
@@ -114,6 +119,9 @@ def _from_shared(key: str):
 HISTORY_MAX = 20
 LOCK_TIMEOUT = 60  # 잠금 대기 상한(초). 넘으면 예외로 알린다.
 RECLAIM_MIN_GAP = 10 * 60  # 앞순위 계정으로 되돌리는 시도의 최소 간격(초)
+# 떠 있는 창의 예약을 최대 이만큼만 믿는다. 프로세스 번호는 언젠가 재사용되므로,
+# 생존 확인이 통과해도 너무 오래된 예약은 남의 것일 수 있다고 보고 걷어낸다.
+CLAIM_MAX_AGE = 12 * 3600
 
 
 class LockTimeout(RuntimeError):
@@ -243,7 +251,7 @@ def _blank_state() -> dict:
     return {"current": None, "blocked": {}, "switched_at": None, "history": [],
             "notified_for": None, "notified_at": None,
             "manual": None, "reclaim_at": None, "auth_rejects": {},
-            "scoped_blocked": {}}
+            "scoped_blocked": {}, "session_claims": {}}
 
 
 def _clean_scoped(raw) -> dict:
@@ -287,14 +295,172 @@ def mark_scoped_blocked(state: dict, label: str, bucket: str, until_epoch: float
     return state
 
 
-def is_scoped_blocked(state: dict, label: str, bucket: str | None,
-                      now: float | None = None) -> bool:
-    """그 계정의 그 모델 칸이 아직 막혀 있는지. 칸을 안 주면 항상 False."""
+def bucket_names(bucket) -> tuple:
+    """칸 이름 하나 또는 여러 개를 받아 튜플로 정리한다. 빈 값이면 빈 튜플.
+
+    한 호출이 여러 칸을 한꺼번에 따져야 하는 경우가 있다. 봇이 Opus 로 부르는 동안
+    사람 창이 Fable 로 떠 있으면, 갈아탈 계정은 **두 칸이 다 열린** 계정이어야 한다.
+    """
     if not bucket:
+        return ()
+    if isinstance(bucket, str):
+        return (bucket,)
+    try:
+        seen, out = set(), []
+        for b in bucket:
+            name = str(b).strip()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+        return tuple(out)
+    except TypeError:
+        return (str(bucket),)
+
+
+def is_scoped_blocked(state: dict, label: str, bucket,
+                      now: float | None = None) -> bool:
+    """그 계정의 그 모델 칸이 아직 막혀 있는지. 칸을 안 주면 항상 False.
+
+    칸을 여러 개 주면 **하나라도** 막혀 있으면 True 다. 그 계정으로 갈아타 봐야
+    떠 있는 창이나 이번 호출 중 하나는 곧바로 거절받기 때문이다.
+    """
+    names = bucket_names(bucket)
+    if not names:
         return False
     now = time.time() if now is None else now
-    until = (_clean_scoped(state.get("scoped_blocked")).get(str(label)) or {}).get(str(bucket))
-    return bool(until and until > now)
+    box = _clean_scoped(state.get("scoped_blocked")).get(str(label)) or {}
+    return any(box.get(name, 0) > now for name in names)
+
+
+def _pid_alive(pid) -> bool:
+    """그 프로세스 번호가 아직 살아 있는지. 확인할 수 없으면 살아 있는 것으로 본다.
+
+    죽었다고 잘못 보면 사람이 쓰는 창을 밀어내므로, 애매하면 살아 있는 쪽으로 기운다.
+    너무 오래된 예약은 CLAIM_MAX_AGE 가 따로 걷어낸다.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False  # 이미 사라졌다
+            try:
+                code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True  # 확인 수단이 없으면 살아 있는 것으로 본다
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 남의 프로세스지만 살아는 있다
+    except OSError:
+        return True
+
+
+def _clean_claims(raw) -> dict:
+    """떠 있는 창 예약을 {프로세스번호: {bucket, label, at}} 으로 다듬는다."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for pid, item in raw.items():
+        if not isinstance(item, dict):
+            continue
+        bucket = str(item.get("bucket") or "").strip()
+        if not bucket:
+            continue
+        try:
+            key = str(int(pid))
+        except (TypeError, ValueError):
+            continue
+        try:
+            at = float(item.get("at") or 0)
+        except (TypeError, ValueError):
+            at = 0.0
+        label = item.get("label")
+        out[key] = {"bucket": bucket, "at": at,
+                    "label": str(label) if label else None}
+    return out
+
+
+def note_session_claim(state: dict, pid, bucket: str, label: str | None = None,
+                       now: float | None = None) -> dict:
+    """사람이 쓰는 창이 이 모델 칸을 잡고 있다고 적는다(이 머신 안에서만 쓴다).
+
+    같은 프로세스 번호로 다시 부르면 갱신한다(창 안에서 /model 로 모델을 바꾼 경우).
+    """
+    if not bucket:
+        return state
+    try:
+        key = str(int(pid))
+    except (TypeError, ValueError):
+        return state
+    claims = _clean_claims(state.get("session_claims"))
+    claims[key] = {"bucket": str(bucket),
+                   "at": time.time() if now is None else now,
+                   "label": str(label) if label else None}
+    state["session_claims"] = claims
+    return state
+
+
+def drop_session_claim(state: dict, pid) -> dict:
+    """창이 닫혔다고 적는다. 프로세스가 죽으면 prune_claims 도 알아서 걷어낸다."""
+    try:
+        key = str(int(pid))
+    except (TypeError, ValueError):
+        return state
+    claims = _clean_claims(state.get("session_claims"))
+    claims.pop(key, None)
+    state["session_claims"] = claims
+    return state
+
+
+def prune_claims(state: dict, now: float | None = None) -> dict:
+    """죽은 창과 너무 오래된 예약을 걷어낸다. prune_blocked 가 매번 같이 부른다."""
+    now = time.time() if now is None else now
+    alive = {}
+    for key, item in _clean_claims(state.get("session_claims")).items():
+        if now - item["at"] > CLAIM_MAX_AGE:
+            continue
+        if not _pid_alive(key):
+            continue
+        alive[key] = item
+    state["session_claims"] = alive
+    return state
+
+
+def claimed_buckets(state: dict, now: float | None = None) -> tuple:
+    """지금 떠 있는 창들이 잡고 있는 모델 칸 이름들.
+
+    죽은 창은 세지 않는다(prune_claims 를 안 거친 상태로 불려도 맞게 답하도록
+    여기서도 한 번 더 본다).
+    """
+    now = time.time() if now is None else now
+    names = []
+    for key, item in _clean_claims(state.get("session_claims")).items():
+        if now - item["at"] > CLAIM_MAX_AGE:
+            continue
+        if not _pid_alive(key):
+            continue
+        if item["bucket"] not in names:
+            names.append(item["bucket"])
+    return tuple(names)
 
 
 def scoped_blocked_buckets(state: dict, label: str, now: float | None = None) -> set:
@@ -336,6 +502,7 @@ def load_state() -> dict:
     if not isinstance(out.get("auth_rejects"), dict):
         out["auth_rejects"] = {}
     out["scoped_blocked"] = _clean_scoped(out.get("scoped_blocked"))
+    out["session_claims"] = _clean_claims(out.get("session_claims"))
     if not isinstance(out.get("current"), (str, type(None))):
         out["current"] = None
     return out
@@ -394,6 +561,9 @@ def prune_blocked(state: dict, now: float | None = None) -> dict:
                     scoped.setdefault(label, {})[name] = \
                         max(float(prev), float(until)) if prev else float(until)
     state["scoped_blocked"] = scoped
+    # 떠 있는 창 예약도 같이 턴다. 닫힌 창의 예약이 남아 있으면 그 칸이 막힌 계정으로
+    # 영영 못 넘어간다(사람이 안 쓰는 칸 때문에 계정 선택이 좁아진다).
+    prune_claims(state, now)
     if not blocked and not scoped:
         # 계정 막힘도 칸 막힘도 다 풀렸을 때만 지운다. 칸만 막힌 소진은 blocked 가
         # 늘 비어 있어서, 예전 조건이면 표시가 매번 지워져 같은 알림이 봇 호출마다
@@ -775,7 +945,8 @@ def earliest_reset(state: dict, bucket: str | None = None) -> float | None:
         except (TypeError, ValueError):
             return 0.0
 
-    if not bucket:
+    names = bucket_names(bucket)
+    if not names:
         vals = [_num(v) for v in blocked.values()]
         vals = [v for v in vals if v > 0]
         return min(vals) if vals else None
@@ -784,7 +955,9 @@ def earliest_reset(state: dict, bucket: str | None = None) -> float | None:
     # 후보 기준은 실제로 계정을 고르는 pick_next 와 **한 벌을 같이 쓴다**(usable_labels).
     times = []
     for label in usable_labels():
-        until = max(_num(blocked.get(label)), _num((scoped.get(label) or {}).get(bucket)))
+        box = scoped.get(label) or {}
+        # 칸이 여럿이면 그 계정을 그 용도들로 다시 쓰려면 **전부** 풀려야 하므로 늦은 쪽.
+        until = max([_num(blocked.get(label))] + [_num(box.get(n)) for n in names])
         if until > 0:
             times.append(until)
     if times:

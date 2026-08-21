@@ -497,6 +497,39 @@ def ensure_usable(model: str | None = None) -> int:
     return 0
 
 
+def _wanted_buckets(state: dict, bucket=None) -> tuple:
+    """이번 호출이 쓰는 모델 칸 + 지금 떠 있는 창들이 잡고 있는 칸.
+
+    자격은 이 컴퓨터에 한 벌뿐이라, 계정을 갈아끼우면 떠 있는 창까지 같이 끌려간다.
+    그래서 계정을 고를 때는 **이번 호출과 떠 있는 창들이 다 쓸 수 있는** 계정을 찾는다.
+    2026-08-22 실사고: Fable 로 켠 창이 B 를 쓰고 있는데, Opus 로 부르는 봇 호출이
+    "앞순위 A 가 안 막혔다"며 10분마다 A 로 되돌려 창이 계속 Fable 한도 문구를 받았다.
+    """
+    names = list(st.bucket_names(bucket))
+    for name in st.claimed_buckets(state):
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _pick_account(state: dict, exclude: str | None, bucket=None):
+    """갈아탈 계정 하나. 떠 있는 창의 칸까지 만족하는 계정을 먼저 찾는다.
+
+    다 만족하는 계정이 없으면 이번 호출 칸만 보고 고른다 — 봇을 멈추는 것보다 창이
+    한 번 밀리는 편이 낫다(밀린 창은 다시 켜면 제자리를 찾는다). 그때는 로그를 남긴다.
+    """
+    wanted = _wanted_buckets(state, bucket)
+    nxt = st.pick_next(state, exclude=exclude, bucket=wanted)
+    if nxt is not None or set(wanted) == set(st.bucket_names(bucket)):
+        return nxt
+    nxt = st.pick_next(state, exclude=exclude, bucket=bucket)
+    if nxt is not None:
+        claimed = ", ".join(st.claimed_buckets(state)) or "없음"
+        log(f"떠 있는 창의 칸({claimed})까지 만족하는 계정이 없어 '{nxt}' 로 갑니다. "
+            f"그 창은 다시 켜야 할 수 있습니다.")
+    return nxt
+
+
 def _reclaim_locked(state: dict, bucket: str | None = None):
     """(잠금 안에서) 앞순위 계정이 풀렸으면 그쪽으로 되돌린다. 바꿨으면 새 라벨, 아니면 None.
 
