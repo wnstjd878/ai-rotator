@@ -513,12 +513,12 @@ def drop_session_claim(state: dict, pid) -> dict:
 def prune_claims(state: dict, now: float | None = None) -> dict:
     """죽은 창과 너무 오래된 표시를 걷어낸다. prune_blocked 가 매번 같이 부른다.
 
-    **살아 있는 창은 여기서 시각을 다시 찍는다.** 그래야 하루 종일 열어둔 창이 상한에
-    걸려 보호에서 빠지지 않는다(2026-08-22 코덱스 검수: 상태줄이 대신 찍어주리라 기대했는데,
-    그건 이 저장소 밖 코드라 여기서 자급자족하는 게 맞다). 봇 호출이 지날 때마다 도는
-    자리라 창이 살아 있는 한 시각은 늘 새것으로 남는다.
-    상한은 그래서 "이 확인 자체가 오랫동안 안 돈 기계" 의 찌꺼기를 치우는 안전망일 뿐이고,
-    죽은 창은 상한과 무관하게 생존 확인에서 바로 걷힌다.
+    **그 창이 맞다고 확인되면 여기서 시각을 다시 찍는다.** 그래야 하루 종일 열어둔 창이
+    상한에 걸려 보호에서 빠지지 않는다(2026-08-22 코덱스 검수: 상태줄이 대신 찍어주리라
+    기대했는데, 그건 이 저장소 밖 코드라 여기서 자급자족하는 게 맞다).
+    **다만 번호가 같다고 그 창인 건 아니다** — 번호는 재사용되므로 시작 시각까지 같아야
+    갱신한다(같은 검수 2회전: 번호만 보고 갱신하면 남의 프로세스에 붙은 찌꺼기가 영영 안 걷힌다).
+    시작 시각이 다르면 그 자리에서 걷어내고, 알아볼 수 없으면 갱신 없이 두어 상한이 치우게 한다.
     """
     now = time.time() if now is None else now
     alive = {}
@@ -527,7 +527,11 @@ def prune_claims(state: dict, now: float | None = None) -> dict:
             continue
         if not _pid_alive(key):
             continue
-        item["at"] = now   # 살아 있음을 확인한 시각으로 갱신
+        same = _same_process(key, item.get("started"))
+        if same is False:
+            continue          # 번호가 재사용됐다. 그 창은 이미 닫힌 것이다
+        if same is True:
+            item["at"] = now  # 그 창이 맞다고 확인됐을 때만 새로 찍는다
         alive[key] = item
     state["session_claims"] = alive
     return state

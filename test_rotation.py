@@ -2344,25 +2344,48 @@ def case_window_claim_edges(tmp):
     # (3) 오래 열어둔 창은 상한에 안 걸린다 — 살아 있으면 확인할 때마다 시각을 다시 찍는다
     check("상한은 하루보다 넉넉하다", st.CLAIM_MAX_AGE >= 24 * 3600,
           f"CLAIM_MAX_AGE={st.CLAIM_MAX_AGE}")
-    real_alive2 = st._pid_alive
+    real_alive2, real_started = st._pid_alive, st._pid_started
     st._pid_alive = lambda pid: True
+    st._pid_started = lambda pid: 1000.0        # 그 번호의 프로세스는 1000 에 시작했다고 침
     try:
         old = time.time() - st.CLAIM_MAX_AGE + 60   # 상한 직전까지 오래된 표시
-        s = {"session_claims": {"4242": {"bucket": "Fable", "at": old,
+        s = {"session_claims": {"4242": {"bucket": "Fable", "at": old, "started": 1000.0,
                                          "label": "B", "model": "fable"}}}
         st.prune_claims(s)
         got = (s["session_claims"].get("4242") or {}).get("at")
-        check("살아 있는 창은 시각이 새로 찍힌다", got is not None and got > old + 60,
+        check("그 창이 맞으면 시각이 새로 찍힌다", got is not None and got > old + 60,
               f"at={got}, 이전={old}")
-        # 여러 번 지나가도 살아 있는 한 계속 남는다(상한에 영영 안 닿는다)
         for _ in range(3):
             st.prune_claims(s)
         check("여러 회차를 지나도 남아 있다", "4242" in s["session_claims"])
+
+        # 번호가 재사용된 경우: 살아 있어도 그 창이 아니므로 걷어낸다
+        s2 = {"session_claims": {"4242": {"bucket": "Fable", "at": old, "started": 1000.0,
+                                          "label": "B", "model": "fable"}}}
+        st._pid_started = lambda pid: 9999.0     # 다른 프로세스가 그 번호를 쓰고 있다
+        st.prune_claims(s2)
+        check("번호가 재사용됐으면 걷어낸다", s2["session_claims"] == {},
+              f"남은 것={s2['session_claims']}")
+
+        # 시작 시각을 알아볼 수 없으면 갱신하지 않는다(상한이 치우게 둔다)
+        s3 = {"session_claims": {"4242": {"bucket": "Fable", "at": old, "started": None,
+                                          "label": "B", "model": "fable"}}}
+        st._pid_started = lambda pid: None
+        st.prune_claims(s3)
+        check("알아볼 수 없으면 시각을 안 찍는다",
+              (s3["session_claims"].get("4242") or {}).get("at") == old,
+              f"at={(s3['session_claims'].get('4242') or {}).get('at')}")
+
         st._pid_alive = lambda pid: False
         st.prune_claims(s)
         check("죽으면 상한과 무관하게 바로 걷힌다", s["session_claims"] == {})
     finally:
-        st._pid_alive = real_alive2
+        st._pid_alive, st._pid_started = real_alive2, real_started
+
+    # 진짜 프로세스로 시작 시각 확인이 되는지(가짜로 바꿔치기 안 한 실물 확인)
+    check("내 시작 시각을 읽을 수 있다", st._pid_started(os.getpid()) is not None)
+    check("나는 나와 같은 프로세스로 알아본다",
+          st._same_process(os.getpid(), st._pid_started(os.getpid())) is True)
 
 
 def case_pid_alive():
