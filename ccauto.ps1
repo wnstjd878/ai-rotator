@@ -11,7 +11,8 @@ $runArgs = @($args)
 # 이 창이 쓰는 모델 칸을 표시해 둔다(2026-08-22). 봇 단발 호출이 계정을 갈아끼울 때
 # 이 칸이 막힌 계정으로는 안 넘어간다. 창이 끝나면 지우고, 못 지워도 이 프로세스가
 # 죽으면 순환기가 알아서 걷어낸다.
-$env:CLAUDE_ROTATOR_CLAIM_PID = "$PID"   # 상태줄이 이 번호의 표시를 갱신한다
+$prevClaimPid = $env:CLAUDE_ROTATOR_CLAIM_PID   # 원래 값(대개 없음)은 끝날 때 되돌린다
+$env:CLAUDE_ROTATOR_CLAIM_PID = "$PID"          # 상태줄이 이 번호의 표시를 갱신한다
 try {
 while ($true) {
     # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
@@ -61,4 +62,12 @@ while ($true) {
 }
 } finally {
     python $POOL --unclaim $PID | Out-Null
+    # 이 값을 남기면 같은 PowerShell 창에서 그 뒤에 claude 를 직접 실행했을 때
+    # 가로채기가 남의 번호를 이 창의 것으로 오해한다
+    # (2026-08-22 코덱스 검수가 잡음. bash 쪽은 자식 프로세스라 저절로 사라진다).
+    if ($null -eq $prevClaimPid) {
+        Remove-Item Env:CLAUDE_ROTATOR_CLAIM_PID -ErrorAction SilentlyContinue
+    } else {
+        $env:CLAUDE_ROTATOR_CLAIM_PID = $prevClaimPid
+    }
 }

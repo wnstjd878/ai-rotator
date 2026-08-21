@@ -100,8 +100,19 @@ def passthrough(argv):
 
 
 # 창이 아니라 잠깐 돌고 끝나는 호출들. 여기에 표시를 남길 이유가 없다.
-NOT_A_WINDOW = {"--version", "-v", "--help", "-h", "doctor", "update", "mcp", "config",
-                "install", "migrate-installer", "setup-token", "plugin", "agents"}
+# 하위 명령(첫 토큰일 때만 뜻이 있다)과 플래그(어디 있어도 뜻이 같다)를 갈라 둔다 —
+# 한 뭉치로 두면 `--add-dir config` 같은 **인자 값**이 걸려 멀쩡한 창을 창이 아니라고 본다
+# (2026-08-22 코덱스 검수가 잡음, 재현함).
+NOT_A_WINDOW_SUBCOMMANDS = {"doctor", "update", "mcp", "config", "install",
+                            "migrate-installer", "setup-token", "plugin", "agents"}
+NOT_A_WINDOW_FLAGS = {"--version", "-v", "--help", "-h"}
+
+
+def is_a_window(argv) -> bool:
+    """사람이 붙잡고 쓰는 창인지. 하위 명령이나 도움말 호출이면 아니다."""
+    if any(a in NOT_A_WINDOW_FLAGS for a in argv):
+        return False
+    return not (argv and argv[0] in NOT_A_WINDOW_SUBCOMMANDS)
 
 
 def claim_window(argv) -> None:
@@ -114,15 +125,27 @@ def claim_window(argv) -> None:
     유닉스는 execv 가 프로세스 번호를 그대로 물려받고, 윈도우는 이 프로세스가 자식을
     끝까지 기다린다. 그래서 어느 쪽이든 여기 적은 번호의 수명이 곧 창의 수명이다.
     """
-    if any(a in NOT_A_WINDOW for a in argv):
+    if not is_a_window(argv):
         return
-    if os.environ.get(CLAIM_PID_ENV):
-        return  # ccauto 가 이미 이 창을 표시했다(그 번호가 창의 대표 번호다)
+    handed = os.environ.get(CLAIM_PID_ENV)
     try:
         if ROTATOR_DIR not in sys.path:
             sys.path.insert(0, ROTATOR_DIR)
         import claude_pool
+        import pool_state as st
 
+        if handed:
+            # 감싸는 코드(ccauto)가 이미 표시했다는 뜻이고, 그 번호가 창의 대표 번호다.
+            # 다만 **정말 남았는지 확인한다** — ccauto 의 --claim 은 잠금 대기로 실패해도
+            # 조용히 0 으로 끝나므로, 환경변수만 믿으면 표시가 하나도 없는 채로 지나간다
+            # (2026-08-22 코덱스 검수). 없으면 그 번호로 다시 남긴다.
+            try:
+                claims = st.load_state().get("session_claims") or {}
+            except Exception:
+                claims = {}
+            if str(handed) not in claims:
+                claude_pool.claim_session(handed, argv=argv)
+            return
         if claude_pool.claim_session(os.getpid(), argv=argv):
             # 창 안에서 도는 상태줄이 "내 표시가 어느 번호인지" 알게 물려준다.
             # /model 로 모델을 바꾸면 상태줄이 이 번호의 표시를 갱신한다.
