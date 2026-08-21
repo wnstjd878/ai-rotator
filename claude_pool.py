@@ -345,6 +345,11 @@ def status_text(model: str | None = None) -> str:
         notice = _scoped_notice(bucket, scoped_rows, now)
         if notice:
             lines.append(notice)
+    held = st.claimed_buckets(state)
+    if held:
+        # 왜 앞순위 계정으로 안 돌아가는지 사람이 알 수 있게 적는다.
+        lines.append(f"이 컴퓨터에 떠 있는 창이 쓰는 칸: {', '.join(held)}"
+                     f" (그 칸이 막힌 계정으로는 안 넘어갑니다)")
     return "\n".join(lines)
 
 
