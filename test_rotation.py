@@ -2367,6 +2367,7 @@ def case_window_claim_edges(tmp):
         # 번호가 재사용된 경우: 살아 있어도 그 창이 아니므로 걷어낸다
         s2 = {"session_claims": {"4242": {"bucket": "Fable", "at": old, "started": 1000.0,
                                           "label": "B", "model": "fable"}}}
+        st._STARTED_CACHE.clear()                # 앞 검사에서 기억해 둔 값을 지우고 본다
         st._pid_started = lambda pid: 9999.0     # 다른 프로세스가 그 번호를 쓰고 있다
         st.prune_claims(s2)
         check("번호가 재사용됐으면 걷어낸다", s2["session_claims"] == {},
