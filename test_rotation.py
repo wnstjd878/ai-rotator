@@ -2386,6 +2386,16 @@ def case_window_claim_edges(tmp):
     check("내 시작 시각을 읽을 수 있다", st._pid_started(os.getpid()) is not None)
     check("나는 나와 같은 프로세스로 알아본다",
           st._same_process(os.getpid(), st._pid_started(os.getpid())) is True)
+    check("남의 시작 시각과는 다르다고 본다",
+          st._same_process(os.getpid(), 1000.0) is False)
+    # macOS ps 에는 초 단위(etimes)가 없어 경과 시간 표기를 되읽어야 한다
+    now = time.time()
+    for text, secs in (("00:30", 30), ("01:02:03", 3723), ("2-03:04:05", 183845)):
+        got = st._elapsed_to_epoch(text)
+        check(f"경과 시간 '{text}' 해석", got is not None and abs((now - got) - secs) < 5,
+              f"got={got}")
+    check("빈 값은 모름", st._elapsed_to_epoch("") is None)
+    check("깨진 값은 모름", st._elapsed_to_epoch("어제쯤") is None)
 
 
 def case_pid_alive():

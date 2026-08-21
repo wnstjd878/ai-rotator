@@ -417,27 +417,51 @@ def _pid_started(pid) -> float | None:
     try:
         import subprocess
 
+        # 리눅스는 초 단위(etimes)를 바로 주지만 **macOS ps 에는 etimes 가 없다**
+        # (실측: "keyword not found"). 그쪽은 경과 시간(etime) 을 받아 초로 바꾼다.
         out = subprocess.run(["ps", "-p", str(pid), "-o", "etimes="],
                              capture_output=True, text=True, timeout=5)
         secs = (out.stdout or "").strip()
-        if not secs:
-            return None
-        return time.time() - float(secs)
+        if secs:
+            return time.time() - float(secs)
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "etime="],
+                             capture_output=True, text=True, timeout=5)
+        return _elapsed_to_epoch((out.stdout or "").strip())
     except Exception:
+        return None
+
+
+def _elapsed_to_epoch(text: str) -> float | None:
+    """ps 의 경과 시간 표기([[일-]시:]분:초)를 시작 시각(epoch)으로."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        days = 0
+        if "-" in text:
+            head, text = text.split("-", 1)
+            days = int(head)
+        parts = [float(x) for x in text.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0.0)   # 분:초 만 온 경우
+        hours, minutes, seconds = parts[-3], parts[-2], parts[-1]
+        return time.time() - (days * 86400 + hours * 3600 + minutes * 60 + seconds)
+    except (TypeError, ValueError):
         return None
 
 
 def _same_process(pid, started) -> bool | None:
     """적어둔 시작 시각과 지금 그 번호의 시작 시각이 같은지. 못 알아보면 None.
 
-    ps 의 경과 시간은 초 단위라 조회 시점에 따라 1~2초 흔들린다. 넉넉히 본다.
+    ps 의 경과 시간은 초 단위라 조회 시점과 부하에 따라 몇 초 흔들린다. 넉넉히 본다 —
+    흔들림 때문에 멀쩡한 창을 걷어내는 쪽이, 몇 초 차로 재사용된 번호를 못 가리는 쪽보다 나쁘다.
     """
     if started is None:
         return None
     now_started = _pid_started(pid)
     if now_started is None:
         return None
-    return abs(float(now_started) - float(started)) <= 5.0
+    return abs(float(now_started) - float(started)) <= 10.0
 
 
 def _clean_claims(raw) -> dict:
