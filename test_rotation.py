@@ -2367,7 +2367,6 @@ def case_window_claim_edges(tmp):
         # 번호가 재사용된 경우: 살아 있어도 그 창이 아니므로 걷어낸다
         s2 = {"session_claims": {"4242": {"bucket": "Fable", "at": old, "started": 1000.0,
                                           "label": "B", "model": "fable"}}}
-        st._STARTED_CACHE.clear()                # 앞 검사에서 기억해 둔 값을 지우고 본다
         st._pid_started = lambda pid: 9999.0     # 다른 프로세스가 그 번호를 쓰고 있다
         st.prune_claims(s2)
         check("번호가 재사용됐으면 걷어낸다", s2["session_claims"] == {},
@@ -2383,7 +2382,6 @@ def case_window_claim_edges(tmp):
               f"at={(s3['session_claims'].get('4242') or {}).get('at')}")
 
         # 번호가 재사용된 자리에 새 창이 들어오면, 표시에 남의 시작 시각을 물려주면 안 된다
-        st._STARTED_CACHE.clear()
         st._pid_started = lambda pid: 2000.0      # 지금 그 번호는 2000 에 시작한 새 프로세스
         s4 = {"session_claims": {"4242": {"bucket": "Fable", "at": time.time(),
                                           "started": 1000.0, "label": "B", "model": "fable"}}}
@@ -2391,26 +2389,22 @@ def case_window_claim_edges(tmp):
         check("새 표시는 지금 시작 시각을 쓴다",
               (s4["session_claims"]["4242"] or {}).get("started") == 2000.0,
               f"started={(s4['session_claims']['4242'] or {}).get('started')}")
-        st._STARTED_CACHE.clear()
         st.prune_claims(s4)
         check("그래서 다음 정리에도 안 지워진다", "4242" in s4["session_claims"],
               f"남은 것={s4['session_claims']}")
 
         # 정리보다 먼저 물어봐도 재사용된 찌꺼기는 안 센다
-        st._STARTED_CACHE.clear()
         st._pid_started = lambda pid: 9999.0
         s5 = {"session_claims": {"4242": {"bucket": "Fable", "at": time.time(),
                                           "started": 1000.0, "label": "B", "model": "fable"}}}
         check("정리 전에 물어도 재사용 찌꺼기는 빼고 센다", st.claimed_buckets(s5) == (),
               f"칸={st.claimed_buckets(s5)}")
 
-        st._STARTED_CACHE.clear()
         st._pid_alive = lambda pid: False
         st.prune_claims(s)
         check("죽으면 상한과 무관하게 바로 걷힌다", s["session_claims"] == {})
     finally:
         st._pid_alive, st._pid_started = real_alive2, real_started
-        st._STARTED_CACHE.clear()
 
     # 진짜 프로세스로 시작 시각 확인이 되는지(실물 확인).
     # 유닉스는 ps 를 부르는데, 이 시험이 subprocess.run 을 가짜로 갈아끼운 상태라

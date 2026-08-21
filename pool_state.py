@@ -448,34 +448,18 @@ def _elapsed_to_epoch(text: str) -> float | None:
         return None
 
 
-_STARTED_CACHE: dict = {}      # {번호: (조회한 시각, 시작 시각)} — 아래 확인이 잦아서 둔다
-_STARTED_CACHE_TTL = 30        # 시작 시각 자체는 안 변하지만, 번호 재사용을 놓치지 않게 짧게 둔다
-
-
-def _pid_started_cached(pid) -> float | None:
-    """_pid_started 를 짧게 기억해 둔 것. 같은 판단이 한 호출에 여러 번 일어나서 둔다."""
-    key = str(pid)
-    now = time.time()
-    got = _STARTED_CACHE.get(key)
-    if got and now - got[0] <= _STARTED_CACHE_TTL:
-        return got[1]
-    value = _pid_started(pid)
-    _STARTED_CACHE[key] = (now, value)
-    if len(_STARTED_CACHE) > 64:   # 오래된 것부터 버린다(창이 이렇게 많을 일은 없다)
-        for stale in [k for k, v in _STARTED_CACHE.items() if now - v[0] > _STARTED_CACHE_TTL]:
-            _STARTED_CACHE.pop(stale, None)
-    return value
-
-
 def _same_process(pid, started) -> bool | None:
     """적어둔 시작 시각과 지금 그 번호의 시작 시각이 같은지. 못 알아보면 None.
 
     ps 의 경과 시간은 초 단위라 조회 시점과 부하에 따라 몇 초 흔들린다. 넉넉히 본다 —
     흔들림 때문에 멀쩡한 창을 걷어내는 쪽이, 몇 초 차로 재사용된 번호를 못 가리는 쪽보다 나쁘다.
+    **값을 기억해 두지 않는다.** 짧게라도 기억해 두면 새로 적은 표시와 어긋나 방금 뜬 창을
+    찌꺼기로 오판한다(2026-08-22 코덱스 검수가 두 회전에서 같은 결함을 잡았다).
+    조회 비용은 Mac 실측 2.8밀리초라 매번 물어도 된다.
     """
     if started is None:
         return None
-    now_started = _pid_started_cached(pid)
+    now_started = _pid_started(pid)
     if now_started is None:
         return None
     return abs(float(now_started) - float(started)) <= 10.0
