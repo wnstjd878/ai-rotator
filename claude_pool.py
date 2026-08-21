@@ -1523,7 +1523,10 @@ def main():
             return 1
         got = claim_session(argv[1], argv=argv[2:])
         if got:
-            print(f"[창 표시] 이 창이 {got} 칸을 씁니다. 봇 호출이 이 칸을 뺏지 않습니다.")
+            # 단정하지 않는다 — 갈아탈 계정이 하나도 없으면 이번 호출을 살리려고
+            # 이 칸을 포기하는 갈래가 있다(_pick_account 의 폴백).
+            print(f"[창 표시] 이 창이 {got} 칸을 씁니다. 봇 호출은 되도록 이 칸이 막힌 "
+                  f"계정으로 안 넘어갑니다(다른 계정이 하나도 없으면 밀릴 수 있습니다).")
         return 0
     if argv[0] == "--unclaim":
         if len(argv) < 2:
