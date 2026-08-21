@@ -377,6 +377,69 @@ def _pid_alive(pid) -> bool:
         return True
 
 
+def _pid_started(pid) -> float | None:
+    """그 프로세스가 시작된 시각(epoch). 모르면 None.
+
+    프로세스 번호는 재사용되므로 번호만으로는 "아까 그 창이 맞는지" 알 수 없다.
+    시작 시각까지 같아야 같은 프로세스다. 이게 있어야 창이 살아 있는 동안 표시를
+    계속 새것으로 유지하면서도, 번호가 재사용된 찌꺼기는 걷어낼 수 있다.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return None
+            try:
+                created = wintypes.FILETIME()
+                rest = (wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME())
+                ok = kernel32.GetProcessTimes(handle, ctypes.byref(created),
+                                              *[ctypes.byref(x) for x in rest])
+                if not ok:
+                    return None
+                # FILETIME 은 1601-01-01 부터 100나노초 단위다. epoch 로 옮긴다.
+                ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+                return ticks / 1e7 - 11644473600
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        import subprocess
+
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "etimes="],
+                             capture_output=True, text=True, timeout=5)
+        secs = (out.stdout or "").strip()
+        if not secs:
+            return None
+        return time.time() - float(secs)
+    except Exception:
+        return None
+
+
+def _same_process(pid, started) -> bool | None:
+    """적어둔 시작 시각과 지금 그 번호의 시작 시각이 같은지. 못 알아보면 None.
+
+    ps 의 경과 시간은 초 단위라 조회 시점에 따라 1~2초 흔들린다. 넉넉히 본다.
+    """
+    if started is None:
+        return None
+    now_started = _pid_started(pid)
+    if now_started is None:
+        return None
+    return abs(float(now_started) - float(started)) <= 5.0
+
+
 def _clean_claims(raw) -> dict:
     """떠 있는 창 예약을 {프로세스번호: {bucket, label, at}} 으로 다듬는다."""
     out = {}
@@ -398,7 +461,11 @@ def _clean_claims(raw) -> dict:
             at = 0.0
         label = item.get("label")
         model = item.get("model")
-        out[key] = {"bucket": bucket, "at": at,
+        try:
+            started = float(item.get("started"))
+        except (TypeError, ValueError):
+            started = None
+        out[key] = {"bucket": bucket, "at": at, "started": started,
                     "label": str(label) if label else None,
                     "model": str(model) if model else None}
     return out
@@ -419,8 +486,12 @@ def note_session_claim(state: dict, pid, bucket: str, label: str | None = None,
     except (TypeError, ValueError):
         return state
     claims = _clean_claims(state.get("session_claims"))
+    prev = claims.get(key) or {}
     claims[key] = {"bucket": str(bucket),
                    "at": time.time() if now is None else now,
+                   # 그 창이 맞는지 나중에 알아보려고 시작 시각도 적는다(번호는 재사용된다).
+                   "started": prev.get("started") if prev.get("started") is not None
+                   else _pid_started(key),
                    "label": str(label) if label else None,
                    "model": str(model) if model else None}
     state["session_claims"] = claims
