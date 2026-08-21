@@ -34,6 +34,11 @@ import claude_pool  # noqa: E402
 import limit_detect  # noqa: E402
 import pool_state as st  # noqa: E402
 
+# 이 시험은 claude 호출을 가짜로 바꿔치려고 subprocess.run 자체를 갈아끼운다.
+# 그런데 순환기 안에는 진짜 subprocess 가 필요한 자리도 있다(프로세스 시작 시각 조회).
+# 그 자리를 시험할 때 잠깐 되돌리려고 진짜를 여기 붙잡아 둔다.
+REAL_SUBPROCESS_RUN = subprocess.run
+
 LIMIT_OUT = json.dumps({
     "type": "result", "subtype": "error", "is_error": True,
     "result": "Claude AI usage limit reached|%d" % int(time.time() + 3 * 3600),
@@ -2382,12 +2387,19 @@ def case_window_claim_edges(tmp):
     finally:
         st._pid_alive, st._pid_started = real_alive2, real_started
 
-    # 진짜 프로세스로 시작 시각 확인이 되는지(가짜로 바꿔치기 안 한 실물 확인)
-    check("내 시작 시각을 읽을 수 있다", st._pid_started(os.getpid()) is not None)
-    check("나는 나와 같은 프로세스로 알아본다",
-          st._same_process(os.getpid(), st._pid_started(os.getpid())) is True)
-    check("남의 시작 시각과는 다르다고 본다",
-          st._same_process(os.getpid(), 1000.0) is False)
+    # 진짜 프로세스로 시작 시각 확인이 되는지(실물 확인).
+    # 유닉스는 ps 를 부르는데, 이 시험이 subprocess.run 을 가짜로 갈아끼운 상태라
+    # 그대로 두면 가짜 claude 응답을 ps 결과로 읽는다. 이 검사 동안만 진짜로 되돌린다.
+    faked_run = subprocess.run
+    subprocess.run = REAL_SUBPROCESS_RUN
+    try:
+        check("내 시작 시각을 읽을 수 있다", st._pid_started(os.getpid()) is not None)
+        check("나는 나와 같은 프로세스로 알아본다",
+              st._same_process(os.getpid(), st._pid_started(os.getpid())) is True)
+        check("남의 시작 시각과는 다르다고 본다",
+              st._same_process(os.getpid(), 1000.0) is False)
+    finally:
+        subprocess.run = faked_run
     # macOS ps 에는 초 단위(etimes)가 없어 경과 시간 표기를 되읽어야 한다
     now = time.time()
     for text, secs in (("00:30", 30), ("01:02:03", 3723), ("2-03:04:05", 183845)):
