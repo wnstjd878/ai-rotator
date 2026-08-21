@@ -417,15 +417,13 @@ def _pid_started(pid) -> float | None:
     try:
         import subprocess
 
-        # 리눅스는 초 단위(etimes)를 바로 주지만 **macOS ps 에는 etimes 가 없다**
-        # (실측: "keyword not found"). 그쪽은 경과 시간(etime) 을 받아 초로 바꾼다.
-        out = subprocess.run(["ps", "-p", str(pid), "-o", "etimes="],
-                             capture_output=True, text=True, timeout=5)
-        secs = (out.stdout or "").strip()
-        if secs:
-            return time.time() - float(secs)
+        # 경과 시간(etime)만 쓴다. 리눅스에만 있는 초 단위(etimes)는 안 쓴다 —
+        # **macOS ps 는 모르는 항목을 만나면 오류 안내를 출력 통로로 뱉어서**(실측)
+        # 그걸 숫자로 잘못 읽는다. etime 은 두 쪽 다 있다.
         out = subprocess.run(["ps", "-p", str(pid), "-o", "etime="],
                              capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return None
         return _elapsed_to_epoch((out.stdout or "").strip())
     except Exception:
         return None
