@@ -12,6 +12,8 @@
       python claude_pool.py --next            지금 계정을 한도로 보고 다음 계정으로 넘김
       python claude_pool.py --use A           A 계정으로 지금 바로 교체
       python claude_pool.py --ensure          켜기 직전 확인: 지금 계정이 다 찼으면 미리 교체
+      python claude_pool.py --claim <번호>     그 프로세스가 쓰는 창이 이 모델 칸을 잡았다고 표시
+      python claude_pool.py --unclaim <번호>   창이 닫혔다고 표시(프로세스가 죽으면 자동 정리)
       python claude_pool.py -- -p "안녕"       claude 를 순환 보호 아래서 실행
 호출: from claude_pool import run;  proc = run([claude_bin, "--print", ...], timeout=240)
 전제: creds/<라벨>.json 에 계정별 자격 저장본이 있어야 한다 (save_account.py 로 저장).
@@ -30,7 +32,13 @@
       --ensure 는 선제 전환이 아니다 — 이미 100% 다 찬 계정만 켜기 전에 건너뛴다.
       되돌리기도 선제 전환이 아니다 — 사용량을 보지 않고 막힘이 풀렸는지만 본다.
       대화형 claude 세션의 실시간 교체 없음 — 이미 떠 있는 세션은 재시작해야 새 계정이 붙는다.
-마지막 점검: 2026-07-27
+떠 있는 창 지키기(2026-08-22 추가): 자격은 이 컴퓨터에 한 벌뿐이라 봇이 계정을 갈아끼우면
+      떠 있는 창까지 끌려간다. 그래서 사람 창은 켜질 때 자기가 쓰는 모델 칸을 표시하고
+      (claude_shim 이 자동으로, ccauto 도 한 번 더), 계정을 고르는 자리는 그 칸까지
+      만족하는 계정을 먼저 찾는다(_wanted_buckets / _pick_account).
+      되돌리기는 창을 절대 밀어내지 않고, 갈아타야만 하는 교체는 다른 수가 없을 때만 민다.
+      표시는 프로세스가 죽으면 저절로 걷힌다(pool_state.prune_claims).
+마지막 점검: 2026-08-22
 """
 
 from __future__ import annotations
@@ -471,7 +479,7 @@ def ensure_usable(model: str | None = None) -> int:
                 until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
                 st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
                                 f"{kind_txt} 한도 소진(켜기 전 확인)")
-            nxt = st.pick_next(state, exclude=cur, bucket=bucket)
+            nxt = _pick_account(state, exclude=cur, bucket=bucket)
             if nxt is None:
                 st.save_state(state)
                 reset_at = st.earliest_reset(state, bucket=bucket)
@@ -495,6 +503,46 @@ def ensure_usable(model: str | None = None) -> int:
     print(f"[켜기 전 확인] '{started_from}' {first_kind} 한도 소진 → '{landed}' 계정으로 바꿔서 켭니다.")
     _notify_switch(started_from, landed, "limit", state, bucket)  # 전송은 잠금 밖에서
     return 0
+
+
+def claim_session(pid, model: str | None = None, argv=None) -> str | None:
+    """사람이 쓰는 창이 이 모델 칸을 잡았다고 적어둔다. 잡은 칸 이름을 돌려준다.
+
+    창이 살아 있는 동안 봇 호출이 그 칸 막힌 계정으로 갈아끼우지 못하게 하는 표시다.
+    모델을 못 알아내면 아무것도 안 적는다 — 그때는 계정 단위 판단이라 표시해도 달라질 게 없다.
+    잠금은 짧게만 기다린다. 창 켜기를 늦추느니 표시를 포기하는 편이 낫다.
+    같은 프로세스 번호로 다시 부르면 칸만 갱신한다(창 안에서 모델을 바꾼 경우).
+    """
+    if usage_check is None:
+        return None
+    try:
+        want = model if model is not None else intended_model(argv)
+        bucket = usage_check.bucket_for_model(want)
+    except Exception:
+        return None
+    if not bucket:
+        return None
+    try:
+        with st.with_lock(timeout=CLAIM_LOCK_TIMEOUT):
+            state = st.load_state()
+            st.prune_claims(state)
+            st.note_session_claim(state, pid, bucket, state.get("current"))
+            st.save_state(state)
+    except Exception:
+        return None
+    return bucket
+
+
+def release_session(pid) -> bool:
+    """창이 닫혔다고 표시를 지운다. 못 지워도 프로세스가 죽으면 저절로 걷힌다."""
+    try:
+        with st.with_lock(timeout=CLAIM_LOCK_TIMEOUT):
+            state = st.load_state()
+            st.drop_session_claim(state, pid)
+            st.save_state(state)
+        return True
+    except Exception:
+        return False
 
 
 def _wanted_buckets(state: dict, bucket=None) -> tuple:
@@ -547,7 +595,9 @@ def _reclaim_locked(state: dict, bucket: str | None = None):
     cur = state.get("current")
     if not st.may_reclaim(state):
         return None
-    nxt = st.better_candidate(state, cur, bucket=bucket)
+    # 되돌리기는 **떠 있는 창까지 만족할 때만** 한다. 순차 소진은 아껴 쓰자는 것이고,
+    # 사람이 쓰는 창을 못 쓰게 만들면서까지 지킬 이유는 없다(폴백 없음).
+    nxt = st.better_candidate(state, cur, bucket=_wanted_buckets(state, bucket))
     if nxt is None:
         return None
     st.note_reclaim(state)  # 교체가 실패해도 기록해 재시도 폭주를 막는다
@@ -560,7 +610,8 @@ def _reclaim_locked(state: dict, bucket: str | None = None):
 
 def _reclaim_if_better(state: dict, cur: str, bucket: str | None = None):
     """지금 계정이 안 막혔어도 순서상 앞선 계정이 풀려 있으면 그쪽으로 되돌린다."""
-    if not st.may_reclaim(state) or st.better_candidate(state, cur, bucket=bucket) is None:
+    if (not st.may_reclaim(state)
+            or st.better_candidate(state, cur, bucket=_wanted_buckets(state, bucket)) is None):
         return cur  # 잠금을 잡기 전 값싼 확인. 평소에는 여기서 끝난다
     with st.with_lock():
         s = st.prune_blocked(st.load_state())
@@ -590,7 +641,7 @@ def _switch_if_blocked(state: dict, bucket: str | None = None):
         if not cur or (not st.is_blocked(s, cur)
                        and not st.is_scoped_blocked(s, cur, bucket)):
             return cur  # 그 사이 다른 프로세스가 바꿨다
-        nxt = st.pick_next(s, exclude=cur, bucket=bucket)
+        nxt = _pick_account(s, exclude=cur, bucket=bucket)
         if nxt is None or not _switch(nxt, leaving=cur):
             return cur  # 갈아탈 데가 없으면 기존 흐름(거절 → 소진 알림)이 처리한다
         st.set_current(s, nxt, f"{cur} → {nxt} (이미 막힌 계정이라 미리 교체)")
@@ -1225,7 +1276,7 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                         f"{cooldown // 60}분 쉬게 하고 다음 계정으로 넘깁니다. "
                         f"그 계정으로 다시 로그인해 save_account.py 로 저장하세요.")
 
-        nxt = st.pick_next(state, exclude=used_label, bucket=bucket)
+        nxt = _pick_account(state, exclude=used_label, bucket=bucket)
         if nxt is None:
             # 해제 시각도 그 칸까지 봐야 맞다. 계정 단위 막힘만 보면 5시간 한도가 풀리는
             # 시각이 찍혀 실제보다 몇 시간 이른 시각을 알린다(2026-08-20).
