@@ -448,6 +448,25 @@ def _elapsed_to_epoch(text: str) -> float | None:
         return None
 
 
+_STARTED_CACHE: dict = {}      # {번호: (조회한 시각, 시작 시각)} — 아래 확인이 잦아서 둔다
+_STARTED_CACHE_TTL = 30        # 시작 시각 자체는 안 변하지만, 번호 재사용을 놓치지 않게 짧게 둔다
+
+
+def _pid_started_cached(pid) -> float | None:
+    """_pid_started 를 짧게 기억해 둔 것. 같은 판단이 한 호출에 여러 번 일어나서 둔다."""
+    key = str(pid)
+    now = time.time()
+    got = _STARTED_CACHE.get(key)
+    if got and now - got[0] <= _STARTED_CACHE_TTL:
+        return got[1]
+    value = _pid_started(pid)
+    _STARTED_CACHE[key] = (now, value)
+    if len(_STARTED_CACHE) > 64:   # 오래된 것부터 버린다(창이 이렇게 많을 일은 없다)
+        for stale in [k for k, v in _STARTED_CACHE.items() if now - v[0] > _STARTED_CACHE_TTL]:
+            _STARTED_CACHE.pop(stale, None)
+    return value
+
+
 def _same_process(pid, started) -> bool | None:
     """적어둔 시작 시각과 지금 그 번호의 시작 시각이 같은지. 못 알아보면 None.
 
@@ -456,7 +475,7 @@ def _same_process(pid, started) -> bool | None:
     """
     if started is None:
         return None
-    now_started = _pid_started(pid)
+    now_started = _pid_started_cached(pid)
     if now_started is None:
         return None
     return abs(float(now_started) - float(started)) <= 10.0
