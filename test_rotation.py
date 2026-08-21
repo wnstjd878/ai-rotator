@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -2294,6 +2295,59 @@ def case_window_claim(tmp):
         st._pid_alive = real_alive
 
 
+def case_window_claim_edges(tmp):
+    """[50] 창 표시가 조용히 빠지는 갈래들 (2026-08-22 코덱스 검수가 잡은 것들).
+
+    셋 다 "표시가 없는데 있다고 여겨" 사람 창이 밀리는 경로였다.
+    """
+    print("\n[50] 창 표시가 조용히 빠지지 않는다")
+    import claude_shim
+
+    setup(tmp, ["A", "B"], "B")
+
+    # (1) 인자 값 때문에 대화형 창을 창이 아니라고 보면 안 된다
+    check("--add-dir config 도 창으로 본다",
+          claude_shim.is_a_window(["--model", "claude-fable-5[1m]", "--add-dir", "config"]) is True)
+    check("mcp 하위 명령은 창이 아니다", claude_shim.is_a_window(["mcp", "list"]) is False)
+    check("--version 은 창이 아니다", claude_shim.is_a_window(["--version"]) is False)
+    check("맨 그냥 실행은 창이다", claude_shim.is_a_window([]) is True)
+
+    # (2) 물려받은 번호의 표시가 실제로 없으면 다시 남긴다
+    #     (감싸는 코드의 --claim 이 잠금 대기로 실패해도 환경변수는 설정되기 때문)
+    import usage_check as uc
+    claude_pool.usage_check = uc
+    real_alive = st._pid_alive
+    st._pid_alive = lambda pid: True
+    real_env = os.environ.get("CLAUDE_ROTATOR_CLAIM_PID")
+    os.environ["CLAUDE_ROTATOR_CLAIM_PID"] = "31337"     # 표시는 없는 번호
+    real_settings = claude_pool.intended_model
+    claude_pool.intended_model = lambda argv=None: "claude-fable-5[1m]"
+    try:
+        check("시작할 땐 표시가 없다", st.load_state().get("session_claims") == {})
+        claude_shim.claim_window(["--model", "claude-fable-5[1m]"])
+        got = st.load_state().get("session_claims") or {}
+        check("빠진 표시를 물려받은 번호로 채운다",
+              (got.get("31337") or {}).get("bucket") == "Fable", f"표시={got}")
+        # 이미 있으면 덧쓰지 않는다(같은 번호로 두 번 불려도 안전)
+        before = json.dumps(st.load_state()["session_claims"], sort_keys=True)
+        claude_shim.claim_window(["--model", "claude-fable-5[1m]"])
+        check("이미 있으면 그대로 둔다",
+              json.dumps(st.load_state()["session_claims"], sort_keys=True) == before)
+    finally:
+        claude_pool.intended_model = real_settings
+        st._pid_alive = real_alive
+        if real_env is None:
+            os.environ.pop("CLAUDE_ROTATOR_CLAIM_PID", None)
+        else:
+            os.environ["CLAUDE_ROTATOR_CLAIM_PID"] = real_env
+
+    # (3) 오래 열어둔 창이 상한에 안 걸린다(상태줄이 한 시간마다 다시 찍는 전제)
+    check("상한은 하루보다 넉넉하다", st.CLAIM_MAX_AGE >= 24 * 3600,
+          f"CLAIM_MAX_AGE={st.CLAIM_MAX_AGE}")
+    check("다시 찍는 간격이 상한보다 훨씬 짧다", st.CLAIM_REFRESH * 24 <= st.CLAIM_MAX_AGE,
+          f"{st.CLAIM_REFRESH} / {st.CLAIM_MAX_AGE}")
+
+
 def case_pid_alive():
     """[49] 프로세스 생존 확인이 실제로 맞는지(창 표시가 영영 안 걷히면 계정이 좁아진다)."""
     print("\n[49] 프로세스 생존 확인")
@@ -2343,7 +2397,7 @@ def main():
                      case_dead_quarantine, case_dead_alert_folded,
                      case_keychain_pull_and_rescue, case_barred,
                      case_scoped_exhausted_message, case_scoped_reopen,
-                     case_window_claim):
+                     case_window_claim, case_window_claim_edges):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
