@@ -788,6 +788,31 @@ def _mirror_now() -> bool:
         return False
 
 
+def _settle_pending_switch() -> bool:
+    """열쇠꾸러미까지 못 맞춘 계정 전환 예약이 남아 있으면 지금 마무리한다. 마무리했으면 True.
+
+    맥에서 원격 접속 창이나 화면이 잠긴 자리에서 계정을 바꾸면 **자격 파일만 바뀌고
+    열쇠꾸러미는 그대로 남는다**(switch_account 가 예약만 걸어 둔다). 그 사이 화면 세션에서
+    도는 봇은 열쇠꾸러미의 **옛 계정**으로 호출한다. 그때 오는 한도 거절은 지금 계정 것이 아니다.
+    2026-08-22 실사고: A(Fable 0%)의 거절이 B 앞으로 찍혀 B 가 5시간 통째로 막혔다.
+    B 는 Fable 이 93% 남은 멀쩡한 계정이었고, B 자격으로 직접 불러 보니 정상이었다.
+
+    **True/False 가 곧 "이 거절을 누가 받았나" 의 답이다.**
+    - True(마무리됨) = 여기는 열쇠꾸러미를 만질 수 있는 화면 세션이고, 조금 전까지 어긋나
+      있었다 = 이 호출은 옛 계정으로 나갔다 → 지금 계정을 막으면 안 된다.
+    - False = 예약이 아예 없었거나(정상), 열쇠꾸러미를 못 만지는 자리다. 못 만지는 자리면
+      이 호출도 자격 파일을 썼으므로 지금 계정이 맞다 → 평소대로 판단한다.
+    """
+    try:
+        import cred_mirror
+    except Exception:
+        return False
+    try:
+        return cred_mirror.apply_pending() == "done"
+    except Exception:
+        return False
+
+
 def _note_auth_fail(state: dict, label: str | None, now: float | None = None) -> list:
     """로그인 거절을 기록하고, 최근 창 안에서 거절받은 계정 라벨을 돌려준다."""
     now = now or time.time()
@@ -1165,6 +1190,14 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
 
         # 원인 모를 실패로 넘어온 경우엔 계정을 막지 않는다. 한도인지 확실치 않아서다.
         if used_label and verdict != "error":
+            if verdict == "limit" and _settle_pending_switch():
+                # 자격 파일과 열쇠꾸러미가 어긋나 있었고 방금 맞췄다. 이 거절은 맞추기 전
+                # 자격(열쇠꾸러미에 남아 있던 옛 계정)이 받은 것이라 지금 계정 탓이 아니다.
+                # 막으면 멀쩡한 계정이 몇 시간 잠긴다(2026-08-22 B 계정 실사고).
+                log(f"자격 파일과 열쇠꾸러미가 어긋나 있었습니다. 방금 맞췄고 "
+                    f"'{used_label}' 은 막지 않습니다. 같은 계정으로 다시 시도합니다.")
+                st.save_state(state)
+                return used_label or current
             if verdict == "limit":
                 # 세션(5시간)인지 주간인지에 맞는 리셋 시각을 실시간 사용량에서 읽는다.
                 # 못 읽으면 응답 문구 파싱으로 떨어진다.

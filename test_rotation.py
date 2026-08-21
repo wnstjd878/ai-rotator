@@ -2429,6 +2429,44 @@ def case_window_claim_edges(tmp):
     check("깨진 값은 모름", st._elapsed_to_epoch("어제쯤") is None)
 
 
+def case_limit_with_split_cred(tmp):
+    """[51] 자격 자리가 어긋나 있던 동안 받은 한도 거절로는 계정을 막지 않는다.
+
+    2026-08-22 실사고: 원격 접속 자리에서 계정을 B 로 바꾸자 자격 파일만 바뀌고 열쇠꾸러미는
+    A 그대로 남았다. 화면 세션에서 도는 봇이 A(Fable 0%)로 호출해 받은 거절이 B 앞으로 찍혀
+    **B 가 5시간 통째로 막혔다.** B 는 Fable 이 93% 남은 멀쩡한 계정이었고, B 자격으로 직접
+    불러 보니 정상이었다.
+    """
+    print("\n[51] 자격 자리가 어긋났으면 그 거절로 계정을 막지 않는다")
+    real_settle = claude_pool._settle_pending_switch
+    try:
+        # (1) 어긋나 있었고 방금 맞춘 자리 → 이 거절은 옛 계정 것이다. 막지 않는다.
+        setup(tmp, ["A", "B"], "A")
+        claude_pool._settle_pending_switch = lambda: True
+        fake = Fake({"A": (0, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
+        install(fake)
+        claude_pool.run(["claude", "-p", "안녕"])
+        s = st.load_state()
+        check("계정을 막지 않았다", not s.get("blocked"), f"막힘={s.get('blocked')}")
+        check("계정을 바꾸지도 않았다", s.get("current") == "A" and fake.switches == [],
+              f"현재={s.get('current')}, 교체={fake.switches}")
+        check("알림도 안 나갔다", fake.notices == [], f"알림={fake.notices}")
+
+        # (2) 어긋난 적이 없으면 예전 그대로 막고 갈아탄다
+        setup(tmp, ["A", "B"], "A")
+        claude_pool._settle_pending_switch = lambda: False
+        fake2 = Fake({"A": (0, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
+        install(fake2)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("성공으로 끝난다", proc.returncode == 0)
+        check("A 를 막았다", "A" in (st.load_state().get("blocked") or {}),
+              f"막힘={st.load_state().get('blocked')}")
+        check("B 로 갈아탔다", st.load_state().get("current") == "B",
+              f"현재={st.load_state().get('current')}")
+    finally:
+        claude_pool._settle_pending_switch = real_settle
+
+
 def case_pid_alive():
     """[49] 프로세스 생존 확인이 실제로 맞는지(창 표시가 영영 안 걷히면 계정이 좁아진다)."""
     print("\n[49] 프로세스 생존 확인")
@@ -2478,7 +2516,8 @@ def main():
                      case_dead_quarantine, case_dead_alert_folded,
                      case_keychain_pull_and_rescue, case_barred,
                      case_scoped_exhausted_message, case_scoped_reopen,
-                     case_window_claim, case_window_claim_edges):
+                     case_window_claim, case_window_claim_edges,
+                     case_limit_with_split_cred):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
