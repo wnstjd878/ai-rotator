@@ -43,6 +43,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -788,7 +790,7 @@ def _mirror_now() -> bool:
         return False
 
 
-def _settle_pending_switch() -> bool:
+def _settle_pending_switch() -> tuple:
     """열쇠꾸러미까지 못 맞춘 계정 전환 예약이 남아 있으면 지금 마무리한다. 마무리했으면 True.
 
     맥에서 원격 접속 창이나 화면이 잠긴 자리에서 계정을 바꾸면 **자격 파일만 바뀌고
@@ -802,15 +804,36 @@ def _settle_pending_switch() -> bool:
       있었다 = 이 호출은 옛 계정으로 나갔다 → 지금 계정을 막으면 안 된다.
     - False = 예약이 아예 없었거나(정상), 열쇠꾸러미를 못 만지는 자리다. 못 만지는 자리면
       이 호출도 자격 파일을 썼으므로 지금 계정이 맞다 → 평소대로 판단한다.
+
+    돌려주는 값: (마무리했는지, 마무리한 계정 라벨). 라벨을 같이 주는 이유는 그게 지금
+    **실제로 꽂힌 자격**이기 때문이다. 예약은 순환기를 안 거친 손 작업(switch_account 직접
+    실행)으로도 생기므로 상태의 계정과 다를 수 있고, 그때 상태를 안 맞추면 다음 거절이
+    또 엉뚱한 계정에 찍힌다(2026-08-22 코덱스 검수, 재현함).
+
+    되비추기가 찍는 줄은 **표준 출력 통로로 나간다**. 봇은 이 호출의 출력을 그대로 받아
+    JSON 으로 읽으므로, 여기서 새어 나가면 답변 앞에 로그가 붙어 파싱이 깨진다
+    (같은 검수, 재현함). 받아서 이 파일 기록으로 옮긴다.
     """
     try:
         import cred_mirror
     except Exception:
-        return False
+        return False, None
+    label = None
     try:
-        return cred_mirror.apply_pending() == "done"
+        label = (st.CREDS_DIR / ".pending-switch").read_text(encoding="utf-8").strip() or None
     except Exception:
-        return False
+        label = None
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            done = cred_mirror.apply_pending() == "done"
+    except Exception:
+        done = False
+    leaked = buf.getvalue().strip()
+    if leaked:
+        for line in leaked.splitlines():
+            log(line.strip())
+    return (True, label) if done else (False, None)
 
 
 def _note_auth_fail(state: dict, label: str | None, now: float | None = None) -> list:
@@ -1190,14 +1213,21 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
 
         # 원인 모를 실패로 넘어온 경우엔 계정을 막지 않는다. 한도인지 확실치 않아서다.
         if used_label and verdict != "error":
-            if verdict == "limit" and _settle_pending_switch():
+            settled, settled_label = _settle_pending_switch() if verdict == "limit" else (False, None)
+            if settled:
                 # 자격 파일과 열쇠꾸러미가 어긋나 있었고 방금 맞췄다. 이 거절은 맞추기 전
                 # 자격(열쇠꾸러미에 남아 있던 옛 계정)이 받은 것이라 지금 계정 탓이 아니다.
                 # 막으면 멀쩡한 계정이 몇 시간 잠긴다(2026-08-22 B 계정 실사고).
                 log(f"자격 파일과 열쇠꾸러미가 어긋나 있었습니다. 방금 맞췄고 "
                     f"'{used_label}' 은 막지 않습니다. 같은 계정으로 다시 시도합니다.")
+                if settled_label and settled_label != current:
+                    # 지금 실제로 꽂힌 자격은 예약에 적혀 있던 계정이다. 상태를 안 맞추면
+                    # 다음 거절이 또 엉뚱한 계정에 찍힌다(예약은 손 작업으로도 생긴다).
+                    st.set_current(state, settled_label,
+                                   f"{current or '?'} → {settled_label} (예약된 전환 마무리)")
+                    log(f"실제로 꽂힌 자격은 '{settled_label}' 이라 상태도 그쪽으로 맞췄습니다.")
                 st.save_state(state)
-                return used_label or current
+                return settled_label or used_label or current
             if verdict == "limit":
                 # 세션(5시간)인지 주간인지에 맞는 리셋 시각을 실시간 사용량에서 읽는다.
                 # 못 읽으면 응답 문구 파싱으로 떨어진다.

@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -2442,7 +2444,7 @@ def case_limit_with_split_cred(tmp):
     try:
         # (1) 어긋나 있었고 방금 맞춘 자리 → 이 거절은 옛 계정 것이다. 막지 않는다.
         setup(tmp, ["A", "B"], "A")
-        claude_pool._settle_pending_switch = lambda: True
+        claude_pool._settle_pending_switch = lambda: (True, "A")
         fake = Fake({"A": (0, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
         install(fake)
         claude_pool.run(["claude", "-p", "안녕"])
@@ -2454,7 +2456,7 @@ def case_limit_with_split_cred(tmp):
 
         # (2) 어긋난 적이 없으면 예전 그대로 막고 갈아탄다
         setup(tmp, ["A", "B"], "A")
-        claude_pool._settle_pending_switch = lambda: False
+        claude_pool._settle_pending_switch = lambda: (False, None)
         fake2 = Fake({"A": (0, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
         install(fake2)
         proc = claude_pool.run(["claude", "-p", "안녕"])
@@ -2463,6 +2465,44 @@ def case_limit_with_split_cred(tmp):
               f"막힘={st.load_state().get('blocked')}")
         check("B 로 갈아탔다", st.load_state().get("current") == "B",
               f"현재={st.load_state().get('current')}")
+
+        # (3) 예약에 적힌 계정이 상태와 다르면, 실제로 꽂힌 그 계정으로 상태를 맞춘다
+        #     (예약은 순환기를 안 거친 손 작업으로도 생긴다)
+        setup(tmp, ["A", "B"], "A")
+        s = st.load_state()          # (2)에서 막아둔 A 를 지우고 시작한다(같은 임시 폴더를 쓴다)
+        s["blocked"] = {}
+        st.save_state(s)
+        claude_pool._settle_pending_switch = lambda: (True, "B")
+        fake3 = Fake({"A": (0, LIMIT_OUT, ""), "B": (0, OK_OUT, "")})
+        install(fake3)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("실제로 꽂힌 계정으로 상태를 맞춘다", st.load_state().get("current") == "B",
+              f"현재={st.load_state().get('current')}")
+        check("그래도 아무 계정도 안 막는다", not st.load_state().get("blocked"),
+              f"막힘={st.load_state().get('blocked')}")
+
+        # (4) 실물 함수: 예약 마무리가 찍는 줄이 봇 답변 쪽으로 새면 안 된다
+        #     (봇은 이 호출의 출력을 그대로 JSON 으로 읽는다)
+        setup(tmp, ["A", "B"], "A")
+        claude_pool._settle_pending_switch = real_settle
+        import cred_mirror
+        real_apply = cred_mirror.apply_pending
+        (st.CREDS_DIR / ".pending-switch").write_text("B", encoding="utf-8")
+
+        def noisy_apply():
+            print("2026-01-01 00:00:00 [되비추기] 시끄러운 줄")
+            return "done"
+
+        cred_mirror.apply_pending = noisy_apply
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                done, label = claude_pool._settle_pending_switch()
+        finally:
+            cred_mirror.apply_pending = real_apply
+        check("마무리했다고 답한다", done is True and label == "B", f"{done} / {label}")
+        check("표준 출력으로 아무것도 안 샌다", buf.getvalue().strip() == "",
+              f"샌 것={buf.getvalue()!r}")
     finally:
         claude_pool._settle_pending_switch = real_settle
 
