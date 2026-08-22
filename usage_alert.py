@@ -41,6 +41,20 @@ THRESHOLDS = [50, 70, 90]  # 넘을 때마다 알리는 단계
 SWITCH_SOON = 10           # 남은량이 이 % 이하면 첫 줄에 다음 계정을 붙인다
 HISTORY_KEEP = 80
 _KIND_NAME = {"wk": "주간", "se": "세션", "fb": "Fable 칸"}
+# 알림을 보낸 머신. 같은 알림이 세 머신 중 어디 계정 얘기인지 첫 줄에 박는다
+# (2026-08-23: winserver 의 D 알림을 오르카 창(B) 얘기로 오해함). human=사람이 쓰는 창이 있는가.
+MACHINES = {
+    "DESKTOP-LR51NVM": ("본체", True),
+    "gwon-ui-Macmini": ("맥미니", True),
+    "DESKTOP-FIVP2HL": ("winserver, 봇 전용", False),
+}
+
+
+def machine_info() -> tuple:
+    """(표시 이름, 사람 창 있음). 모르는 머신은 hostname 그대로 + 사람 창 있음으로 본다."""
+    import socket
+    host = socket.gethostname().split(".")[0]
+    return MACHINES.get(host, (host, True))
 
 
 _pct = usage_check.pct_text            # 남은량 표기 (공용)
@@ -165,12 +179,16 @@ def build_message(label: str, hits: list, others: list) -> str:
     if wk and wk[1] <= 0:
         hits = [wk]  # 주간이 다 차면 세션이 얼마 남았든 못 쓴다 — 세션 줄을 빼서 헷갈리지 않게
     worst = min(hits, key=lambda h: h[1])
-    head = f"[클로드] 계정 {label} {_KIND_NAME[worst[0]]} {_pct(worst[1])} 남음"
+    machine, human = machine_info()
+    head = f"[클로드·{machine}] 계정 {label} {_KIND_NAME[worst[0]]} {_pct(worst[1])} 남음"
     if worst[1] <= SWITCH_SOON:
         if worst[0] == "fb":
-            # 칸만 바닥나는 건 계정 전환이 아니다. 떠 있는 창은 Opus 로 내려가고,
-            # 새로 켜야 다른 계정의 Fable 을 쓴다(2026-08-23, 오르카 창에서 강등을 못 보던 문제).
-            if worst[1] <= 0:
+            # 칸만 바닥나는 건 계정 전환이 아니다. 사람 창이 있는 머신이면 떠 있는 창이
+            # Opus 로 내려가고, 새로 켜야 다른 계정의 Fable 을 쓴다(2026-08-23).
+            # 봇 전용 머신은 봇이 Opus·Haiku 를 명시해 부르므로 Fable 칸과 무관하다.
+            if not human:
+                head += ", 봇은 Opus·Haiku로 부르니 영향 없음"
+            elif worst[1] <= 0:
                 head += ", 떠 있는 창은 지금 Opus로 돌고 있음 (cc 다시 켜면 다른 계정 Fable)"
             else:
                 head += ", 다 차면 떠 있는 창은 Opus로 내려감 (cc 다시 켜면 다른 계정 Fable)"
