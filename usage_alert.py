@@ -170,7 +170,10 @@ def build_message(label: str, hits: list, others: list) -> str:
         if worst[0] == "fb":
             # 칸만 바닥나는 건 계정 전환이 아니다. 떠 있는 창은 Opus 로 내려가고,
             # 새로 켜야 다른 계정의 Fable 을 쓴다(2026-08-23, 오르카 창에서 강등을 못 보던 문제).
-            head += ", 다 차면 떠 있는 창은 Opus로 내려감 (cc 다시 켜면 다른 계정 Fable)"
+            if worst[1] <= 0:
+                head += ", 떠 있는 창은 지금 Opus로 돌고 있음 (cc 다시 켜면 다른 계정 Fable)"
+            else:
+                head += ", 다 차면 떠 있는 창은 Opus로 내려감 (cc 다시 켜면 다른 계정 Fable)"
         elif nxt:
             head += f", 곧 계정 {nxt}로 자동 전환"
         elif others:  # 목록이 비면 사용량을 못 읽은 것 — 없다고 단정하지 않는다
