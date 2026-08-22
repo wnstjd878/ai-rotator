@@ -20,7 +20,7 @@
 자격: 사용률만 읽고, 텔레그램 자격은 notify 가 파일에서 읽음.
 의도적 미구현: 굵게·고정폭 표시 없음. notify.send 가 평문(parse_mode 없음)으로 보내므로
       마크다운을 넣으면 기호가 그대로 보인다. 붙이려면 notify.send 부터 고쳐야 한다.
-마지막 점검: 2026-07-27
+마지막 점검: 2026-08-23 (Fable 칸 단계 알림 + 키 분 단위)
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ ALERT_STATE = BASE / "alert_state.json"
 THRESHOLDS = [50, 70, 90]  # 넘을 때마다 알리는 단계
 SWITCH_SOON = 10           # 남은량이 이 % 이하면 첫 줄에 다음 계정을 붙인다
 HISTORY_KEEP = 80
-_KIND_NAME = {"wk": "주간", "se": "세션"}
+_KIND_NAME = {"wk": "주간", "se": "세션", "fb": "Fable 칸"}
 
 
 _pct = usage_check.pct_text            # 남은량 표기 (공용)
@@ -95,16 +95,32 @@ def _check(kind: str, pct, reset, label: str, alerted: dict):
     """넘은 단계 중 아직 안 알린 게 있으면 (종류, 남은%, 리셋). 넘은 단계는 모두 마킹."""
     if pct is None:
         return None
+    # 리셋 시각은 조회마다 ±1초 흔들려서 초 단위 키로는 같은 단계가 3번까지 나갔다
+    # (2026-08-23 확인: wk_B_…199/200/201 이 다 따로 기록됨). 분 단위로 뭉갠다.
     rr = round(float(reset or 0))
+    rm = round(rr / 60)
     crossed = [t for t in sorted(THRESHOLDS, reverse=True) if pct > t]
     if not crossed:
         return None
-    fresh = [t for t in crossed if alerted.get(f"{kind}_{label}_{rr}_{t}") != 1]
+
+    def _seen(t: int) -> bool:
+        if alerted.get(f"{kind}_{label}_m{rm}_{t}") == 1:
+            return True
+        # 예전(초 단위) 기록도 인정해서 바꾼 직후 같은 단계가 또 나가지 않게 한다
+        return any(alerted.get(f"{kind}_{label}_{rr + d}_{t}") == 1 for d in (-1, 0, 1))
+
+    fresh = [t for t in crossed if not _seen(t)]
     for t in crossed:  # 넘은 단계 전부 마킹(다음 실행에서 중복 안 함)
-        alerted[f"{kind}_{label}_{rr}_{t}"] = 1
+        alerted[f"{kind}_{label}_m{rm}_{t}"] = 1
     if not fresh:
         return None
     return (kind, max(0.0, 100 - float(pct)), reset)
+
+
+def _fable(usage: dict):
+    """사용량에서 Fable 칸(쓴 %, 리셋 epoch). 칸 정보가 없으면 (None, None)."""
+    return (usage_check.scoped_pct(usage, "Fable"),
+            usage_check.scoped_reset(usage, "Fable"))
 
 
 def _others_weekly(label: str, seen: list | None = None) -> list:
@@ -151,7 +167,11 @@ def build_message(label: str, hits: list, others: list) -> str:
     worst = min(hits, key=lambda h: h[1])
     head = f"[클로드] 계정 {label} {_KIND_NAME[worst[0]]} {_pct(worst[1])} 남음"
     if worst[1] <= SWITCH_SOON:
-        if nxt:
+        if worst[0] == "fb":
+            # 칸만 바닥나는 건 계정 전환이 아니다. 떠 있는 창은 Opus 로 내려가고,
+            # 새로 켜야 다른 계정의 Fable 을 쓴다(2026-08-23, 오르카 창에서 강등을 못 보던 문제).
+            head += ", 다 차면 떠 있는 창은 Opus로 내려감 (cc 다시 켜면 다른 계정 Fable)"
+        elif nxt:
             head += f", 곧 계정 {nxt}로 자동 전환"
         elif others:  # 목록이 비면 사용량을 못 읽은 것 — 없다고 단정하지 않는다
             head += ", 자동 전환할 계정 없음"
@@ -340,6 +360,9 @@ def main() -> int:
                 for k, p, r in (("wk", "weekly_pct", "weekly_reset"),
                                 ("se", "session_pct", "session_reset"))
                 if u.get(p) is not None]
+        fb_pct, fb_reset = _fable(u)
+        if fb_pct is not None:
+            hits.append(("fb", max(0.0, 100 - float(fb_pct)), fb_reset))
         if not hits:
             print("사용량 못 읽음")
             return 0
@@ -354,6 +377,12 @@ def main() -> int:
         hit = _check(kind, u.get(pct_key), u.get(reset_key), label, alerted)
         if hit:
             hits.append(hit)
+    # Fable 칸(모델별 주간)도 같은 단계로 미리 알린다. 이게 없으면 100% 가 돼서 켤 때
+    # 거절당해야 처음 알고, 이미 떠 있는 창은 소리 없이 Opus 로 내려간다(2026-08-23).
+    fb_pct, fb_reset = _fable(u)
+    hit = _check("fb", fb_pct, fb_reset, label, alerted)
+    if hit:
+        hits.append(hit)
 
     if hits:
         notify.send(build_message(label, hits, _others_weekly(label, seen)))
