@@ -2526,6 +2526,122 @@ def case_limit_with_split_cred(tmp):
         claude_pool._settle_pending_switch = real_settle
 
 
+def case_cred_refresh(tmp):
+    """[52] 만료된 저장 자격을 재발급 열쇠로 되살리는 갈래.
+
+    갱신은 재발급 열쇠를 한 번 쓰고 버리는 회전이라, 엉뚱한 자리에서 부르면 그 계정
+    자격이 죽는다. 그래서 "언제 부르는가" 를 값 확인보다 촘촘히 본다.
+    """
+    print("\n[52] 만료된 저장 자격 되살리기")
+    import cred_refresh as cr
+    import usage_check as uc
+
+    creds = Path(tmp) / "creds"
+    creds.mkdir(parents=True, exist_ok=True)
+    now_ms = int(time.time() * 1000)
+
+    def write(label, *, refresh="옛열쇠", rt_exp=now_ms + 30 * 86400_000):
+        p = creds / f"{label}.json"
+        p.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "옛출입증", "refreshToken": refresh,
+            "expiresAt": now_ms - 1000, "refreshTokenExpiresAt": rt_exp,
+            "scopes": ["a"], "subscriptionType": "max"}}), encoding="utf-8")
+        return p
+
+    # 부를 수 있는 자리인지 먼저 가린다 — 열쇠가 없거나 만료면 헛호출을 안 한다.
+    check("재발급 열쇠가 없으면 안 부른다",
+          cr.can_refresh({"claudeAiOauth": {"refreshToken": ""}}) is False)
+    check("재발급 열쇠가 만료됐으면 안 부른다",
+          cr.can_refresh({"claudeAiOauth": {
+              "refreshToken": "x", "refreshTokenExpiresAt": now_ms - 1000}}) is False)
+    check("살아있는 열쇠면 부른다", cr.can_refresh({"claudeAiOauth": {
+        "refreshToken": "x", "refreshTokenExpiresAt": now_ms + 1000}}) is True)
+
+    real_post = cr._post
+    calls = []
+    try:
+        def fake_post(token):
+            calls.append(token)
+            return {"access_token": "새출입증", "refresh_token": "새열쇠", "expires_in": 3600}
+
+        cr._post = fake_post
+        p = write("A")
+        check("갱신에 성공하면 참을 돌려준다", cr.refresh_file(p) is True)
+        saved = json.loads(p.read_text(encoding="utf-8"))["claudeAiOauth"]
+        check("새 출입증이 파일에 저장된다", saved["accessToken"] == "새출입증")
+        check("회전된 열쇠도 같이 저장된다", saved["refreshToken"] == "새열쇠",
+              "이걸 놓치면 다음 갱신이 폐기된 열쇠로 나가 계정이 죽는다")
+        check("만료 시각이 앞으로 당겨진다", saved["expiresAt"] > now_ms)
+        check("나머지 항목은 그대로 둔다", saved.get("subscriptionType") == "max")
+        check("이전 세대를 남긴다", (creds / "prev" / "A.json").exists())
+        check("잠금 파일을 안 남긴다", not list(creds.glob(".refresh-*")))
+
+        # 응답에 출입증이 없으면 저장하지 않는다(빈 값을 덮어쓰면 자격이 사라진다)
+        cr._post = lambda token: {"refresh_token": "새열쇠2"}
+        p2 = write("B")
+        check("출입증 없는 응답은 저장하지 않는다", cr.refresh_file(p2) is False)
+        check("실패해도 원래 자격은 그대로",
+              json.loads(p2.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+              == "옛출입증")
+
+        # 둘이 동시에 갱신하면 한쪽이 폐기된 열쇠를 저장한다. 잠긴 자리에서는 물러난다.
+        cr._post = fake_post
+        p3 = write("D")
+        lock = creds / (".refresh-" + p3.name + ".lock")
+        lock.write_text("", encoding="utf-8")
+        check("다른 곳이 갱신 중이면 물러난다", cr.refresh_file(p3) is False)
+        lock.unlink()
+
+        # 부르는 쪽 규칙: 자격 만료일 때만, 그리고 현재 계정이 아닐 때만 갱신한다.
+        real_get, real_refresh = uc.get_usage, cr.refresh_file
+        try:
+            asked = []
+
+            def fake_get(path):
+                asked.append(str(path))
+                if len(asked) == 1:
+                    uc.last_status, uc.last_error = 401, "HTTP 401"
+                    return None
+                return {"weekly_pct": 1.0}
+
+            uc.get_usage = fake_get
+            cr.refresh_file = lambda path: True
+            got = uc.get_usage_for(p, is_current=False)
+            check("자격 만료면 갱신하고 한 번 더 읽는다", got == {"weekly_pct": 1.0})
+
+            asked.clear()
+            called = []
+            cr.refresh_file = lambda path: called.append(str(path)) or True
+
+            def get_429(path):
+                asked.append(str(path))
+                uc.last_status, uc.last_error = 429, "조회 제한(429). 잠시 뒤 다시"
+                return None
+
+            uc.get_usage = get_429
+            check("조회 제한이면 열쇠를 태우지 않는다",
+                  uc.get_usage_for(p, is_current=False) is None and not called)
+
+            asked.clear()
+            called.clear()
+
+            def get_401(path):
+                asked.append(str(path))
+                uc.last_status, uc.last_error = 401, "HTTP 401"
+                return None
+
+            uc.get_usage = get_401
+            check("지금 쓰는 계정은 갱신하지 않는다",
+                  uc.get_usage_for(p, is_current=True) is None and not called,
+                  "claude 가 들고 있는 값이 폐기된다")
+        finally:
+            uc.get_usage, cr.refresh_file = real_get, real_refresh
+            uc.last_status = uc.last_error = None
+    finally:
+        cr._post = real_post
+        check("갱신 호출은 파일에서 읽은 열쇠로만 나간다", calls and calls[0] == "옛열쇠")
+
+
 def case_pid_alive():
     """[49] 프로세스 생존 확인이 실제로 맞는지(창 표시가 영영 안 걷히면 계정이 좁아진다)."""
     print("\n[49] 프로세스 생존 확인")
@@ -2576,7 +2692,7 @@ def main():
                      case_keychain_pull_and_rescue, case_barred,
                      case_scoped_exhausted_message, case_scoped_reopen,
                      case_window_claim, case_window_claim_edges,
-                     case_limit_with_split_cred):
+                     case_limit_with_split_cred, case_cred_refresh):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()

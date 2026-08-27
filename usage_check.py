@@ -31,6 +31,7 @@ UA = "claude-cli/2.1.0 (external, cli)"
 TIMEOUT = 10
 _WEEKDAY = "월화수목금토일"
 last_error = None  # 마지막 조회 실패 사유(종류만, 자격 값은 절대 안 담는다)
+last_status = None  # 마지막 조회의 서버 응답 번호. 401(자격 만료)만 갱신을 부른다.
 
 
 def _iso_to_epoch(text):
@@ -48,8 +49,9 @@ def get_usage(cred_path) -> dict | None:
     실패 사유는 last_error 에 남는다(값이 아니라 종류만). 조회가 너무 잦으면 429 가 나는데,
     사유 없이 None 만 돌려주면 토큰 만료와 구분이 안 돼 엉뚱한 데를 파게 된다.
     """
-    global last_error
+    global last_error, last_status
     last_error = None
+    last_status = None
     try:
         d = json.load(open(cred_path, encoding="utf-8"))
     except Exception:
@@ -68,6 +70,7 @@ def get_usage(cred_path) -> dict | None:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             j = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        last_status = e.code
         last_error = "조회 제한(429). 잠시 뒤 다시" if e.code == 429 else f"HTTP {e.code}"
         return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
@@ -140,20 +143,37 @@ def scoped_reset(usage: dict | None, bucket: str | None):
     return row.get("reset") if isinstance(row, dict) else None
 
 
-def get_usage_for(cred_path, *, is_current: bool = False) -> dict | None:
-    """사용량을 읽되, 지금 쓰는 계정이면 살아있는 자격 파일로 한 번 더 시도한다.
+def get_usage_for(cred_path, *, is_current: bool = False,
+                  allow_refresh: bool = True) -> dict | None:
+    """사용량을 읽는다. 자격이 낡아 거절당하면 계정에 따라 갈래가 다르다.
 
-    creds/<라벨>.json 의 accessToken 은 수명이 짧아 며칠 지나면 만료된다(refresh 는 안 한다).
-    그러면 사용량을 못 읽어 경고가 조용히 안 나간다 — 2026-07-27 실제로 그랬다.
-    지금 쓰는 계정은 claude 가 ~/.claude/.credentials.json 을 갱신해 주므로 그 파일이 최신이다.
-    현재 계정일 때만 쓴다. 다른 계정에 쓰면 남의 사용량을 그 계정 것으로 잘못 보여준다.
+    creds/<라벨>.json 의 accessToken 은 수명이 짧다(실측 약 8시간).
+    - **지금 쓰는 계정**: claude 가 ~/.claude/.credentials.json 을 갱신해 주므로 그 파일로
+      한 번 더 시도한다. 여기서 우리가 자격을 갱신하면 claude 가 들고 있는 값이 폐기되므로
+      갱신은 하지 않는다(2026-07-31 Mac 봇 한 시간 정지가 그 유형이다).
+      살아있는 파일을 읽는 이 갈래는 현재 계정에만 쓴다 — 다른 계정에 쓰면 남의 사용량을
+      그 계정 것으로 잘못 보여준다.
+    - **나머지 계정**: 아무도 안 갱신해 주는 자리다. 저장된 재발급 열쇠로 새 접근 열쇠를 받아
+      한 번만 다시 읽는다(2026-08-27 추가). 이게 없으면 몇 시간 뒤부터 화면이 낡은 기록으로
+      떨어지고, 사용량 경고도 조용히 안 나간다(2026-07-27 실제로 그랬다).
+      자격 만료(401)일 때만 시도한다 — 조회 제한(429)이나 네트워크 문제에 열쇠를 태우지 않는다.
     """
     u = get_usage(cred_path)
-    if u or not is_current:
+    if u:
         return u
-    from pathlib import Path
-    live = Path.home() / ".claude" / ".credentials.json"
-    return get_usage(live) if live.exists() else None
+    if is_current:
+        from pathlib import Path
+        live = Path.home() / ".claude" / ".credentials.json"
+        return get_usage(live) if live.exists() else None
+    if allow_refresh and last_status == 401:
+        try:
+            import cred_refresh
+
+            if cred_refresh.refresh_file(cred_path):
+                return get_usage(cred_path)
+        except Exception:
+            pass  # 표시용 갈래다. 갱신이 안 되면 기록으로 떨어지면 된다.
+    return None
 
 
 def which_limit(usage: dict | None, threshold: float = 95.0,
