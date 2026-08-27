@@ -2584,6 +2584,34 @@ def case_cred_refresh(tmp):
               json.loads(p2.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
               == "옛출입증")
 
+        # 새 열쇠가 안 온 응답도 저장하지 않는다. 저장하면 파일에 **이미 써서 폐기된**
+        # 열쇠가 남고, 성공으로 돌려주면 다음 갱신이 조용히 거절당한다(코덱스 검수, 재현함).
+        cr._post = lambda token: {"access_token": "새출입증", "expires_in": 3600}
+        p4 = write("E")
+        check("새 열쇠 없는 응답은 저장하지 않는다", cr.refresh_file(p4) is False)
+        check("그때 파일에 폐기된 열쇠가 남지 않는다",
+              json.loads(p4.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+              == "옛출입증")
+
+        # 회전이 끝난 뒤 저장이 깨지면 그 계정은 잃은 것이다. 조용히 넘기면 안 된다.
+        real_write, real_alert = cr._write_atomic, cr._alert_lost
+        alerted = []
+        try:
+            def boom(dest, obj):
+                raise OSError("디스크 오류")
+
+            cr._write_atomic = boom
+            cr._alert_lost = lambda label: alerted.append(label)
+            cr._post = fake_post
+            p5 = write("F")
+            check("저장이 깨지면 실패로 돌려준다", cr.refresh_file(p5) is False)
+            check("그 사유가 남는다", "저장 실패" in (cr.last_error or ""),
+                  f"사유={cr.last_error!r}")
+            check("자격을 잃었으면 사람을 부른다", alerted == ["F"])
+        finally:
+            cr._write_atomic, cr._alert_lost = real_write, real_alert
+            cr._post = fake_post
+
         # 둘이 동시에 갱신하면 한쪽이 폐기된 열쇠를 저장한다. 잠긴 자리에서는 물러난다.
         cr._post = fake_post
         p3 = write("D")
@@ -2637,6 +2665,20 @@ def case_cred_refresh(tmp):
         finally:
             uc.get_usage, cr.refresh_file = real_get, real_refresh
             uc.last_status = uc.last_error = None
+        # 손으로 부를 때 현재 계정을 건드리지 않는다(코덱스 검수, 재현함).
+        # 인자 없이 부르면 저장된 것 전부를 갱신하던 자리라 현재 계정까지 폐기시켰다.
+        known = ["A", "B", "D"]
+        picked, refused = cr.targets([], "B", known)
+        check("인자 없이 부르면 현재 계정만 뺀다", picked == ["A", "D"] and not refused,
+              f"고른 것={picked}")
+        picked, refused = cr.targets(["B"], "B", known)
+        check("현재 계정을 콕 집어도 거절한다", picked == [] and refused,
+              f"고른 것={picked}, 사유={refused}")
+        picked, refused = cr.targets([], None, known)
+        check("현재 계정을 못 읽으면 하나도 안 한다", picked == [] and refused,
+              "모르는 채 전부 갱신하면 쓰는 자격을 폐기시킨다")
+        picked, refused = cr.targets(["A"], "B", known)
+        check("나머지 계정은 지정하면 갱신한다", picked == ["A"] and not refused)
     finally:
         cr._post = real_post
         check("갱신 호출은 파일에서 읽은 열쇠로만 나간다", calls and calls[0] == "옛열쇠")
