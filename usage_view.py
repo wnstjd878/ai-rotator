@@ -3,8 +3,13 @@
 용도: 계정별 남은 사용량을 화면에 적을 글자로 바꾼다. claude_pool·codex_pool 의 --status 가 쓴다.
 실행 시점: 사람이 `cs`/`gs` 를 치거나 `cc`/`codex` 를 켤 때(표시 전용).
 입력: 기록해둔 사용량 한 건(weekly_pct/weekly_reset/session_pct/session_reset/at/host)
-출력: "주간 남은 100%, 세션 남은 100% (08/03 01:59 초기화된 뒤 읽은 값 없음)" 같은 한 줄
-외부 의존: shared_state.host_label(기계 이름 바꾸기)만. 없어도 원래 이름으로 떨어진다.
+출력: "주간 남은 35% (08/29 21:00 풀림), 세션 남은 100%(초기화됨) (Mac 3시간 전 기준)" 같은 한 줄
+외부 의존: shared_state.host_label(기계 이름 바꾸기), usage_check.fmt_reset(풀리는 시각 문구).
+          둘 다 없어도 그 부분만 빠지고 나머지는 그대로 나온다.
+
+2026-08-27 에 더한 것: 아직 안 지난 초기화 시각을 칸마다 적는다. 그 전에는 지금 쓰는 계정만
+    시각이 보이고(서버에서 방금 읽으니까) 나머지 계정은 안 보였다. 나머지 계정의 저장해둔
+    접근 토큰이 만료돼 조회가 401 로 떨어지면 이 화면으로 오는데, 여기에 시각이 없었다.
 
 핵심 규칙(2026-08-03 사용자 지적으로 바뀐 부분):
     기록에 적힌 초기화 시각이 이미 지났으면 그 창은 다시 채워졌다는 뜻이다.
@@ -37,48 +42,61 @@ def _num(value):
 
 
 def usage_parts(entry: dict, now: float):
-    """[(이름, 남은 %, 초기화에서 끌어낸 값인지), ...] 와 지나간 초기화 시각 중 가장 늦은 것.
+    """[(이름, 남은 %, 초기화에서 끌어낸 값인지, 다시 채워지는 시각), ...] 와
+    지나간 초기화 시각 중 가장 늦은 것.
 
     초기화 시각이 지난 창은 남은 100% 로 본다. 그 뒤에 누가 썼으면 그 기계가
     더 새 값을 올리므로(공유 칠판) 여기까지 오지 않는다.
+
+    아직 안 지난 시각은 그대로 들고 나간다 — 화면에 "언제 풀리는지" 를 적으려면 필요하다.
     """
     parts, reset_at = [], None
-    for pct_key, reset_key, name in KINDS:
-        pct = _num(entry.get(pct_key))
-        if pct is None:
-            continue
-        reset = _num(entry.get(reset_key))
-        if reset is not None and reset <= now:
-            parts.append((name, 100.0, True))
-            reset_at = reset if reset_at is None else max(reset_at, reset)
-        else:
-            parts.append((name, max(0.0, 100.0 - pct), False))
+    rows = [(_num(entry.get(pct_key)), _num(entry.get(reset_key)), name)
+            for pct_key, reset_key, name in KINDS]
 
     # 모델 칸(Fable 등). 계정 전체가 여유여도 이 칸만 바닥날 수 있어서 따로 적는다.
     # 옛 기록에는 이 자리가 없다 — 없으면 그냥 안 적는다(예전 화면 그대로).
     for bucket, row in sorted((entry.get("scoped") or {}).items()):
-        if not isinstance(row, dict):
-            continue
-        pct = _num(row.get("pct"))
+        if isinstance(row, dict):
+            rows.append((_num(row.get("pct")), _num(row.get("reset")), bucket))
+
+    for pct, reset, name in rows:
         if pct is None:
             continue
-        reset = _num(row.get("reset"))
         if reset is not None and reset <= now:
-            parts.append((bucket, 100.0, True))
+            parts.append((name, 100.0, True, None))
             reset_at = reset if reset_at is None else max(reset_at, reset)
         else:
-            parts.append((bucket, max(0.0, 100.0 - pct), False))
+            parts.append((name, max(0.0, 100.0 - pct), False, reset))
     return parts, reset_at
 
 
+def _reset_text(reset) -> str:
+    """' (MM/DD HH:MM 풀림)'. 문구는 usage_check 한 벌만 쓴다. 못 불러오면 시각을 뺀다."""
+    if reset is None:
+        return ""
+    try:
+        import usage_check
+
+        return usage_check.fmt_reset(reset)
+    except Exception:
+        return ""
+
+
 def format_parts(parts) -> str:
-    """한 줄 글로. 실측과 초기화 추정이 섞여 있을 때만 어느 쪽이 추정인지 표시한다."""
+    """한 줄 글로. 실측과 초기화 추정이 섞여 있을 때만 어느 쪽이 추정인지 표시한다.
+
+    아직 안 지난 초기화 시각은 칸마다 뒤에 적는다(서버에서 방금 읽었을 때와 같은 모양).
+    이미 지나 100% 로 되살린 칸에는 안 적는다 — 지난 시각은 알려줄 게 없다.
+    """
     if not parts:
         return ""
-    mixed = any(d for _, _, d in parts) and any(not d for _, _, d in parts)
+    mixed = any(d for _, _, d, _r in parts) and any(not d for _, _, d, _r in parts)
     return ", ".join(
-        f"{name} 남은 {left:.0f}%" + ("(초기화됨)" if derived and mixed else "")
-        for name, left, derived in parts
+        f"{name} 남은 {left:.0f}%"
+        + ("(초기화됨)" if derived and mixed else "")
+        + ("" if derived else _reset_text(reset))
+        for name, left, derived, reset in parts
     )
 
 
@@ -166,7 +184,7 @@ def last_seen(state: dict, shared: dict | None, label: str, now: float) -> str:
     if not line:
         return "사용량 못 읽음"
 
-    if parts and all(d for _, _, d in parts) and reset_at:
+    if parts and all(d for _, _, d, _r in parts) and reset_at:
         when = time.strftime("%m/%d %H:%M", time.localtime(reset_at))
         return f"{line} ({when} 초기화된 뒤 읽은 값 없음)"
 
