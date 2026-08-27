@@ -98,6 +98,32 @@ def _acquire(lock: Path) -> bool:
         return False
 
 
+def _alert_lost(label: str) -> None:
+    """자격을 잃은 순간만 사람을 부른다. 평소 실패는 안 부른다(표시가 낡을 뿐이다)."""
+    try:
+        import notify
+
+        notify.send(f"[계정 순환] '{label}' 자격을 저장하지 못했습니다. "
+                    f"열쇠는 이미 서버에서 바뀐 뒤라, 이 계정은 그 컴퓨터에서 다시 "
+                    f"로그인해야 살아납니다.")
+    except Exception:
+        pass
+
+
+def current_label() -> str | None:
+    """지금 쓰는 계정 라벨. 못 읽으면 None.
+
+    이걸 못 읽으면 **아무것도 갱신하지 않는다**(부르는 쪽에서 그렇게 다룬다).
+    현재 계정을 모르는 채 전부 갱신하면 claude 가 들고 있는 자격을 폐기시킨다.
+    """
+    try:
+        import pool_state
+
+        return (pool_state.load_state() or {}).get("current")
+    except Exception:
+        return None
+
+
 def can_refresh(obj, now: float | None = None) -> bool:
     """이 저장본으로 갱신을 시도할 수 있는가(재발급 열쇠가 있고 아직 안 만료됐는가)."""
     o = (obj or {}).get("claudeAiOauth") or {}
@@ -162,16 +188,19 @@ def refresh_file(cred_path) -> bool:
             return False
         o = obj.get("claudeAiOauth") or {}
         data = _post(o.get("refreshToken") or "")
-        if not data or not data.get("access_token"):
-            if data:
-                last_error = "갱신 응답에 접근 열쇠 없음"
+        if not data:
+            return False
+        # 둘 다 있어야 저장한다. 이 서버는 갱신할 때마다 재발급 열쇠를 회전시키므로,
+        # 새 열쇠가 안 왔는데 저장해 버리면 파일에는 **이미 써서 폐기된 열쇠**가 남는다.
+        # 그 상태로 성공을 돌려주면 다음 갱신이 조용히 거절당하고 원인을 찾기 어렵다.
+        if not data.get("access_token") or not data.get("refresh_token"):
+            last_error = "갱신 응답에 접근 열쇠 또는 재발급 열쇠 없음"
             return False
 
         now = time.time()
         new = dict(o)
         new["accessToken"] = data["access_token"]
-        if data.get("refresh_token"):
-            new["refreshToken"] = data["refresh_token"]
+        new["refreshToken"] = data["refresh_token"]
         expires_in = data.get("expires_in")
         if expires_in:
             new["expiresAt"] = int((now + float(expires_in)) * 1000)
@@ -194,7 +223,14 @@ def refresh_file(cred_path) -> bool:
 
         out = dict(obj)
         out["claudeAiOauth"] = new
-        _write_atomic(path, out)
+        try:
+            _write_atomic(path, out)
+        except Exception as e:
+            # 여기까지 왔으면 옛 열쇠는 이미 서버에서 폐기됐고 새 값은 파일에 못 들어갔다.
+            # 그 계정은 다시 로그인해야 살아난다 — 조용히 넘기면 원인을 못 찾는다.
+            last_error = f"자격 저장 실패({type(e).__name__}) — 이 계정은 다시 로그인해야 합니다"
+            _alert_lost(path.stem)
+            return False
         return True
     finally:
         try:
@@ -203,11 +239,30 @@ def refresh_file(cred_path) -> bool:
             pass
 
 
+def targets(labels, current: str | None, known) -> tuple[list, str | None]:
+    """손으로 부를 때 실제로 갱신할 라벨과 거절 사유. 현재 계정은 어느 경우에도 뺀다.
+
+    라벨을 안 주면 저장된 것 전부에서 현재 계정만 뺀다. 현재 계정을 콕 집어 줘도 거절한다
+    (안전 규칙이 명령보다 위다). 현재 계정을 못 읽으면 하나도 안 한다 — 모르는 채로
+    전부 갱신하면 claude 가 들고 있는 자격을 폐기시킨다.
+    """
+    if current is None:
+        return [], "지금 쓰는 계정을 못 읽어 아무것도 갱신하지 않습니다"
+    asked = list(labels) if labels else [x for x in known if x != current]
+    if current in asked:
+        return [], f"'{current}' 은 지금 쓰는 계정이라 갱신하지 않습니다"
+    return asked, None
+
+
 if __name__ == "__main__":
     import sys
 
     creds = Path(__file__).resolve().parent / "creds"
-    labels = sys.argv[1:] or [f.stem for f in sorted(creds.glob("*.json"))]
+    known = [f.stem for f in sorted(creds.glob("*.json"))]
+    labels, refused = targets(sys.argv[1:], current_label(), known)
+    if refused:
+        print(refused)
+        raise SystemExit(1)
     for label in labels:
         f = creds / f"{label}.json"
         if not f.exists():

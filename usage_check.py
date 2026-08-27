@@ -166,13 +166,20 @@ def get_usage_for(cred_path, *, is_current: bool = False,
         live = Path.home() / ".claude" / ".credentials.json"
         return get_usage(live) if live.exists() else None
     if allow_refresh and last_status == 401:
+        why = None
         try:
             import cred_refresh
 
             if cred_refresh.refresh_file(cred_path):
                 return get_usage(cred_path)
-        except Exception:
-            pass  # 표시용 갈래다. 갱신이 안 되면 기록으로 떨어지면 된다.
+            why = cred_refresh.last_error
+        except Exception as e:
+            why = type(e).__name__
+        # 갱신이 안 되면 화면은 기록으로 떨어지면 된다. 다만 **사유는 남긴다**:
+        # 자격 저장이 깨져 그 계정을 잃은 경우가 섞여 있어서, 조용히 넘기면
+        # 왜 계속 낡은 값만 보이는지 아무도 모른다.
+        if why:
+            globals()["last_error"] = f"자격 만료, 갱신도 실패({why})"
     return None
 
 
