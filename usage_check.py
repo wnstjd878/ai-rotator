@@ -219,12 +219,19 @@ def weekly_left(cred_path):
     return max(0.0, 100 - float(u["weekly_pct"]))
 
 
-def _fmt_reset(epoch) -> str:
-    """리셋 시각을 ' (MM/DD HH:MM 풀림)' 로. 없으면 빈 문자열."""
+def fmt_reset(epoch) -> str:
+    """리셋 시각을 ' (MM/DD HH:MM 풀림)' 로. 없으면 빈 문자열.
+
+    서버에서 방금 읽은 값(summarize)과 기록해둔 값(usage_view.format_parts)이 **같은 문구**를
+    쓰게 하려고 공개해 둔다. 두 벌로 갈라 두면 한쪽만 고치게 된다.
+    """
     if not epoch:
         return ""
     import time
     return f" ({time.strftime('%m/%d %H:%M', time.localtime(float(epoch)))} 풀림)"
+
+
+_fmt_reset = fmt_reset  # 옛 이름(이 파일 안 호출부용)
 
 
 def summarize(usage: dict | None) -> str:
