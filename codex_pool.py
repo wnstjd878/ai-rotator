@@ -51,6 +51,7 @@ except Exception:
 # "쓸 수 있는 계정"은 자격 저장본이 아니라 폴더별 로그인 여부로 판단한다
 st.SAVED_LABELS_FN = codex_home.logged_in_labels
 
+NL = "\n"  # 알림 문구의 줄바꿈
 PROVIDER = "codex"  # 공유 칠판에서 클로드 값과 갈라 쓰는 이름(키에 codex: 접두가 붙는다)
 LOG_FILE = BASE / "rotator.log"
 BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 계정을 쉬게 할 시간(초)
@@ -189,6 +190,41 @@ def _shared_current() -> dict | None:
         return shared_state.get_current_all(provider=PROVIDER)
     except Exception:
         return None
+
+
+EXHAUSTED_PCT = 99.5  # 이 이상 쓴 창은 초기화 전까지 안 풀린다
+
+
+def looks_exhausted(state: dict, label: str, now: float | None = None) -> float | None:
+    """마지막으로 읽어둔 값만 보고 "지금도 다 쓴 상태"인지. 맞으면 풀리는 시각, 아니면 None.
+
+    note_usage 는 낡은 값이라 계정을 고르는 판단에 쓰지 말라고 못박혀 있다. 여기서 쓰는 건
+    그 반대 방향 하나뿐이다 — **다 썼다고 기록된 계정을 피하는 것**. 다 쓴 창은 시간이
+    지난다고 저절로 풀리지 않고 초기화 시각에만 풀리므로, 값이 낡아도 "아직 초기화 시각
+    전이면 지금도 다 쓴 상태"는 참이다. 반대로 "여유 있다"는 낡은 값은 그 사이 다 썼을 수
+    있어 절대 안 믿는다(그래서 여유 쪽은 None 을 준다).
+
+    이게 없으면 사용량 조회가 막힌 기계(Mac 은 앞단 차단이라 늘 그렇다)에서 다 쓴 계정을
+    그대로 켜서 똑같이 거절받는다 (2026-08-29 실측).
+    """
+    now = time.time() if now is None else now
+    entry = (state.get("usage_seen") or {}).get(label)
+    if not isinstance(entry, dict):
+        return None
+    for pct_key, reset_key in (("weekly_pct", "weekly_reset"), ("session_pct", "session_reset")):
+        try:
+            pct = float(entry.get(pct_key))
+        except (TypeError, ValueError):
+            continue
+        if pct < EXHAUSTED_PCT:
+            continue
+        try:
+            reset = float(entry.get(reset_key))
+        except (TypeError, ValueError):
+            continue
+        if reset > now:      # 아직 초기화 전이면 지금도 다 쓴 상태다
+            return reset
+    return None
 
 
 def _usage_line(entry: dict, now: float) -> str:
@@ -459,6 +495,17 @@ def _verify_limit(used_label: str | None, verdict: str) -> str:
     return verdict
 
 
+def _notify_model_rejected(out: str, err: str) -> None:
+    """모델 이름 거절을 사람에게 한 번만 알린다. 자동 호출이 조용히 죽는 걸 막는다."""
+    if not st.claim_notice(f"model_rejected_{int(time.time() // 3600)}"):  # 1시간에 한 번
+        return
+    reason = codex_limit.short_reason(out, err, limit=200)
+    notify("[지피티] 설정한 모델을 서버가 거절했습니다." + NL + NL
+           + reason + NL + NL
+           + "계정 한도 문제가 아닙니다. codex 설정 파일(config.toml)의 model 값을 "
+             "쓸 수 있는 이름으로 바꿔야 합니다.")
+
+
 def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs):
     """codex 를 순환 보호 아래서 실행한다. subprocess.run 과 같은 결과를 돌려준다.
 
@@ -498,6 +545,14 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         if verdict == "ok":
             return _finish(proc, args, want_check)
 
+        if verdict == "model":
+            # 계정을 바꿔도 안 풀린다. 재시도도 무의미하니 바로 돌려주고 고칠 곳을 알려준다.
+            log("서버가 이 모델 이름을 거절했습니다. 계정 문제가 아니라 설정 문제입니다. "
+                "config.toml 의 model 값을 쓸 수 있는 이름으로 바꾸세요 "
+                "(쓸 수 있는 목록은 codex 의 /model 화면).")
+            _notify_model_rejected(proc.stdout, proc.stderr)
+            return _finish(proc, args, want_check)
+
         if verdict == "auth" and not switched_here:
             log("로그인이 안 된 상태입니다. 계정을 바꾸지 않습니다. "
                 "그 머신에서 codex login 을 했는지 확인하세요.")
@@ -532,6 +587,21 @@ def _finish(proc, args, want_check):
     return proc
 
 
+def _block_exhausted(state: dict) -> None:
+    """마지막으로 읽은 값이 "다 씀" 인 계정을 막힘 목록에 올린다(잠금 안에서 부를 것).
+
+    막힘 목록은 기계들이 공유하므로, 한 기계가 알아낸 소진을 다른 기계도 그대로 피한다.
+    푸는 시각은 그 창의 초기화 시각이라 저절로 풀린다.
+    """
+    for label in st.account_labels():
+        if st.is_blocked(state, label):
+            continue
+        until = looks_exhausted(state, label)
+        if until:
+            st.mark_blocked(state, label, until, "마지막으로 읽은 사용량이 소진")
+            log(f"'{label}' 은 다 쓴 것으로 기록돼 있어 후보에서 뺍니다")
+
+
 def _print_home() -> int:
     """지금 써야 할 계정의 폴더 경로를 출력한다. 필요하면 계정을 갈아탄다.
 
@@ -541,10 +611,12 @@ def _print_home() -> int:
     """
     state = st.prune_blocked(st.load_state())
     cur = state.get("current")
-    need_switch = (not cur) or (not codex_home.is_logged_in(cur)) or st.is_blocked(state, cur)
+    need_switch = ((not cur) or (not codex_home.is_logged_in(cur))
+                   or st.is_blocked(state, cur) or bool(looks_exhausted(state, cur)))
     if need_switch:
         with st.with_lock():
             s = st.prune_blocked(st.load_state())
+            _block_exhausted(s)  # 다 쓴 걸로 기록된 계정은 고르는 후보에서 빠지게 먼저 막는다
             c = s.get("current")
             if (not c) or (not codex_home.is_logged_in(c)) or st.is_blocked(s, c):
                 nxt = st.pick_next(s, exclude=None)
@@ -597,6 +669,14 @@ def main():
             return 0
         u = codex_usage.get_usage_for(cred_path(cur), is_current=True)
         if not u:
+            # 조회가 막혀도 "여유 있음"으로 통과시키면 안 된다. Mac 은 앞단 차단이라
+            # 늘 여기로 오고, 그대로 두면 다 쓴 계정으로 켜서 똑같이 거절받는다.
+            # 마지막으로 읽어둔 값이 "다 씀 + 아직 초기화 전"이면 그것만 믿는다.
+            until = looks_exhausted(st.load_state(), cur)
+            if until:
+                left = codex_usage.left_phrase(until - time.time()) if codex_usage else ""
+                print(f"{cur} 한도 도달(마지막으로 읽은 값 기준) {left}")
+                return 3
             print(f"사용량 못 읽음 ({codex_usage.last_error or '사유 모름'})")
             return 0
         if u.get("limit_reached") or u.get("reached_type") or \

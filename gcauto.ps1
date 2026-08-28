@@ -50,8 +50,17 @@ try {
         if ($LASTEXITCODE -eq 3) {
             Write-Host "[자동순환] 지금 계정이 한도에 걸려 있어 다음 계정으로 바꿔서 켭니다." -ForegroundColor Yellow
             python $POOL --next
-            if ($LASTEXITCODE -eq 2) {
+            $nextCode = $LASTEXITCODE
+            if ($nextCode -eq 2) {
                 Write-Host "[자동순환] 쓸 수 있는 계정이 없습니다. 초기화 시각까지 기다려야 합니다." -ForegroundColor Red
+                break
+            }
+            # 0 도 2 도 아니면 갈아타기 자체가 실패한 것이다. 그냥 넘어가면 한도 찬 계정으로
+            # 그대로 켜져서 사람이 원인을 못 찾는다 (2026-08-29 실측: 갈아타기 코드가
+            # 즉시 멈춤 오류로 죽었는데 종료코드 2 만 보느라 계속 같은 계정으로 켜졌다).
+            if ($nextCode -ne 0) {
+                Write-Host "[자동순환] 계정 갈아타기가 실패했습니다 (종료코드 $nextCode)." -ForegroundColor Red
+                Write-Host "           위에 찍힌 오류를 보고 고쳐야 합니다. 상태 확인: gs" -ForegroundColor Red
                 break
             }
         }
@@ -96,8 +105,13 @@ try {
         Write-Host ""
         Write-Host "[자동순환] 한도 도달 -> 다음 계정으로 전환합니다..." -ForegroundColor Yellow
         python $POOL --next
-        if ($LASTEXITCODE -eq 2) {
+        $nextCode = $LASTEXITCODE
+        if ($nextCode -eq 2) {
             Write-Host "[자동순환] 갈아탈 계정이 없습니다. 초기화 시각까지 기다려야 합니다." -ForegroundColor Red
+            break
+        }
+        if ($nextCode -ne 0) {
+            Write-Host "[자동순환] 계정 갈아타기가 실패했습니다 (종료코드 $nextCode). 상태 확인: gs" -ForegroundColor Red
             break
         }
         Write-Host "[자동순환] 새 계정으로 codex 를 다시 시작합니다." -ForegroundColor Green

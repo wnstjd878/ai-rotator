@@ -3,7 +3,8 @@
 용도: codex 호출 결과가 "구독 한도에 걸려 거절된 것"인지 판정한다.
       codex_pool.py 가 계정을 바꿀지 말지 결정하는 근거로 쓴다.
 입력: 종료 코드 + 표준출력/오류출력 문자열
-출력: classify() → "ok" | "limit" | "auth" | "error"
+출력: classify() → "ok" | "limit" | "auth" | "model" | "error"
+      model = 서버가 그 모델 이름 자체를 거절. 계정을 바꿔도 안 풀린다(설정을 고쳐야 함).
       confirm_limit(cred_path) → True(진짜 한도) / False(아님) / None(못 읽음)
 
 오판을 막는 세 겹 (클로드 쪽에서 실제로 사고가 났던 자리다):
@@ -74,6 +75,18 @@ AUTH_PATTERNS = [
     r"\b401\b",
 ]
 
+# 서버가 그 모델 자체를 거절하는 경우. 계정을 바꿔도 안 풀리고, 고칠 곳은 설정의 모델
+# 이름이다. 이걸 따로 안 가르면 "원인 모를 실패"로 묻혀서 사람이 화면만 보고 헤맨다
+# (2026-08-29 실측: gpt-5.6-sol 이 ChatGPT 로그인으로는 400 이 되는데 안내가 없었다).
+MODEL_PATTERNS = [
+    r"model is not supported when using codex",
+    r"(unsupported|unknown|invalid|unavailable)[ _]model",
+    r"model[ _](not[ _]found|not[ _]supported|unavailable)",
+    r"the '[^']+' model is not supported",
+    r"model metadata for .* not found",
+    r"does not have access to (the )?model",
+]
+
 # 계정을 바꿔도 안 풀리는 "한도" 들. 판정 전에 본문에서 지운다.
 IGNORE_PATTERNS = [
     r"context[ _]?window (exceeded|limit)",
@@ -98,6 +111,7 @@ IGNORE_PATTERNS = [
 ]
 
 _LIMIT_RE = [re.compile(p, re.I) for p in LIMIT_PATTERNS]
+_MODEL_RE = [re.compile(p, re.I) for p in MODEL_PATTERNS]
 _AUTH_RE = [re.compile(p, re.I) for p in AUTH_PATTERNS]
 _IGNORE_RE = re.compile("|".join(IGNORE_PATTERNS), re.I)
 
@@ -133,6 +147,9 @@ def classify(returncode: int, stdout: str = "", stderr: str = "") -> str:
         return "ok"
 
     text = failure_text(stdout, stderr)
+    for rx in _MODEL_RE:
+        if rx.search(text):
+            return "model"
     for rx in _AUTH_RE:
         if rx.search(text):
             return "auth"

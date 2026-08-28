@@ -33,7 +33,25 @@ if str(BASE) not in sys.path:
 import usage_check  # 표기 함수 재사용 (pct_text / fmt_reset_full / left_phrase)  # noqa: E402
 
 USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
-UA = "codex_cli_rs/0.144.6 (Windows 11; x86_64) WindowsTerminal"
+UA_FALLBACK = "codex_cli_rs/0.146.0 (Windows 11; x86_64) WindowsTerminal"
+UA = UA_FALLBACK  # 아래 _ua_for() 가 그 계정 폴더의 실제 판으로 바꿔 쓴다
+
+
+def _ua_for(cred_path) -> str:
+    """조회에 쓸 이름표. 그 폴더의 models_cache.json 에 적힌 실제 codex 판을 쓴다.
+
+    판 번호를 코드에 박아두면 codex 를 올린 뒤 서버가 낡은 이름표를 걸러낼 때
+    사용량 조회만 통째로 죽는다. 파일 한 번 읽는 값이라 비용도 없다.
+    """
+    try:
+        cache = Path(cred_path).parent / "models_cache.json"
+        with open(cache, encoding="utf-8") as f:
+            ver = json.load(f).get("client_version")
+        if ver and all(c.isdigit() or c == "." for c in str(ver)):
+            return f"codex_cli_rs/{ver} (Windows 11; x86_64) WindowsTerminal"
+    except Exception:
+        pass
+    return UA_FALLBACK
 TIMEOUT = 12
 WEEKLY_MIN_WINDOW = 86400  # 이보다 긴 창은 주간으로 본다 (5시간=18000, 주간=604800)
 
@@ -81,7 +99,7 @@ def get_usage(cred_path) -> dict | None:
 
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": "Bearer " + tok,
-        "User-Agent": UA,
+        "User-Agent": _ua_for(cred_path),
         "Accept": "application/json",
         "chatgpt-account-id": acct or "",
         "originator": "codex_cli_rs",

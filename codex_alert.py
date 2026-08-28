@@ -104,11 +104,29 @@ def _share_all_if_due(alerted: dict, label: str) -> None:
     alerted["_shared_all_at"] = now  # 맨 뒤에 넣어야 기록을 줄일 때 안 잘린다
 
 
+def _fold_legacy_keys(d: dict) -> dict:
+    """옛 열쇠(초 단위 초기화 시각)를 새 열쇠(분 단위)로 접는다.
+
+    안 접으면 형식을 바꾼 첫 실행에서 이미 보낸 단계가 새 열쇠로 보여 다시 나간다.
+    초기화 시각은 10자리(초)와 8자리(분)로 자릿수가 갈려 구분된다.
+    """
+    out = dict(d)
+    for k, v in list(d.items()):
+        parts = k.rsplit("_", 2)
+        if len(parts) != 3:
+            continue
+        head, rr, t = parts
+        if not rr.isdigit() or len(rr) < 10:
+            continue
+        out.setdefault(f"{head}_{int(rr) // 60}_{t}", v)
+    return out
+
+
 def _load_alerted() -> dict:
     if not ALERT_STATE.exists():
         return {}
     try:
-        return json.loads(ALERT_STATE.read_text(encoding="utf-8"))
+        return _fold_legacy_keys(json.loads(ALERT_STATE.read_text(encoding="utf-8")))
     except Exception:
         return {}
 
@@ -126,7 +144,10 @@ def _check(kind: str, pct, reset, label: str, alerted: dict):
     """넘은 단계 중 아직 안 알린 게 있으면 (종류, 남은%, 초기화). 넘은 단계는 모두 마킹."""
     if pct is None:
         return None
-    rr = round(float(reset or 0))
+    # 초기화 시각을 분 단위로 뭉갠다. 서버가 같은 창을 1~2초 다르게 돌려주는 일이 있어
+    # 초 단위로 열쇠를 만들면 같은 단계 알림이 여러 번 나간다 (2026-08-29 실측: 한 계정의
+    # 50·70·90% 알림이 84/85/86 세 벌로 남아 있었다 = 사용자 폰에 아홉 번).
+    rr = int(float(reset or 0) // 60)
     crossed = [t for t in sorted(THRESHOLDS, reverse=True) if pct > t]
     if not crossed:
         return None
