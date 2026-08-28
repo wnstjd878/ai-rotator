@@ -155,7 +155,15 @@ def which_limit(usage: dict | None, threshold: float = 95.0) -> str | None:
     """
     if not usage:
         return None
-    rt = (usage.get("reached_type") or "").lower()
+    # 서버가 이 값을 예전엔 문자열로, 지금은 {"type":..., "details":...} 로 준다.
+    # 문자열로 가정하고 .lower() 를 부르면 한도에 걸린 계정에서만 터져(평소엔 null)
+    # 정작 갈아타야 하는 순간에 전환이 죽는다 (2026-08-29 실측).
+    raw = usage.get("reached_type")
+    if isinstance(raw, dict):
+        raw = " ".join(str(v) for v in (raw.get("type"), raw.get("details")) if v)
+    elif raw is not None and not isinstance(raw, str):
+        raw = str(raw)
+    rt = (raw or "").lower()
     if rt:
         if "week" in rt or "secondary" in rt:
             return "weekly"
