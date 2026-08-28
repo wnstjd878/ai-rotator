@@ -126,9 +126,12 @@ def main():
         # 실제로 고를 수 있는 계정 기준으로 판단한다. 저장본 개수만 보면
         # 계정 목록에 없는 라벨로 저장했을 때 가로채기는 켜지고 고를 계정은 없는
         # 상태가 되어 첫 한도에서 곧바로 전 계정 소진이 된다.
-        usable = set(st.saved_labels()) & set(st.account_labels())
-        if len(usable) < 2:
-            passthrough(argv)  # 순환할 계정이 없음
+        # 뺀 계정(retired)까지 세면 안 된다. 그리고 계정이 하나만 남아도 보호는 걸어야
+        # 한다 — 순환할 데가 없어도 **그 계정의 폴더를 걸어주는 일**은 여전히 필요하다.
+        # 안 걸면 기본 폴더(~/.codex)로 돌아 뺀 계정으로 실행된다 (2026-08-29).
+        usable = set(st.usable_labels())
+        if len(usable) < 1:
+            passthrough(argv)  # 쓸 수 있는 계정이 하나도 없음
     except Exception:
         passthrough(argv)
 

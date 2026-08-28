@@ -252,7 +252,10 @@ def status_text() -> str:
     shared = _shared_usage()           # 다른 기계가 자기 계정에서 읽어 올린 값
     holders = _shared_current() or {}  # 어느 기계가 어느 계정에 물려 있는지
     seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
+    hidden = set(st.retired_labels())  # 구독을 끊어 뺀 계정은 목록에서 감춘다(지금 쓰는 중이면 예외)
     for label in st.account_labels():
+        if label in hidden and label != cur:
+            continue
         marks = []
         who = holders.get(label) or []
         if label == cur:
@@ -269,6 +272,11 @@ def status_text() -> str:
             u = codex_usage.get_usage_for(cred_path(label), is_current=(label == cur))
             if u:
                 marks.append(codex_usage.summarize(u))
+                plan = str(u.get("plan") or "").lower()
+                if plan and plan not in ("pro", "plus", "team", "business", "enterprise", "edu"):
+                    # 등급은 서버가 늘 같이 주는데 그동안 아무 데서도 안 봤다. 유료가 아니면
+                    # 한도가 통째로 다른 규칙이라(30일 창) 사람이 바로 알아야 한다.
+                    marks.append(f"등급 {plan} (유료 아님)")
                 if u.get("email"):
                     marks.append(str(u["email"]))
                 seen.append((label, u))
