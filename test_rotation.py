@@ -2734,7 +2734,8 @@ def main():
                      case_keychain_pull_and_rescue, case_barred,
                      case_scoped_exhausted_message, case_scoped_reopen,
                      case_window_claim, case_window_claim_edges,
-                     case_limit_with_split_cred, case_cred_refresh):
+                     case_limit_with_split_cred, case_cred_refresh,
+                     case_stale_scoped_block):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -2755,6 +2756,134 @@ def main():
         return 1
     print("전부 통과")
     return 0
+
+
+def case_stale_scoped_block(tmp):
+    """[53] 실제로는 열린 칸이 낡은 막힘 기록 탓에 계속 막혀 보이던 문제.
+
+    2026-09-03 실사고: A 의 Fable 칸은 다 비어 있었는데(주간·세션·칸 전부 100% 남음)
+    8월 31일 소진 때 적어둔 '09/05 21:00 풀림' 이 그대로 남아 있었다. B·D 까지 더해
+    세 계정이 전부 막힌 것으로 보였고, cc 는 갈아탈 계정을 못 찾아 소진된 D 에 눌러앉았다.
+    사람이 --use A 로 손을 대야만 풀렸다.
+
+    막힘 해제 시각은 **막던 순간에 조회한 값**이라, 그 뒤 한도가 그보다 먼저 풀려도
+    기록은 안 바뀐다. 그래서 갈아탈 계정이 없다고 결론내기 직전에 실제 사용량으로
+    한 번 검증한다.
+    """
+    print()
+    print("[53] 낡은 칸 막힘은 실제 사용량으로 되살린다")
+    import usage_check as uc
+
+    now = time.time()
+    usage = {
+        "A": {"weekly_pct": 0.0, "session_pct": 0.0,
+              "weekly_reset": now + 48 * 3600, "session_reset": None,
+              "scoped": {"Fable": {"pct": 0.0, "reset": now + 48 * 3600}}},
+        "B": {"weekly_pct": 54.0, "session_pct": 11.0,
+              "weekly_reset": now + 20 * 3600, "session_reset": None,
+              "scoped": {"Fable": {"pct": 100.0, "reset": now + 20 * 3600}}},
+        "D": {"weekly_pct": 59.0, "session_pct": 95.0,
+              "weekly_reset": now + 78 * 3600, "session_reset": None,
+              "scoped": {"Fable": {"pct": 100.0, "reset": now + 78 * 3600}}},
+    }
+    blocks = (("A", now + 48 * 3600), ("B", now + 20 * 3600), ("D", now + 78 * 3600))
+
+    def arm(current):
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B", "D"], current)
+        state = st.load_state()
+        for label, until in blocks:
+            st.mark_scoped_blocked(state, label, "Fable", until)
+        st.save_state(state)
+
+    def run_ensure(table):
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B", "D")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None      # 앞 케이스가 남긴 401 로 재발급을 타지 않게
+        uc.get_usage = lambda path: table.get(Path(path).stem)
+        try:
+            return claude_pool.ensure_usable(model="fable[1m]")
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+
+    # (1) 사고 그대로: 세 계정이 다 막힌 것으로 보이지만 A 는 실제로 비어 있다
+    arm("D")
+    state = st.load_state()
+    check("세 계정이 다 막힌 것으로 보인다",
+          st.pick_next(state, exclude="D", bucket="Fable") is None)
+
+    rc = run_ensure(usage)
+    after = st.load_state()
+    check("켜기 전 확인이 정상으로 끝난다", rc == 0, rc)
+    check("실제로 비어 있는 A 로 갈아탄다", after.get("current") == "A", after.get("current"))
+    check("A 의 낡은 막힘은 풀린다", not st.is_scoped_blocked(after, "A", "Fable"))
+    check("진짜 찬 B 의 막힘은 그대로", st.is_scoped_blocked(after, "B", "Fable"))
+    check("진짜 찬 D 의 막힘도 그대로", st.is_scoped_blocked(after, "D", "Fable"))
+
+    # (2) 사용량을 못 읽은 계정은 손대지 않는다.
+    #     못 읽는 것과 열린 것은 다르다 — 지우면 소진된 계정으로 갈아타 거절만 받는다.
+    arm("D")
+    rc = run_ensure({"D": usage["D"]})
+    after = st.load_state()
+    check("못 읽은 계정의 막힘은 안 지운다", st.is_scoped_blocked(after, "A", "Fable"))
+    check("갈아탈 계정이 없다고 끝낸다", rc == 2, rc)
+    check("계정은 그대로 D", after.get("current") == "D", after.get("current"))
+
+    # (3) 평소 경로에서는 조회를 늘리지 않는다 — 후보가 있으면 검증 자체를 안 한다
+    arm("D")
+    state = st.load_state()
+    st.clear_scoped_bucket(state, "B", "Fable")   # B 가 후보로 남아 있는 상태
+    st.save_state(state)
+    seen = []
+    # B 는 실제로도 여유가 있는 상태로 둔다. 그러면 검증을 탈 이유가 없다.
+    table = dict(usage, B=dict(usage["B"],
+                               scoped={"Fable": {"pct": 0.0, "reset": now + 20 * 3600}}))
+    def counting(path):
+        seen.append(Path(path).stem)
+        return table.get(Path(path).stem)
+    real_get, real_status = uc.get_usage, uc.last_status
+    install(Fake({x: (0, OK_OUT, "") for x in ("A", "B", "D")}))
+    claude_pool.usage_check = uc
+    uc.last_status = None
+    uc.get_usage = counting
+    try:
+        claude_pool.ensure_usable(model="fable[1m]")
+    finally:
+        uc.get_usage, uc.last_status = real_get, real_status
+        claude_pool.usage_check = None
+    check("후보가 있으면 A 를 조회하지 않는다", "A" not in seen, seen)
+    check("B 로 갈아탄다", st.load_state().get("current") == "B",
+          st.load_state().get("current"))
+
+    # (4) 한 칸만 푼다 — 로컬도 공유 칠판도. 공유를 안 맞추면 다음 병합이 되살린다.
+    arm("D")
+    shared = FakeShared()
+    st.shared_state = shared
+    try:
+        state = st.load_state()
+        state["scoped_blocked"] = {}
+        st.mark_scoped_blocked(state, "A", "Fable", now + 3600)
+        st.mark_scoped_blocked(state, "A", "Opus", now + 7200)
+        check("공유에 두 칸이 올라간다",
+              set(shared.scoped.get("A") or {}) == {"Fable", "Opus"}, shared.scoped)
+        check("없는 칸을 풀라면 아무것도 안 한다",
+              st.clear_scoped_bucket(state, "A", "Haiku") is False)
+        check("푼 칸이 있으면 True", st.clear_scoped_bucket(state, "A", "Fable") is True)
+        check("로컬은 Fable 만 빠진다",
+              set(state["scoped_blocked"].get("A") or {}) == {"Opus"},
+              state.get("scoped_blocked"))
+        check("공유도 Fable 만 빠진다",
+              set(shared.scoped.get("A") or {}) == {"Opus"}, shared.scoped)
+        merged = st.prune_blocked(state)
+        check("병합해도 되살아나지 않는다",
+              not st.is_scoped_blocked(merged, "A", "Fable"))
+        check("남은 칸은 병합 뒤에도 살아 있다",
+              st.is_scoped_blocked(merged, "A", "Opus"))
+    finally:
+        st.shared_state = None
 
 
 if __name__ == "__main__":

@@ -397,7 +397,7 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN,
                     scoped_only = True
             if not scoped_only:
                 st.mark_blocked(state, cur, time.time() + cooldown, "사람이 한도 도달로 지정")
-        nxt = _pick_account(state, exclude=cur, bucket=bucket)
+        nxt = _pick_or_revive(state, exclude=cur, bucket=bucket)
         if nxt is None:
             st.save_state(state)
             reset_at = st.earliest_reset(state, bucket=bucket)
@@ -487,7 +487,7 @@ def ensure_usable(model: str | None = None) -> int:
                 until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
                 st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
                                 f"{kind_txt} 한도 소진(켜기 전 확인)")
-            nxt = _pick_account(state, exclude=cur, bucket=bucket)
+            nxt = _pick_or_revive(state, exclude=cur, bucket=bucket)
             if nxt is None:
                 st.save_state(state)
                 reset_at = st.earliest_reset(state, bucket=bucket)
@@ -583,6 +583,58 @@ def _pick_account(state: dict, exclude: str | None, bucket=None):
         claimed = ", ".join(st.claimed_buckets(state)) or "없음"
         log(f"떠 있는 창의 칸({claimed})까지 만족하는 계정이 없어 '{nxt}' 로 갑니다. "
             f"그 창은 다시 켜야 할 수 있습니다.")
+    return nxt
+
+
+def _revive_scoped(state: dict, bucket=None) -> list:
+    """막힘으로 적어둔 모델 칸 중 **실제로는 다시 열린 칸**을 풀어 준다. 푼 [(계정, 칸)].
+
+    막힘 해제 시각은 막던 순간에 조회한 값이라, 그 뒤 실제 한도가 그보다 먼저 풀려도
+    기록은 그대로 남는다. 2026-09-03 실사고: A 의 Fable 칸이 다 비어 있는데도 8월 31일에
+    적힌 '09/05 21:00 풀림' 이 남아 A·B·D 세 계정이 전부 막힌 것처럼 보였고, cc 가
+    갈아탈 계정을 못 찾아 소진된 계정에 그대로 눌러앉았다.
+
+    **갈아탈 계정이 없다고 결론내기 직전에만 부른다.** 평소 경로에서는 조회를 한 번도
+    늘리지 않는다(잦은 조회는 429 를 부른다).
+    사용량을 못 읽은 계정은 손대지 않는다 — 못 읽는 것과 열린 것은 다르고, 멀쩡한
+    막힘을 지우면 소진된 계정으로 다시 갈아타 거절만 받는다.
+    """
+    if usage_check is None:
+        return []
+    names = st.bucket_names(bucket)
+    if not names:
+        return []   # 칸을 안 보는 호출이면 칸 막힘이 후보를 줄인 것도 아니다
+    now = time.time()
+    cur = state.get("current")
+    freed = []
+    for label in st.usable_labels():
+        blocked = st.scoped_blocked_buckets(state, label, now) & set(names)
+        if not blocked:
+            continue
+        u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
+                                      is_current=(label == cur))
+        if not u:
+            continue
+        st.note_usage(state, label, u)
+        st.note_weekly_reset(state, label, u.get("weekly_reset"))
+        for name in sorted(blocked):
+            pct = usage_check.scoped_pct(u, name)
+            if pct is None or pct >= 100.0:
+                continue    # 못 읽었거나 진짜로 찼다
+            if st.clear_scoped_bucket(state, label, name):
+                freed.append((label, name))
+                log(f"'{label}' 의 {name} 칸이 실제로는 열려 있어 막힘을 풉니다 "
+                    f"(남은 {max(0, 100 - pct):.0f}%).")
+    return freed
+
+
+def _pick_or_revive(state: dict, exclude: str | None, bucket=None):
+    """갈아탈 계정 하나. 없으면 낡은 칸 막힘을 실제 사용량으로 한 번 검증하고 다시 고른다."""
+    nxt = _pick_account(state, exclude=exclude, bucket=bucket)
+    if nxt is not None:
+        return nxt
+    if _revive_scoped(state, _wanted_buckets(state, bucket)):
+        nxt = _pick_account(state, exclude=exclude, bucket=bucket)
     return nxt
 
 

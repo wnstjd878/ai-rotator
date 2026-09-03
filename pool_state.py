@@ -298,6 +298,36 @@ def mark_scoped_blocked(state: dict, label: str, bucket: str, until_epoch: float
     return state
 
 
+def clear_scoped_bucket(state: dict, label: str, bucket: str) -> bool:
+    """그 계정의 **그 칸 하나만** 막힘을 푼다(로컬 + 공유). 실제로 푼 게 있으면 True.
+
+    clear_blocked_label 은 그 계정의 칸 막힘을 통째로 지운다. 여기서는 다시 열린 것으로
+    확인된 칸만 골라 풀어야 나머지 칸의 막힘을 잃지 않는다.
+    공유 칠판에는 칸 하나만 지우는 창구가 없어서(set_scoped_blocked 는 늦은 시각을
+    남기므로 낮출 수 없다) 그 계정 행을 비우고 남은 칸을 다시 올린다. 안 그러면
+    다음 병합(prune_blocked)이 방금 푼 칸을 도로 살려낸다.
+    """
+    if not label or not bucket:
+        return False
+    box = _clean_scoped(state.get("scoped_blocked"))
+    row = dict(box.get(str(label)) or {})
+    if str(bucket) not in row:
+        state["scoped_blocked"] = box
+        return False
+    row.pop(str(bucket), None)
+    if row:
+        box[str(label)] = row
+    else:
+        box.pop(str(label), None)
+    state["scoped_blocked"] = box
+    _push_history(state, label, "scoped_cleared", f"{bucket} 칸 다시 열림")
+    if _shared_on():
+        shared_state.clear_scoped_blocked(label, provider=NAMESPACE)
+        for name, until in row.items():
+            shared_state.set_scoped_blocked(label, name, until, provider=NAMESPACE)
+    return True
+
+
 def bucket_names(bucket) -> tuple:
     """칸 이름 하나 또는 여러 개를 받아 튜플로 정리한다. 빈 값이면 빈 튜플.
 
