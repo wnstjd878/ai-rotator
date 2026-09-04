@@ -796,6 +796,32 @@ def clear_blocked_label(state: dict, label: str) -> dict:
     return state
 
 
+def clear_account_block(state: dict, label: str, now: float | None = None) -> bool:
+    """그 계정의 **계정 전체 막힘만** 푼다(모델 칸 막힘은 그대로). 푼 게 있으면 True.
+
+    clear_blocked_label 은 칸 막힘까지 통째로 지운다. 여기는 세션·주간이 실제로 회복된
+    것만 되살리는 자리라, 아직 바닥인 칸(Fable 등)까지 열어 주면 안 된다.
+    공유 저장소에 못 알리면 이 기계에서만 푼다 — 다음 병합에 되살아날 수 있지만,
+    그때 또 풀면 된다(막는 쪽이 아니라 푸는 쪽이라 손해가 없다).
+    """
+    now = time.time() if now is None else now
+    blocked = dict(state.get("blocked") or {})
+    try:
+        until = float(blocked.get(label))
+    except (TypeError, ValueError):
+        return False
+    if until <= now:
+        return False
+    blocked.pop(label, None)
+    state["blocked"] = blocked
+    if _shared_on():
+        try:
+            shared_state.clear_blocked(_to_shared(label))
+        except Exception:
+            pass
+    return True
+
+
 def note_auth_reject(state: dict, label: str | None, now: float | None = None,
                      window: float = AUTH_REJECT_WINDOW) -> tuple[int, float]:
     """로그인 거절을 계정별로 센다. (이어진 횟수, 처음 거절받은 뒤 흐른 초)를 돌려준다.

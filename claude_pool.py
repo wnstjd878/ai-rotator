@@ -324,22 +324,9 @@ def status_text(model: str | None = None) -> str:
     order = [l for l in st.account_labels() if not (l in hidden and l != cur)]
     if cur in order:
         order = [cur] + [l for l in order if l != cur]
+    # 1) 계정마다 사용량부터 모은다. 화면 글자는 낡은 막힘을 푼 **뒤에** 만든다.
+    rows = []
     for label in order:
-        marks = []
-        who = holders.get(label) or []
-        if label == cur:
-            marks.append("지금 사용 중" + (f" ({', '.join(who)})" if who else ""))
-        elif who:
-            marks.append(f"{', '.join(who)} 사용 중")
-        else:
-            marks.append("대기")
-        if label not in saved:
-            marks.append("자격 없음")
-        until = (state.get("blocked") or {}).get(label)
-        if until and float(until) > now:
-            left = int(float(until) - now)
-            marks.append(f"막힘, {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
-        # 실시간 사용률(세션/주간). 못 읽으면 다른 머신이 올린 값이나 이 기기 기록으로 대신한다.
         entry, note = None, ""
         if usage_check and label in saved:
             u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
@@ -354,15 +341,36 @@ def status_text(model: str | None = None) -> str:
                 # 화면에 그린 것과 같은 기록에서 칸 잔량을 뽑는다(둘이 어긋나면 안 된다).
                 left, reset = usage_view.scoped_left(entry, bucket, now)
                 scoped_rows.append((label, left, reset))
+        rows.append((label, entry, note))
+    # 2) 읽은 값을 기록하면서 실제로는 풀린 계정 막힘을 푼다(조회를 더 안 늘린다).
+    freed = _remember_and_revive(seen)
+    # 3) 글자를 만든다. 방금 푼 계정에는 막힘을 안 적는다.
+    for label, entry, note in rows:
+        marks = []
+        who = holders.get(label) or []
+        if label == cur:
+            marks.append("지금 사용 중" + (f" ({', '.join(who)})" if who else ""))
+        elif who:
+            marks.append(f"{', '.join(who)} 사용 중")
+        else:
+            marks.append("대기")
+        if label not in saved:
+            marks.append("자격 없음")
+        until = (state.get("blocked") or {}).get(label)
+        if until and float(until) > now and label not in freed:
+            left = int(float(until) - now)
+            marks.append(f"막힘, {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
         parts = usage_view.usage_parts(entry, now)[0] if entry else []
         if lines:
             lines.append("")
         lines += usage_view.account_block(label, marks, parts, now,
                                           current=(label == cur), color=color, note=note)
-    st.remember_usage(seen)
     if not lines:
         lines.append("  계정이 없습니다. --use <라벨> 로 한 번 정해 주세요.")
     tail = []
+    if freed:
+        tail.append(f"{', '.join(sorted(freed))} 는 실제로 한도가 풀려 있어 막힘을 해제했습니다"
+                    f" (식힘 시간이 실제보다 길게 잡혀 있었습니다).")
     if bucket:
         notice = _scoped_notice(bucket, scoped_rows, now)
         if notice:
@@ -653,9 +661,82 @@ def _revive_scoped(state: dict, bucket=None) -> list:
     return freed
 
 
+def _revive_account_blocks(state: dict, usages: dict | None = None,
+                           probe: bool = True) -> list:
+    """계정 전체 막힘 중 **실제로는 이미 풀린 것**을 푼다. 푼 계정 목록.
+
+    막을 때 붙이는 식힘 시간은 고정값(기본 5시간)이라 실제보다 훨씬 길게 잡힌다.
+    세션 한도는 창이 열린 시점부터 5시간이라, 막히는 순간에는 이미 대부분 지나 있다.
+    2026-09-04 실측: A 를 14:27 에 세션 한도로 막고 19:27 까지 잡았는데 실제로는
+    14:39 에 풀렸다. 그 사이 A 는 주간이 67% 남았는데도 후보에서 빠져 있었다.
+
+    푸는 쪽이라 안전하다 — 잘못 풀어도 그 계정으로 갈아탔을 때 거절받으면 다시 막힌다.
+    반대로 잘못 막으면 멀쩡한 계정을 몇 시간 놀린다(2026-07-29 사고).
+    **모르는 것은 열린 것으로 보지 않는다** — 사용량을 못 읽었거나 값이 안 온 계정은
+    손대지 않는다.
+    `usages` 를 주면 그 값을 쓴다(화면이 이미 읽어둔 값 재활용). `probe=False` 면
+    거기 없는 계정은 그냥 건너뛴다 — 잠금을 쥔 채 서버를 기다리지 않으려는 것이다.
+    """
+    if usage_check is None:
+        return []
+    now = time.time()
+    cur = state.get("current")
+    freed = []
+    for label, until in list((state.get("blocked") or {}).items()):
+        try:
+            if float(until) <= now:
+                continue
+        except (TypeError, ValueError):
+            continue
+        u = (usages or {}).get(label)
+        if u is None:
+            if not probe:
+                continue
+            u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
+                                          is_current=(label == cur))
+        if not u:
+            continue
+        wk, se = u.get("weekly_pct"), u.get("session_pct")
+        if wk is None or se is None:
+            continue
+        if float(wk) >= 100.0 or float(se) >= 100.0:
+            continue    # 진짜로 찼다
+        if st.clear_account_block(state, label, now):
+            freed.append(label)
+            log(f"'{label}' 계정이 실제로는 열려 있어 막힘을 풉니다"
+                f" (세션 남은 {max(0.0, 100 - float(se)):.0f}%,"
+                f" 주간 남은 {max(0.0, 100 - float(wk)):.0f}%).")
+    return freed
+
+
+def _remember_and_revive(seen) -> set:
+    """화면이 읽은 사용량을 기록하면서 낡은 계정 막힘도 같이 푼다. 푼 계정 집합.
+
+    한 번의 잠금 안에서 끝낸다(st.remember_usage 와 겹쳐 부르면 잠금이 중첩된다).
+    화면은 어차피 모든 계정 사용량을 읽으므로 여기서 푸는 데 조회가 더 안 든다.
+    """
+    pairs = [(l, u) for l, u in seen if u]
+    if not pairs:
+        return set()
+    freed = []
+    with st.with_lock():
+        s = st.prune_blocked(st.load_state())
+        for l, u in pairs:
+            st.note_usage(s, l, u)
+            st.note_weekly_reset(s, l, u.get("weekly_reset"))
+        freed = _revive_account_blocks(s, dict(pairs), probe=False)
+        st.save_state(s)
+    return set(freed)
+
+
 def _pick_or_revive(state: dict, exclude: str | None, bucket=None):
     """갈아탈 계정 하나. 없으면 낡은 칸 막힘을 실제 사용량으로 한 번 검증하고 다시 고른다."""
     nxt = _pick_account(state, exclude=exclude, bucket=bucket)
+    if nxt is not None:
+        return nxt
+    # 계정 전체 막힘부터 본다. 식힘 시간이 실제보다 길게 잡혀 있는 경우가 흔하다.
+    if _revive_account_blocks(state):
+        nxt = _pick_account(state, exclude=exclude, bucket=bucket)
     if nxt is not None:
         return nxt
     if _revive_scoped(state, _wanted_buckets(state, bucket)):
