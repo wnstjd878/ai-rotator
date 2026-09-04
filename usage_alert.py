@@ -357,6 +357,18 @@ def main() -> int:
     # 막혔던 모델 칸이 열렸는지 먼저 본다. 사용량 조회와 무관해서, 자격이 없거나
     # 조회가 실패해 아래에서 일찍 빠지는 회차에도 이건 지나가야 한다.
     check_scoped_reopen(preview)
+    # 낡은 계정 막힘(식힘 시간이 실제보다 길게 잡힌 것)을 걷어낸다. 봇만 도는 머신은
+    # 아무도 화면을 안 켜서, 이게 없으면 실제로는 풀린 계정이 몇 시간씩 논다.
+    # 안에서 30분 간격 제한을 두므로 10분마다 불러도 조회가 그만큼 늘지 않는다.
+    if not preview:
+        try:
+            import claude_pool
+
+            freed = claude_pool.sweep_stale_blocks()
+            if freed:
+                print("낡은 계정 막힘 해제: " + ", ".join(freed))
+        except Exception as exc:   # 정리가 실패해도 사용량 경고 본 작업은 계속한다
+            print(f"막힘 정리 실패(무시): {type(exc).__name__}")
     if "--refresh-order" in sys.argv:
         return refresh_order()
     state = st.prune_blocked(st.load_state())

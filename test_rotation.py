@@ -2978,6 +2978,31 @@ def case_stale_account_block(tmp):
     check("후보가 있으면 A 를 조회하지 않는다", "A" not in seen, seen)
     check("A 의 막힘은 그대로 남는다", st.is_blocked(st.load_state(), "A"))
 
+    # (5) 주기 정리(--sweep): 사람이 화면을 안 켜도 걷힌다. 간격 제한도 지킨다
+    arm()
+    real_get, real_status = uc.get_usage, uc.last_status
+    claude_pool.usage_check = uc
+    uc.last_status = None
+    uc.get_usage = lambda path: usage.get(Path(path).stem)
+    try:
+        check("주기 정리가 A 만 걷는다",
+              claude_pool.sweep_stale_blocks(min_interval=0) == ["A"])
+        after = st.load_state()
+        check("정리 뒤에도 B 막힘은 그대로", st.is_blocked(after, "B"))
+        check("마지막 정리 시각을 적어둔다", bool(after.get("revive_checked_at")))
+        seen2 = []
+
+        def counting2(path):
+            seen2.append(Path(path).stem)
+            return usage.get(Path(path).stem)
+
+        uc.get_usage = counting2
+        check("간격 안이면 건너뛴다", claude_pool.sweep_stale_blocks(min_interval=3600) == [])
+        check("건너뛸 땐 조회도 안 한다", seen2 == [], seen2)
+    finally:
+        uc.get_usage, uc.last_status = real_get, real_status
+        claude_pool.usage_check = None
+
     # (4) 계정 막힘만 푼다 — 칸 막힘은 남기고, 이미 지난 막힘에는 손대지 않는다
     state = st.load_state()
     state["blocked"] = {}

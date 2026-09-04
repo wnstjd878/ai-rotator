@@ -12,6 +12,7 @@
       python claude_pool.py --next            지금 계정을 한도로 보고 다음 계정으로 넘김
       python claude_pool.py --use A           A 계정으로 지금 바로 교체
       python claude_pool.py --ensure          켜기 직전 확인: 지금 계정이 다 찼으면 미리 교체
+      python claude_pool.py --sweep           낡은 계정 막힘 걷어내기(주기 작업용, 30분 간격 제한)
       python claude_pool.py --claim <번호>     그 프로세스가 쓰는 창이 이 모델 칸을 잡았다고 표시
       python claude_pool.py --unclaim <번호>   창이 닫혔다고 표시(프로세스가 죽으면 자동 정리)
       python claude_pool.py -- -p "안녕"       claude 를 순환 보호 아래서 실행
@@ -727,6 +728,32 @@ def _remember_and_revive(seen) -> set:
         freed = _revive_account_blocks(s, dict(pairs), probe=False)
         st.save_state(s)
     return set(freed)
+
+
+def sweep_stale_blocks(min_interval: float = 1800) -> list:
+    """막힌 계정 중 **실제로는 이미 풀린 것**을 걷어낸다. 주기 작업이 부르는 자리.
+
+    사람이 화면(--status)을 안 봐도 낡은 막힘이 걷히게 한다. 봇만 도는 머신은 아무도
+    화면을 안 켜서, 식힘 시간이 실제보다 길게 잡힌 계정이 몇 시간씩 논다.
+    막힌 계정만 조회한다(대개 0~2개). `min_interval` 안에 이미 봤으면 건너뛴다 —
+    10분마다 부르는 자리에 걸려도 조회가 그만큼 늘지 않는다(잦은 조회는 429 를 부른다).
+    """
+    now = time.time()
+    with st.with_lock():
+        state = st.prune_blocked(st.load_state())
+        if not (state.get("blocked") or {}):
+            st.save_state(state)     # 시간이 지나 저절로 걷힌 것만 반영하고 끝
+            return []
+        try:
+            last = float(state.get("revive_checked_at") or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if now - last < min_interval:
+            return []
+        freed = _revive_account_blocks(state)
+        state["revive_checked_at"] = now
+        st.save_state(state)
+    return freed
 
 
 def _pick_or_revive(state: dict, exclude: str | None, bucket=None):
@@ -1725,6 +1752,11 @@ def main():
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip())
+        return 0
+    if argv[0] == "--sweep":
+        # 낡은 계정 막힘만 걷어낸다(주기 작업용). 조용히 끝나는 게 정상이다.
+        freed = sweep_stale_blocks()
+        print("막힘 해제: " + ", ".join(freed) if freed else "걷어낼 낡은 막힘 없음")
         return 0
     if argv[0] == "--status":
         # 뒤에 붙은 인자(`--model ...`)까지 본다. 안 주면 settings.json 고정값을 쓴다.
