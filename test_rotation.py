@@ -1226,9 +1226,13 @@ def case_mirror_both_ways(tmp):
     old = {"claudeAiOauth": {"refreshToken": "old-refresh", "expiresAt": 1000}}
     new = {"claudeAiOauth": {"refreshToken": "new-refresh", "expiresAt": 2000}}
 
+    # 기록 파일도 임시 폴더로 돌린다. 안 그러면 이 시험이 맥인 척하며 찍는 줄이 **진짜**
+    # rotator.log 에 쌓여, 나중에 그걸 본 사람이 운영 사고로 오해한다(2026-09-04 실제로
+    # "자격을 열쇠꾸러미에 못 밀고 있다" 를 몇 분 간격으로 12번 남겼다).
     real = (cm.LIVE, cm.keychain_account, cm.read_keychain, cm.push_to_keychain,
-            cm.label_of, cm.creds_dir, cm.apply_pending, cm.sys.platform)
+            cm.label_of, cm.creds_dir, cm.apply_pending, cm.sys.platform, cm.LOG)
     try:
+        cm.LOG = Path(tmp) / "rotator.log"
         cm.sys.platform = "darwin"
         cm.LIVE = Path(tmp) / "live.json"
         cm.creds_dir = lambda: Path(tmp)
@@ -1279,7 +1283,7 @@ def case_mirror_both_ways(tmp):
               f"changed={changed} pushed={pushed}")
     finally:
         (cm.LIVE, cm.keychain_account, cm.read_keychain, cm.push_to_keychain,
-         cm.label_of, cm.creds_dir, cm.apply_pending, cm.sys.platform) = real
+         cm.label_of, cm.creds_dir, cm.apply_pending, cm.sys.platform, cm.LOG) = real
 
 
 def case_usage_after_reset(tmp):
