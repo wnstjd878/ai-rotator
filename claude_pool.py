@@ -297,61 +297,83 @@ def _exhausted_message(state: dict, bucket: str | None, when: str,
 
 
 def status_text(model: str | None = None) -> str:
+    """계정별 남은 사용량 화면.
+
+    2026-09-04 에 모양을 바꿨다. 그 전에는 계정 한 줄에 상태·주간·세션·모델 칸·풀리는
+    시각을 쉼표로 이어 붙여, 한 줄이 200자를 넘고 어느 숫자가 어느 칸인지 눈으로 못
+    골랐다(사용자 지적). 지금은 계정마다 머리글 한 줄 + 칸마다 막대 한 줄이다.
+    그리는 일은 usage_view 가 한 벌로 맡는다(지피티 쪽 화면과 규칙을 같이 쓰려고).
+    """
     state = st.prune_blocked(st.load_state())
-    cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
+    cur = state.get("current")
     now = time.time()
     saved = set(st.saved_labels())
     # 이 창이 쓸 모델의 칸(대개 settings.json 고정값). 못 알아내면 요약 줄을 안 만든다.
     bucket = (usage_check.bucket_for_model(model or intended_model())
               if usage_check else None)
+    color = usage_view.supports_color()
     scoped_rows = []
-    lines = [f"현재 계정: {cur}"]
     _share_current(state.get("current"))  # 이 머신이 어디 물려 있는지 먼저 올린다
     shared = _shared_usage()   # 다른 머신이 자기 계정에서 읽어 올린 값
     holders = _shared_current() or {}  # 어느 머신이 어느 계정에 물려 있는지
     seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
     hidden = set(st.retired_labels())  # 구독 해지 계정은 목록에서 뺀다(현재 계정이면 예외로 보여줌)
+    lines = []
     for label in st.account_labels():
         if label in hidden and label != cur:
             continue
         marks = []
         who = holders.get(label) or []
         if label == cur:
-            marks.append("현재 사용 중" + (f"({', '.join(who)})" if who else ""))
+            marks.append("지금 사용 중" + (f" ({', '.join(who)})" if who else ""))
         elif who:
             marks.append(f"{', '.join(who)} 사용 중")
+        else:
+            marks.append("대기")
         if label not in saved:
             marks.append("자격 없음")
         until = (state.get("blocked") or {}).get(label)
         if until and float(until) > now:
             left = int(float(until) - now)
-            marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
+            marks.append(f"막힘, {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
         # 실시간 사용률(세션/주간). 못 읽으면 다른 머신이 올린 값이나 이 기기 기록으로 대신한다.
+        entry, note = None, ""
         if usage_check and label in saved:
             u = usage_check.get_usage_for(BASE / "creds" / f"{label}.json",
                                           is_current=(label == cur))
             if u:
-                marks.append(usage_check.summarize(u))
+                entry = u
                 seen.append((label, u))
                 _share_usage(label, u)
             else:
-                marks.append(_last_seen_usage(state, shared, label, now))
-                u = usage_view.pick_entry(state, shared, label)[1]
+                entry, note = usage_view.entry_and_note(state, shared, label, now)
             if bucket:
-                # 화면에 적은 것과 같은 기록에서 칸 잔량을 뽑는다(둘이 어긋나면 안 된다).
-                left, reset = usage_view.scoped_left(u, bucket, now)
+                # 화면에 그린 것과 같은 기록에서 칸 잔량을 뽑는다(둘이 어긋나면 안 된다).
+                left, reset = usage_view.scoped_left(entry, bucket, now)
                 scoped_rows.append((label, left, reset))
-        lines.append(f"  {label}: " + ", ".join(marks))
+        parts = usage_view.usage_parts(entry, now)[0] if entry else []
+        if lines:
+            lines.append("")
+        lines += usage_view.account_block(label, marks, parts, now,
+                                          current=(label == cur), color=color, note=note)
     st.remember_usage(seen)
+    if not lines:
+        lines.append("  계정이 없습니다. --use <라벨> 로 한 번 정해 주세요.")
+    tail = []
     if bucket:
         notice = _scoped_notice(bucket, scoped_rows, now)
         if notice:
-            lines.append(notice)
+            tail.append(notice.strip())
     held = st.claimed_buckets(state)
     if held:
         # 왜 앞순위 계정으로 안 돌아가는지 사람이 알 수 있게 적는다.
-        lines.append(f"이 컴퓨터에 떠 있는 창이 쓰는 칸: {', '.join(held)}"
-                     f" (그 칸이 막힌 계정으로는 안 넘어갑니다)")
+        tail.append(f"이 컴퓨터에 떠 있는 창이 쓰는 칸: {', '.join(held)}"
+                    f" (그 칸이 막힌 계정으로는 안 넘어갑니다)")
+    if not cur:
+        tail.append("쓸 계정이 안 정해져 있습니다. --use <라벨> 로 한 번 정해 주세요.")
+    if tail:
+        lines.append("")
+        lines += ["  " + t for t in tail]
     return "\n".join(lines)
 
 

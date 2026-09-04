@@ -325,7 +325,7 @@ def when_text(epoch, now: float) -> str:
         return f"오늘 {clock}"
     if (lt.tm_year, lt.tm_yday) == (tomorrow.tm_year, tomorrow.tm_yday):
         return f"내일 {clock}"
-    return f"{lt.tm_mon}/{lt.tm_mday} {'월화수목금토일'[lt.tm_wday]} {clock}"
+    return f"{lt.tm_mon}/{lt.tm_mday}({'월화수목금토일'[lt.tm_wday]}) {clock}"
 
 
 def usage_lines(parts, now: float, *, color: bool = True, indent: str = "     ") -> list[str]:
