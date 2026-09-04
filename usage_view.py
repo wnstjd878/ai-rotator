@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import time
 
-KINDS = (("weekly_pct", "weekly_reset", "주간"),
-         ("session_pct", "session_reset", "세션"))
+# 순서가 곧 화면 순서다. 세션(5시간)이 제일 먼저 바닥나니 맨 위, 그 다음 주간,
+# 모델 칸(Fable 등)은 뒤에 붙는다(사용자가 정한 순서 2026-09-04).
+KINDS = (("session_pct", "session_reset", "세션"),
+         ("weekly_pct", "weekly_reset", "주간"))
 
 
 def _num(value):
@@ -357,6 +359,11 @@ def usage_lines(parts, now: float, *, color: bool = True, indent: str = "     ")
         when = when_text(reset, now)
         if when:
             tail.append(f"{when} 풀림")
+        elif not derived and left is not None and left >= 99.5:
+            # 왜 풀리는 시각이 없냐는 물음이 나온다(2026-09-04). 빠뜨린 게 아니라
+            # 안 쓴 계정은 창이 아직 안 열려서 서버가 시각을 안 준다. 쓰기 시작하면
+            # 그때부터 세어진다. 그 사실을 적어 준다.
+            tail.append("가득 · 아직 안 써서 세는 중이 아님")
         if tail:
             note = "  " + " · ".join(tail)
             # 여유 있는 칸의 시각은 흐리게 — 바닥난 칸으로 눈이 먼저 가게 한다.
