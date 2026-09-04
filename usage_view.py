@@ -244,13 +244,19 @@ def supports_color(stream=None) -> bool:
     import sys
 
     stream = stream or sys.stdout
-    try:
-        if not stream.isatty():
-            return False
-    except Exception:
-        return False
     if os.environ.get("NO_COLOR"):
         return False
+    # 부르는 쪽이 정해 줄 수 있다. cc/gc 처럼 사람 화면인 게 확실한 자리에서 1 로 켠다 —
+    # PowerShell 이 파이썬 출력을 가로채면 아래 isatty 판정이 거짓이 되어 색이 통째로 빠진다.
+    force = str(os.environ.get("AIROTATOR_COLOR") or "").strip().lower()
+    if force in ("0", "no", "false", "off"):
+        return False
+    if force not in ("1", "yes", "true", "on"):
+        try:
+            if not stream.isatty():
+                return False
+        except Exception:
+            return False
     if os.name != "nt":
         return True
     if os.environ.get("WT_SESSION") or os.environ.get("TERM_PROGRAM"):
@@ -261,11 +267,12 @@ def supports_color(stream=None) -> bool:
         k = ctypes.windll.kernel32
         h = k.GetStdHandle(-11)
         mode = ctypes.c_uint32()
-        if not k.GetConsoleMode(h, ctypes.byref(mode)):
-            return False
-        return bool(k.SetConsoleMode(h, mode.value | 0x0004))
+        if k.GetConsoleMode(h, ctypes.byref(mode)):
+            return bool(k.SetConsoleMode(h, mode.value | 0x0004))
     except Exception:
-        return False
+        pass
+    # 옛 창에서 켜기에 실패해도, 켜라고 시킨 자리면 색을 낸다(제어부호를 그대로 흘려보낸다).
+    return force in ("1", "yes", "true", "on")
 
 
 def _paint(text: str, *names, color: bool = True) -> str:

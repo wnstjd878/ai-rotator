@@ -46,7 +46,7 @@ while true; do
   echo ""
   echo "[계정 사용량]"
   # 여기도 인자를 넘긴다 — 쓰려는 모델 칸이 전 계정에서 바닥이면 그 한 줄을 같이 찍는다.
-  "$PY" "$POOL" --status "${run_args[@]}"
+  AIROTATOR_COLOR=1 "$PY" "$POOL" --status "${run_args[@]}"
   echo ""
 
   "$CLAUDE_BIN" "${run_args[@]}"

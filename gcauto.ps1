@@ -88,6 +88,7 @@ try {
                 Write-Host "[계정 사용량]" -ForegroundColor Cyan
                 # 화면 출력으로 넘겨야 위 제목과 순서가 맞는다(표준 출력은 파이프를 타서 뒤늦게 합쳐진다).
                 # 부르는 쪽이 출력을 모아 읽는 경우에도 이 줄들이 섞이지 않는다.
+                $env:AIROTATOR_COLOR = "1"   # 파이프를 타므로 파이썬 판정으로는 색이 빠진다
                 python $POOL --status | ForEach-Object { Write-Host $_ }
                 Write-Host ""
             }
