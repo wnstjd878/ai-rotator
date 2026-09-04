@@ -243,49 +243,68 @@ def _last_seen_usage(state: dict, shared: dict | None, label: str, now: float) -
 
 
 def status_text() -> str:
+    """계정별 남은 사용량 화면. 그리는 규칙은 클로드 쪽과 한 벌(usage_view).
+
+    2026-09-04 에 모양을 바꿨다. 한 줄에 상태·주간·세션·초기화 시각을 쉼표로 이어
+    붙이던 것을 계정마다 머리글 한 줄 + 칸마다 막대 한 줄로 나눴다.
+    """
     state = st.prune_blocked(st.load_state())
-    cur = state.get("current") or "(모름, --use 로 한 번 정해주세요)"
+    cur = state.get("current")
     now = time.time()
     saved = set(st.saved_labels())
-    lines = [f"현재 계정: {cur}"]
+    color = usage_view.supports_color()
     _share_current(state.get("current"))  # 이 기계가 어디 물려 있는지 먼저 올린다
     shared = _shared_usage()           # 다른 기계가 자기 계정에서 읽어 올린 값
     holders = _shared_current() or {}  # 어느 기계가 어느 계정에 물려 있는지
     seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
     hidden = set(st.retired_labels())  # 구독을 끊어 뺀 계정은 목록에서 감춘다(지금 쓰는 중이면 예외)
+    lines = []
     for label in st.account_labels():
         if label in hidden and label != cur:
             continue
         marks = []
         who = holders.get(label) or []
         if label == cur:
-            marks.append("현재 사용 중" + (f"({', '.join(who)})" if who else ""))
+            marks.append("지금 사용 중" + (f" ({', '.join(who)})" if who else ""))
         elif who:
             marks.append(f"{', '.join(who)} 사용 중")
+        else:
+            marks.append("대기")
         if label not in saved:
             marks.append(f"로그인 없음 (python codex_login.py {label})")
         until = (state.get("blocked") or {}).get(label)
         if until and float(until) > now:
             left = int(float(until) - now)
-            marks.append(f"막힘({left // 3600}시간 {left % 3600 // 60}분 뒤 풀림)")
+            marks.append(f"막힘, {left // 3600}시간 {left % 3600 // 60}분 뒤 풀림")
+        entry, note = None, ""
         if codex_usage and label in saved:
             u = codex_usage.get_usage_for(cred_path(label), is_current=(label == cur))
             if u:
-                marks.append(codex_usage.summarize(u))
+                entry = u
                 plan = str(u.get("plan") or "").lower()
                 if plan and plan not in ("pro", "plus", "team", "business", "enterprise", "edu"):
                     # 등급은 서버가 늘 같이 주는데 그동안 아무 데서도 안 봤다. 유료가 아니면
                     # 한도가 통째로 다른 규칙이라(30일 창) 사람이 바로 알아야 한다.
                     marks.append(f"등급 {plan} (유료 아님)")
+                if u.get("limit_reached"):
+                    marks.append("지금 한도 도달 상태")
                 if u.get("email"):
                     marks.append(str(u["email"]))
                 seen.append((label, u))
                 _share_usage(label, u)
             else:
                 # 이 기계에서 못 읽는 경우(Mac 은 앞단 차단이라 늘 여기로 온다)
-                marks.append(_last_seen_usage(state, shared, label, now))
-        lines.append(f"  {label}: " + ", ".join(marks))
+                entry, note = usage_view.entry_and_note(state, shared, label, now)
+        parts = usage_view.usage_parts(entry, now)[0] if entry else []
+        if lines:
+            lines.append("")
+        lines += usage_view.account_block(label, marks, parts, now,
+                                          current=(label == cur), color=color, note=note)
     st.remember_usage(seen)
+    if not lines:
+        lines.append("  계정이 없습니다. --use <라벨> 로 한 번 정해 주세요.")
+    elif not cur:
+        lines += ["", "  쓸 계정이 안 정해져 있습니다. --use <라벨> 로 한 번 정해 주세요."]
     return "\n".join(lines)
 
 

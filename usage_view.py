@@ -3,7 +3,11 @@
 용도: 계정별 남은 사용량을 화면에 적을 글자로 바꾼다. claude_pool·codex_pool 의 --status 가 쓴다.
 실행 시점: 사람이 `cs`/`gs` 를 치거나 `cc`/`codex` 를 켤 때(표시 전용).
 입력: 기록해둔 사용량 한 건(weekly_pct/weekly_reset/session_pct/session_reset/at/host)
-출력: "주간 남은 35% (08/29 21:00 풀림), 세션 남은 100%(초기화됨) (Mac 3시간 전 기준)" 같은 한 줄
+출력: (1) 한 줄짜리 글 — usage_line/last_seen. 알림 문구와 옛 화면이 쓴다.
+      (2) 여러 줄 화면 — account_block/usage_lines. `cs`/`gs`/`cc` 켤 때 보는 표다.
+          계정마다 머리글 한 줄 + 칸(주간/세션/모델)마다 막대 한 줄.
+          2026-09-04 에 (2) 를 더했다. 그 전에는 한 줄에 다 이어 붙여 200자가 넘었고
+          어느 숫자가 어느 칸인지 눈으로 못 골랐다(사용자 지적).
 외부 의존: shared_state.host_label(기계 이름 바꾸기), usage_check.fmt_reset(풀리는 시각 문구).
           둘 다 없어도 그 부분만 빠지고 나머지는 그대로 나온다.
 
@@ -20,7 +24,7 @@
 의도적 미구현: 이 값으로 계정을 고르거나 막지 않는다(표시 전용). 순서·차단 판단은
     pool_state 의 weekly_reset 과 실제 거절만 쓴다 — 낡은 값으로 계정을 막았다가
     2026-07-29 에 멀쩡한 4계정이 전부 막힌 사고가 있었다.
-마지막 점검: 2026-08-03
+마지막 점검: 2026-09-04
 """
 
 from __future__ import annotations
@@ -336,8 +340,10 @@ def usage_lines(parts, now: float, *, color: bool = True, indent: str = "     ")
     out = []
     for name, left, derived, reset in parts:
         tone = _tone(left)
+        # 잔량을 모르는 칸(값이 안 온 경우)도 줄은 그린다. 안 그리면 그 칸이 없는 줄 안다.
+        pct = "   ?%" if left is None else f"{left:>4.0f}%"
         body = (f"{_pad(name, name_w)}  {_paint(bar(left), tone, color=color)}"
-                f" {_paint(f'{left:>4.0f}%', tone, 'bold', color=color)}")
+                f" {_paint(pct, tone, 'bold', color=color)}")
         tail = []
         if derived:
             tail.append("초기화된 뒤 안 읽음")
@@ -365,6 +371,7 @@ def account_block(label: str, marks, parts, now: float, *, current: bool = False
     lines = [head]
     if parts:
         lines += usage_lines(parts, now, color=color)
-    else:
+    elif "못 읽" not in note:
+        # 출처 문구가 이미 '사용량 못 읽음' 이면 같은 말을 두 번 적지 않는다.
         lines.append("     " + _paint("사용량 못 읽음", "dim", color=color))
     return lines
