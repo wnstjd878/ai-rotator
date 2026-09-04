@@ -406,6 +406,34 @@ def use(label: str) -> int:
     return 0
 
 
+def _limit_reset(label: str, usage: dict | None = None, *, bucket=None,
+                 is_current: bool = False, threshold: float = 95.0):
+    """그 계정이 **실제로** 풀리는 시각과 어느 한도인지. 못 읽으면 (None, None).
+
+    막을 때 고정 시간(기본 5시간)을 붙이면 두 방향으로 다 틀린다. 세션 한도는 창이
+    열린 시점부터 5시간이라 막히는 순간에는 대개 거의 다 지나 있다 — 2026-09-04 실측:
+    실제로는 12분 뒤 풀리는데 5시간을 잡아 주간 67% 남은 A 가 4시간 반을 놀았다.
+    반대로 주간이 찬 경우엔 5시간이 너무 짧아 깨어나자마자 또 거절받는다.
+    어느 쪽이든 서버가 준 시각이 정답이다.
+
+    `usage` 를 주면 그 값을 쓴다(부르는 쪽이 이미 읽었으면 조회를 안 늘린다).
+    """
+    if usage_check is None:
+        return None, None
+    u = usage if usage is not None else usage_check.get_usage_for(
+        BASE / "creds" / f"{label}.json", is_current=is_current)
+    if not u:
+        return None, None
+    kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
+    if kind == "weekly":
+        return u.get("weekly_reset"), kind
+    if kind == "session":
+        return u.get("session_reset"), kind
+    if kind and kind.startswith("model:"):
+        return usage_check.scoped_reset(u, bucket), kind
+    return None, kind
+
+
 def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN,
                  model: str | None = None) -> int:
     """지금 계정을 한도 도달로 보고 다음 계정으로 넘긴다 (사람이 직접 쓸 때).
@@ -420,6 +448,7 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN,
         cur = state.get("current")
         if cur:
             scoped_only = False
+            u = None
             if bucket and usage_check:
                 u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
                 # 계정 전체는 멀쩡하고 그 칸만 찼을 때만 갈라 막는다.
@@ -430,7 +459,16 @@ def next_account(cooldown: float = limit_detect.DEFAULT_COOLDOWN,
                                            or (time.time() + cooldown))
                     scoped_only = True
             if not scoped_only:
-                st.mark_blocked(state, cur, time.time() + cooldown, "사람이 한도 도달로 지정")
+                # 재우는 시간은 서버가 준 실제 풀림 시각으로 잡는다. 고정 5시간은 세션
+                # 한도에는 너무 길고(멀쩡한 계정을 몇 시간 놀린다) 주간 한도에는 너무
+                # 짧다(깨어나자마자 또 거절받는다). 못 읽을 때만 고정값으로 떨어진다.
+                until, _kind = _limit_reset(cur, usage=u, is_current=True)
+                try:
+                    ok = until is not None and float(until) > time.time()
+                except (TypeError, ValueError):
+                    ok = False
+                st.mark_blocked(state, cur, float(until) if ok else time.time() + cooldown,
+                                "사람이 한도 도달로 지정")
         nxt = _pick_or_revive(state, exclude=cur, bucket=bucket)
         if nxt is None:
             st.save_state(state)

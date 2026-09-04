@@ -3003,6 +3003,42 @@ def case_stale_account_block(tmp):
         uc.get_usage, uc.last_status = real_get, real_status
         claude_pool.usage_check = None
 
+    # (6) 막을 때도 고정 5시간이 아니라 서버가 준 실제 풀림 시각으로 재운다
+    def run_next(table):
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B", "D"], "D")
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({}))
+        claude_pool.usage_check = uc
+        uc.last_status = None
+        uc.get_usage = lambda path: table.get(Path(path).stem)
+        try:
+            claude_pool.next_account()
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+        return st.load_state()
+
+    spare = {"weekly_pct": 20.0, "session_pct": 0.0, "weekly_reset": now + 48 * 3600,
+             "session_reset": None, "scoped": {}}
+    # 세션만 찼고 15분 뒤 풀린다 → 15분만 재워야 한다(예전에는 5시간을 재웠다)
+    after = run_next({"A": spare, "B": spare,
+                      "D": {"weekly_pct": 40.0, "session_pct": 99.0,
+                            "weekly_reset": now + 78 * 3600, "session_reset": now + 900,
+                            "scoped": {}}})
+    left = float(after["blocked"]["D"]) - time.time()
+    check("세션이 곧 풀리면 그만큼만 재운다", 600 < left < 1200, f"{left / 60:.0f}분")
+
+    # 주간이 찼으면 며칠 뒤가 맞다. 5시간만 재우면 깨어나자마자 또 거절받는다
+    after = run_next({"A": spare, "B": spare,
+                      "D": {"weekly_pct": 100.0, "session_pct": 10.0,
+                            "weekly_reset": now + 40 * 3600, "session_reset": now + 900,
+                            "scoped": {}}})
+    left = float(after["blocked"]["D"]) - time.time()
+    check("주간이 찼으면 주간 풀릴 때까지 재운다", 39 * 3600 < left < 41 * 3600,
+          f"{left / 3600:.1f}시간")
+
     # (4) 계정 막힘만 푼다 — 칸 막힘은 남기고, 이미 지난 막힘에는 손대지 않는다
     state = st.load_state()
     state["blocked"] = {}
