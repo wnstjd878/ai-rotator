@@ -2735,7 +2735,7 @@ def main():
                      case_scoped_exhausted_message, case_scoped_reopen,
                      case_window_claim, case_window_claim_edges,
                      case_limit_with_split_cred, case_cred_refresh,
-                     case_stale_scoped_block):
+                     case_stale_scoped_block, case_stale_account_block):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -2884,6 +2884,107 @@ def case_stale_scoped_block(tmp):
               st.is_scoped_blocked(merged, "A", "Opus"))
     finally:
         st.shared_state = None
+
+def case_stale_account_block(tmp):
+    """[54] 계정 전체 막힘도 실제 사용량으로 되살린다.
+
+    막을 때 붙이는 식힘 시간은 고정값(기본 5시간)이라 실제보다 길게 잡힌다.
+    세션 한도는 창이 열린 시점부터 5시간이라 막히는 순간에는 대개 거의 다 지나 있다.
+    2026-09-04 실측: A 를 14:27 에 세션 한도로 막고 19:27 까지 잡았는데 실제로는
+    14:39 에 풀렸다. 그 사이 A 는 주간이 67% 남았는데도 후보에서 빠져 있었다.
+    """
+    print()
+    print("[54] 낡은 계정 막힘은 실제 사용량으로 되살린다")
+    import usage_check as uc
+
+    now = time.time()
+    usage = {
+        # A: 막힘 기록은 남아 있지만 실제로는 세션·주간 모두 여유가 있다
+        "A": {"weekly_pct": 20.0, "session_pct": 0.0,
+              "weekly_reset": now + 48 * 3600, "session_reset": None, "scoped": {}},
+        # B: 진짜로 세션이 찼다. 풀면 안 된다
+        "B": {"weekly_pct": 90.0, "session_pct": 100.0,
+              "weekly_reset": now + 20 * 3600, "session_reset": now + 3600, "scoped": {}},
+        # D: 지금 계정인데 세션이 다 찼다 → 켜기 전 확인이 갈아탈 곳을 찾는다
+        "D": {"weekly_pct": 50.0, "session_pct": 100.0,
+              "weekly_reset": now + 78 * 3600, "session_reset": now + 3600, "scoped": {}},
+    }
+
+    def arm():
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B", "D"], "D")
+        state = st.load_state()
+        st.mark_blocked(state, "A", now + 5 * 3600, "세션 한도 소진")
+        st.mark_blocked(state, "B", now + 5 * 3600, "세션 한도 소진")
+        st.mark_scoped_blocked(state, "A", "Fable", now + 48 * 3600)
+        st.save_state(state)
+
+    def run_ensure(table):
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B", "D")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None      # 앞 케이스가 남긴 401 로 재발급을 타지 않게
+        uc.get_usage = lambda path: table.get(Path(path).stem)
+        try:
+            return claude_pool.ensure_usable(model="opus")
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+
+    # (1) 실제로 풀린 A 만 되살아난다
+    arm()
+    state = st.load_state()
+    check("A·B 가 다 막힌 것으로 보인다", st.pick_next(state, exclude="D") is None)
+
+    rc = run_ensure(usage)
+    after = st.load_state()
+    check("켜기 전 확인이 정상으로 끝난다", rc == 0, rc)
+    check("실제로 열려 있는 A 로 갈아탄다", after.get("current") == "A", after.get("current"))
+    check("A 의 낡은 막힘은 풀린다", not st.is_blocked(after, "A"))
+    check("진짜 찬 B 의 막힘은 그대로", st.is_blocked(after, "B"))
+    check("A 의 모델 칸 막힘은 안 건드린다", st.is_scoped_blocked(after, "A", "Fable"))
+
+    # (2) 사용량을 못 읽은 계정은 손대지 않는다 — 못 읽는 것과 열린 것은 다르다
+    arm()
+    rc = run_ensure({"D": usage["D"], "B": usage["B"]})
+    after = st.load_state()
+    check("못 읽은 계정의 막힘은 안 지운다", st.is_blocked(after, "A"))
+    check("갈아탈 계정이 없다고 끝낸다", rc == 2, rc)
+
+    # (3) 후보가 있으면 검증 자체를 안 한다(평소 경로에서 조회를 안 늘린다)
+    arm()
+    state = st.load_state()
+    st.clear_account_block(state, "B")     # B 가 후보로 남아 있는 상태
+    st.save_state(state)
+    seen = []
+
+    def counting(path):
+        seen.append(Path(path).stem)
+        return dict(usage, B={"weekly_pct": 10.0, "session_pct": 5.0,
+                              "weekly_reset": now + 20 * 3600, "session_reset": None,
+                              "scoped": {}}).get(Path(path).stem)
+
+    real_get, real_status = uc.get_usage, uc.last_status
+    install(Fake({x: (0, OK_OUT, "") for x in ("A", "B", "D")}))
+    claude_pool.usage_check = uc
+    uc.last_status = None
+    uc.get_usage = counting
+    try:
+        claude_pool.ensure_usable(model="opus")
+    finally:
+        uc.get_usage, uc.last_status = real_get, real_status
+        claude_pool.usage_check = None
+    check("후보가 있으면 A 를 조회하지 않는다", "A" not in seen, seen)
+    check("A 의 막힘은 그대로 남는다", st.is_blocked(st.load_state(), "A"))
+
+    # (4) 계정 막힘만 푼다 — 칸 막힘은 남기고, 이미 지난 막힘에는 손대지 않는다
+    state = st.load_state()
+    state["blocked"] = {}
+    st.mark_blocked(state, "A", now + 3600, "시험")
+    check("푼 게 있으면 True", st.clear_account_block(state, "A", now) is True)
+    check("안 막힌 계정은 False", st.clear_account_block(state, "A", now) is False)
+    check("칸 막힘은 그대로", st.is_scoped_blocked(state, "A", "Fable"))
 
 
 if __name__ == "__main__":
