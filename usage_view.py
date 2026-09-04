@@ -190,3 +190,181 @@ def last_seen(state: dict, shared: dict | None, label: str, now: float) -> str:
 
     seen_at = _at(best)
     return f"{line} ({who} {ago_text(now - seen_at) if seen_at else '이전'} 기준)"
+
+
+def entry_and_note(state: dict, shared: dict | None, label: str, now: float):
+    """(기록 한 건, 그 값의 출처 문구). last_seen 과 같은 규칙인데 둘을 갈라 준다.
+
+    화면을 칸별로 나눠 그리면서 값은 막대로, 출처는 머리글 옆에 놓게 됐다.
+    last_seen 은 둘을 한 문장으로 붙여 주므로 그 화면에서는 못 쓴다.
+    """
+    who, best = pick_entry(state, shared, label)
+    if best is None:
+        return None, "사용량 못 읽음"
+    parts, reset_at = usage_parts(best, now)
+    if not parts:
+        return None, "사용량 못 읽음"
+    if all(d for _, _, d, _r in parts) and reset_at:
+        when = time.strftime("%m/%d %H:%M", time.localtime(reset_at))
+        return best, f"{when} 초기화된 뒤 읽은 값 없음"
+    seen_at = _at(best)
+    return best, f"{who} {ago_text(now - seen_at) if seen_at else '이전'} 기준"
+
+
+# ── 화면 그리기(2026-09-04 추가) ───────────────────────────────────────────
+# 왜 있는가: 예전에는 계정 한 줄에 상태·주간·세션·모델 칸·풀리는 시각을 쉼표로 이어
+#   붙였다. 한 줄이 200자를 넘어가 어느 숫자가 어느 칸인지 눈으로 못 골랐다
+#   (2026-09-04 사용자 지적). 칸마다 줄을 나누고 남은 양을 막대로 그린다.
+# 글자 고르는 기준: 이 화면은 cp949(한글 코드페이지) 창에도 그대로 나가야 한다.
+#   █ ░ ▸ • 는 cp949 에 없어 프로그램이 멈춘다. ■ □ ▶ · → 만 쓴다.
+# 정렬 규칙: ■ □ 는 창 설정에 따라 한 칸으로도 두 칸으로도 그려진다. 그래서 **모든
+#   줄이 같은 개수**를 쓰게 하고(빈 칸도 □ 로 채운다) 줄끼리만 맞춘다. 막대가 없는
+#   머리글 줄과는 맞추려 하지 않는다 — 맞출 수 없다.
+
+BAR_WIDTH = 10
+DANGER_LEFT = 20   # 남은 양이 이 아래면 붉게(곧 막힌다)
+WARN_LEFT = 50     # 이 아래면 노랗게
+
+_ESC = "\x1b"
+_C = {"dim": _ESC + "[2m", "red": _ESC + "[91m", "yellow": _ESC + "[93m",
+      "green": _ESC + "[92m", "cyan": _ESC + "[96m", "bold": _ESC + "[1m",
+      "off": _ESC + "[0m"}
+
+
+def supports_color(stream=None) -> bool:
+    """색을 내도 되는 창인가. 파이프로 넘길 때는 끈다(글자에 제어부호가 섞인다).
+
+    Windows 옛 창은 프로그램이 켜 줘야 색을 알아본다. 켜지지 않으면 색을 포기한다.
+    """
+    import os
+    import sys
+
+    stream = stream or sys.stdout
+    try:
+        if not stream.isatty():
+            return False
+    except Exception:
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.name != "nt":
+        return True
+    if os.environ.get("WT_SESSION") or os.environ.get("TERM_PROGRAM"):
+        return True
+    try:
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(k.SetConsoleMode(h, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def _paint(text: str, *names, color: bool = True) -> str:
+    if not color or not names:
+        return text
+    return "".join(_C[n] for n in names) + text + _C["off"]
+
+
+def vis_width(text: str) -> int:
+    """창에 그려질 칸 수. 한글·전각은 두 칸으로 센다(제어부호는 안 센다)."""
+    import re
+    import unicodedata
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in plain)
+
+
+def _pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - vis_width(text))
+
+
+def _tone(left):
+    if left is None:
+        return "dim"
+    if left <= DANGER_LEFT:
+        return "red"
+    if left <= WARN_LEFT:
+        return "yellow"
+    return "green"
+
+
+def bar(left, width: int = BAR_WIDTH) -> str:
+    """남은 양 막대. 조금이라도 남았으면 한 칸은 채운다(0 과 3% 를 구분하려고)."""
+    if left is None:
+        return "□" * width
+    filled = int(round(width * float(left) / 100.0))
+    filled = max(0, min(width, filled))
+    if left > 0 and filled == 0:
+        filled = 1
+    return "■" * filled + "□" * (width - filled)
+
+
+def when_text(epoch, now: float) -> str:
+    """'오늘 16:00' / '내일 09:00' / '9/7 화 01:59'. 없거나 지났으면 빈 글."""
+    import time
+
+    if not epoch:
+        return ""
+    try:
+        epoch = float(epoch)
+    except (TypeError, ValueError):
+        return ""
+    if epoch <= now:
+        return ""
+    lt = time.localtime(epoch)
+    today = time.localtime(now)
+    same = (lt.tm_year, lt.tm_yday) == (today.tm_year, today.tm_yday)
+    tomorrow = time.localtime(now + 86400)
+    clock = time.strftime("%H:%M", lt)
+    if same:
+        return f"오늘 {clock}"
+    if (lt.tm_year, lt.tm_yday) == (tomorrow.tm_year, tomorrow.tm_yday):
+        return f"내일 {clock}"
+    return f"{lt.tm_mon}/{lt.tm_mday} {'월화수목금토일'[lt.tm_wday]} {clock}"
+
+
+def usage_lines(parts, now: float, *, color: bool = True, indent: str = "     ") -> list[str]:
+    """칸(주간/세션/모델별)마다 한 줄씩. parts 는 usage_parts() 가 준 그대로."""
+    if not parts:
+        return []
+    name_w = max(vis_width(name) for name, _l, _d, _r in parts)
+    out = []
+    for name, left, derived, reset in parts:
+        tone = _tone(left)
+        body = (f"{_pad(name, name_w)}  {_paint(bar(left), tone, color=color)}"
+                f" {_paint(f'{left:>4.0f}%', tone, 'bold', color=color)}")
+        tail = []
+        if derived:
+            tail.append("초기화된 뒤 안 읽음")
+        when = when_text(reset, now)
+        if when:
+            tail.append(f"{when} 풀림")
+        if tail:
+            note = "  " + " · ".join(tail)
+            # 여유 있는 칸의 시각은 흐리게 — 바닥난 칸으로 눈이 먼저 가게 한다.
+            body += _paint(note, "dim", color=color) if tone in ("green", "dim") else note
+        out.append(indent + body)
+    return out
+
+
+def account_block(label: str, marks, parts, now: float, *, current: bool = False,
+                  color: bool = True, note: str = "") -> list[str]:
+    """계정 하나를 머리글 한 줄 + 칸 줄들로."""
+    head = _paint(f"{'▶' if current else ' '} {label}", "bold", "cyan", color=color) \
+        if current else f"  {label}"
+    bits = list(marks)
+    if note:
+        bits.append(note)
+    if bits:
+        head += "  " + _paint(" · ".join(bits), "dim", color=color)
+    lines = [head]
+    if parts:
+        lines += usage_lines(parts, now, color=color)
+    else:
+        lines.append("     " + _paint("사용량 못 읽음", "dim", color=color))
+    return lines
