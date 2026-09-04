@@ -259,9 +259,12 @@ def status_text() -> str:
     seen = []  # 여기서 읽은 사용량·초기화 시각은 다음 계정 고르는 순서와 표시에 쓰인다
     hidden = set(st.retired_labels())  # 구독을 끊어 뺀 계정은 목록에서 감춘다(지금 쓰는 중이면 예외)
     lines = []
-    for label in st.account_labels():
-        if label in hidden and label != cur:
-            continue
+    # 지금 쓰는 계정을 맨 위로 올린다(사용자 요구 2026-09-04). 나머지는 원래 차례 그대로 —
+    # 자리가 매번 바뀌면 어느 계정이 어디 있는지 눈이 못 외운다.
+    order = [l for l in st.account_labels() if not (l in hidden and l != cur)]
+    if cur in order:
+        order = [cur] + [l for l in order if l != cur]
+    for label in order:
         marks = []
         who = holders.get(label) or []
         if label == cur:
