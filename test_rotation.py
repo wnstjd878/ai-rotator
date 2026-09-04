@@ -3003,6 +3003,14 @@ def case_stale_account_block(tmp):
         uc.get_usage, uc.last_status = real_get, real_status
         claude_pool.usage_check = None
 
+    # (4) 계정 막힘만 푼다 — 칸 막힘은 남기고, 이미 지난 막힘에는 손대지 않는다
+    state = st.load_state()
+    state["blocked"] = {}
+    st.mark_blocked(state, "A", now + 3600, "시험")
+    check("푼 게 있으면 True", st.clear_account_block(state, "A", now) is True)
+    check("안 막힌 계정은 False", st.clear_account_block(state, "A", now) is False)
+    check("칸 막힘은 그대로", st.is_scoped_blocked(state, "A", "Fable"))
+
     # (6) 막을 때도 고정 5시간이 아니라 서버가 준 실제 풀림 시각으로 재운다
     def run_next(table):
         if st.STATE_FILE.exists():
@@ -3039,13 +3047,6 @@ def case_stale_account_block(tmp):
     check("주간이 찼으면 주간 풀릴 때까지 재운다", 39 * 3600 < left < 41 * 3600,
           f"{left / 3600:.1f}시간")
 
-    # (4) 계정 막힘만 푼다 — 칸 막힘은 남기고, 이미 지난 막힘에는 손대지 않는다
-    state = st.load_state()
-    state["blocked"] = {}
-    st.mark_blocked(state, "A", now + 3600, "시험")
-    check("푼 게 있으면 True", st.clear_account_block(state, "A", now) is True)
-    check("안 막힌 계정은 False", st.clear_account_block(state, "A", now) is False)
-    check("칸 막힘은 그대로", st.is_scoped_blocked(state, "A", "Fable"))
 
 
 if __name__ == "__main__":
