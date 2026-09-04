@@ -232,6 +232,57 @@ def _warn_hourly(key: str, msg: str) -> None:
     log(msg)
 
 
+PUSH_FAIL_FILE = ".push-fail-streak"   # 연달아 몇 번 못 밀었는지. creds/ 아래(커밋 제외)
+PUSH_FAIL_ALERT_AT = 2                 # 이만큼 연달아 실패하면 사람에게 한 번 알린다
+
+
+def _push_fail_path():
+    return creds_dir() / PUSH_FAIL_FILE
+
+
+def _note_push_fail(err: str) -> None:
+    """열쇠꾸러미에 못 민 횟수를 세고, 두 번 연달아면 사람에게 한 번 알린다.
+
+    화면이 잠긴 맥에서는 자격을 저장하는 진짜 자리에 새 값을 못 넣는다. 그대로 두면
+    맥에서 도는 봇들이 어느 순간 로그인 만료로 멈춘다(2026-07-31 한 시간 정지가 그 유형).
+    기록에만 남기면 사람이 로그를 열어봐야 알 수 있어서(2026-09-04 사용자 요구) 알림을 붙였다.
+    한 번은 갈아끼우는 중에도 날 수 있어 넘기고, 두 번째부터 알린다. 성공하면 조용히 지운다.
+    """
+    p = _push_fail_path()
+    try:
+        row = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        row = {}
+    count = int(row.get("count") or 0) + 1
+    alerted = bool(row.get("alerted"))
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"count": count, "alerted": alerted or count >= PUSH_FAIL_ALERT_AT,
+                                 "at": time.time()}), encoding="utf-8")
+    except Exception:
+        pass
+    if alerted or count < PUSH_FAIL_ALERT_AT:
+        return
+    try:
+        import notify
+
+        notify.send(
+            "맥에서 클로드 로그인 정보를 저장하는 자리에 새 값을 못 넣고 있습니다. "
+            "맥 화면이 잠겨 있으면 이렇게 됩니다. 맥 본체 화면을 한 번 열어 주세요. "
+            "그대로 두면 맥에서 도는 봇들이 로그인 만료로 멈춥니다. "
+            f"({count}번 연달아 실패, 사유: {err or '원인 미상'})")
+    except Exception:
+        pass
+
+
+def _clear_push_fail() -> None:
+    """다시 밀 수 있게 됐다. 센 것을 지운다(다음에 또 막히면 처음부터 센다)."""
+    try:
+        _push_fail_path().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def push_to_keychain(obj) -> bool:
     """파일 쪽이 나중 것일 때 열쇠꾸러미를 그 값으로 맞춘다. 맞췄으면 True.
 
@@ -381,7 +432,9 @@ def sync(quiet: bool = False) -> bool:
             # (시간당 1회 — 예전엔 무기록이라 어긋남 자체를 몰랐다).
             _warn_hourly("push-fail", "자격 파일이 더 최신인데 열쇠꾸러미에 못 밀었습니다"
                          "(%s). 다음 회차에 다시 시도합니다." % (_push_err or "원인 미상"))
+            _note_push_fail(_push_err)
             return False
+        _clear_push_fail()
         label = label_of(live)
         changed_store = mirror_store(live, live_fp, label) if label else False
         where = ["열쇠꾸러미"] + (["'%s' 저장본" % label] if changed_store else [])
@@ -389,6 +442,9 @@ def sync(quiet: bool = False) -> bool:
             log("자격 파일이 더 최신이라 그 값(%s)을 %s에 맞췄습니다." % (live_fp, ", ".join(where)))
         return True
 
+    # 여기까지 왔으면 밀 일이 없거나 열쇠꾸러미가 더 최신이다. 막혀 있던 게 풀린 것이니
+    # 실패 센 것을 지운다(안 지우면 한 번 알린 뒤로 영영 다시 안 알린다).
+    _clear_push_fail()
     changed_live = mirror_live(obj, fp)
 
     label = label_of(obj)

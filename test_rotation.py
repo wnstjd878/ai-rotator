@@ -2739,7 +2739,8 @@ def main():
                      case_scoped_exhausted_message, case_scoped_reopen,
                      case_window_claim, case_window_claim_edges,
                      case_limit_with_split_cred, case_cred_refresh,
-                     case_stale_scoped_block, case_stale_account_block):
+                     case_stale_scoped_block, case_stale_account_block,
+                     case_push_fail_alert):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -2888,6 +2889,46 @@ def case_stale_scoped_block(tmp):
               st.is_scoped_blocked(merged, "A", "Opus"))
     finally:
         st.shared_state = None
+
+def case_push_fail_alert(tmp):
+    """[55] 열쇠꾸러미에 두 번 연달아 못 넣으면 사람에게 한 번 알린다.
+
+    화면이 잠긴 맥에서는 자격을 저장하는 진짜 자리에 새 값이 안 들어간다. 그대로 두면
+    맥 봇들이 어느 순간 로그인 만료로 멈춘다. 예전에는 기록에만 남아 사람이 로그를
+    열어봐야 알았다(2026-09-04 사용자 요구로 알림 추가).
+    """
+    print()
+    print("[55] 열쇠꾸러미 밀기가 연달아 막히면 한 번 알린다")
+    import types
+
+    import cred_mirror as cm
+
+    sent = []
+    fake = types.SimpleNamespace(send=lambda msg, **kw: sent.append(msg))
+    real_creds, real_mod = cm.creds_dir, sys.modules.get("notify")
+    sys.modules["notify"] = fake
+    cm.creds_dir = lambda: Path(tmp)
+    try:
+        cm._note_push_fail("화면이 잠긴 자리")
+        check("한 번은 넘어간다(갈아끼우는 중일 수 있다)", sent == [], sent)
+        cm._note_push_fail("화면이 잠긴 자리")
+        check("두 번째에 알린다", len(sent) == 1, sent)
+        check("무엇을 해야 하는지 적는다", "맥 본체 화면" in (sent[0] if sent else ""))
+        cm._note_push_fail("화면이 잠긴 자리")
+        check("이어지는 실패에는 다시 안 알린다", len(sent) == 1, len(sent))
+
+        cm._clear_push_fail()          # 다시 밀 수 있게 됐다
+        cm._note_push_fail("또 막힘")
+        check("풀린 뒤에는 처음부터 센다", len(sent) == 1, len(sent))
+        cm._note_push_fail("또 막힘")
+        check("다음 사고는 다시 알린다", len(sent) == 2, len(sent))
+    finally:
+        cm.creds_dir = real_creds
+        if real_mod is None:
+            sys.modules.pop("notify", None)
+        else:
+            sys.modules["notify"] = real_mod
+
 
 def case_stale_account_block(tmp):
     """[54] 계정 전체 막힘도 실제 사용량으로 되살린다.
