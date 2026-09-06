@@ -113,7 +113,7 @@ def human_steps(problems: list[tuple]) -> str:
     lines = ["구독 계정 자동 갱신이 안 됐습니다. 본체 PowerShell 에서 아래를 순서대로 실행해 주세요.",
              "(첫 줄을 치면 크롬 창이 뜹니다. 구글 계정 선택에서 그 계정을 한 번 누르면 나머지는 자동입니다.)",
              "",
-             "cd C:\Users\JUNSEONG\ai-rotator"]
+             "cd " + str(BASE)]
     for label, items in by_label.items():
         left = ", ".join(f"{n} {d}일" for n, _, d in items if d is not None)
         lines.append("")
@@ -123,8 +123,7 @@ def human_steps(problems: list[tuple]) -> str:
             if host:
                 lines.append(f"python relogin.py --remote {host} {label}")
     lines += ["", "끝나면 python relogin.py --status 로 남은 일수가 27일 이상인지 보세요."]
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def main() -> int:
