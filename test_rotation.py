@@ -2778,7 +2778,9 @@ def case_usage_cache_backoff(tmp):
 
     real_open = _ur.urlopen
     real_cache = uc._CACHE_FILE
+    real_probe = uc._PROBE_CACHE
     uc._CACHE_FILE = _P(tmp) / ".rotator-usage-cache.json"
+    uc._PROBE_CACHE = _P(tmp) / ".no-probe.json"   # 프로브 재사용 기본 OFF(초반 검사를 결정적으로)
     cred = _P(tmp) / "A.json"
     cred.write_text(_json.dumps({"claudeAiOauth": {"accessToken": "x"}}), encoding="utf-8")
 
@@ -2849,7 +2851,6 @@ def case_usage_cache_backoff(tmp):
 
         # 조회기(usage_probe) 캐시 재사용: 그 파일에 현재 계정이 신선하게 적혀 있으면
         # 순환기는 제 조회를 하지 않고 그 값을 쓴다(같은 창구 두 번 안 두드림 = 429 폭주 제거).
-        real_probe = uc._PROBE_CACHE
         uc._PROBE_CACHE = _P(tmp) / ".usage-cache.json"
         uc._PROBE_CACHE.write_text(_json.dumps({
             "at": __import__("time").time(), "account": "P",
@@ -2867,10 +2868,10 @@ def case_usage_cache_backoff(tmp):
         check("조회기 캐시가 신선하면 통신 없이 그 값을 쓴다",
               up is not None and up["session_pct"] == 22.0 and up["weekly_pct"] == 33.0
               and calls["n"] == before, (up, before, calls["n"]))
-        uc._PROBE_CACHE = real_probe
     finally:
         _ur.urlopen = real_open
         uc._CACHE_FILE = real_cache
+        uc._PROBE_CACHE = real_probe
 
 
 def case_stale_scoped_block(tmp):
