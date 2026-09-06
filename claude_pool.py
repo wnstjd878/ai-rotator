@@ -13,6 +13,7 @@
       python claude_pool.py --use A           A 계정으로 지금 바로 교체
       python claude_pool.py --ensure          켜기 직전 확인: 지금 계정이 다 찼으면 미리 교체
       python claude_pool.py --sweep           낡은 계정 막힘 걷어내기(주기 작업용, 30분 간격 제한)
+      python claude_pool.py --tend            떠 있는 창의 칸이 바닥났으면 갈아끼우기(주기 작업용)
       python claude_pool.py --claim <번호>     그 프로세스가 쓰는 창이 이 모델 칸을 잡았다고 표시
       python claude_pool.py --unclaim <번호>   창이 닫혔다고 표시(프로세스가 죽으면 자동 정리)
       python claude_pool.py -- -p "안녕"       claude 를 순환 보호 아래서 실행
@@ -32,14 +33,18 @@
       그 계정이 현재가 된 뒤에야 읽힌다. 그래서 갈아탄 계정도 바닥이면 한 번 더 넘어간다.
       --ensure 는 선제 전환이 아니다 — 이미 100% 다 찬 계정만 켜기 전에 건너뛴다.
       되돌리기도 선제 전환이 아니다 — 사용량을 보지 않고 막힘이 풀렸는지만 본다.
-      대화형 claude 세션의 실시간 교체 없음 — 이미 떠 있는 세션은 재시작해야 새 계정이 붙는다.
+대화 중 교체(2026-09-06 추가): claude 는 요청마다 자격 파일을 다시 읽으므로 떠 있는 창도
+      파일만 갈아끼우면 다음 메시지부터 새 계정이 붙는다(재시작 불필요). Windows 본체 작업
+      스케줄러 `ai-rotator-tend-windows` 가 3분마다 `--tend` 로 떠 있는 창의 칸을 확인해
+      바닥났으면 갈아끼운다. ccauto 도 창이 끝난 뒤 `--ensure` 종료코드(3=갈아탐)를 보고
+      Fable 칸 소진을 알아본다(haiku 찔러보기는 그 칸을 못 봤다).
 떠 있는 창 지키기(2026-08-22 추가): 자격은 이 컴퓨터에 한 벌뿐이라 봇이 계정을 갈아끼우면
       떠 있는 창까지 끌려간다. 그래서 사람 창은 켜질 때 자기가 쓰는 모델 칸을 표시하고
       (claude_shim 이 자동으로, ccauto 도 한 번 더), 계정을 고르는 자리는 그 칸까지
       만족하는 계정을 먼저 찾는다(_wanted_buckets / _pick_account).
       되돌리기는 창을 절대 밀어내지 않고, 갈아타야만 하는 교체는 다른 수가 없을 때만 민다.
       표시는 프로세스가 죽으면 저절로 걷힌다(pool_state.prune_claims).
-마지막 점검: 2026-08-22
+마지막 점검: 2026-09-06
 """
 
 from __future__ import annotations
@@ -591,7 +596,44 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None) -> int
         return 0
     print(f"[켜기 전 확인] '{started_from}' {first_kind} 한도 소진 → '{landed}' 계정으로 바꿔서 켭니다.")
     _notify_switch(started_from, landed, "limit", state, bucket)  # 전송은 잠금 밖에서
-    return 0
+    return ENSURE_SWITCHED
+
+
+def tend_windows() -> int:
+    """떠 있는 사람 창 지키기(주기 작업용). 창이 잡은 칸이 지금 계정에서 바닥났으면 갈아끼운다.
+
+    자격은 이 컴퓨터에 한 벌뿐이고 claude 는 매 요청마다 자격 파일을 다시 읽으므로,
+    파일을 갈아끼우면 떠 있는 창도 **다음 메시지부터** 새 계정으로 간다(2026-08-22 사고에서
+    봇의 교체가 떠 있는 Fable 창을 끌고 간 것이 그 증거). 그동안은 창이 켜질 때(--ensure)와
+    끝난 뒤(ccauto)만 봐서, 대화 중에 Fable 이 바닥나면 사람이 cc 를 다시 쳐야 했다.
+
+    - 창 표시(session_claims)가 하나도 없으면 아무 조회도 안 한다(봇만 도는 머신에서 공짜).
+    - 창들이 잡은 칸마다 --ensure 와 같은 판정을 한다(100% 소진일 때만, 선제 전환 아님).
+      갈아탈 계정은 _wanted_buckets 로 **떠 있는 창들의 칸을 다 만족하는** 곳을 고른다.
+    - 사용량 조회는 칸 종류 수만큼(대개 1회). 3분 주기면 상태줄 조회보다 적다.
+    - 갈아탔으면 --ensure 가 텔레그램 알림까지 보낸다(따로 안 보낸다).
+    종료코드: ENSURE_SWITCHED(3) 갈아탔음 / 그 밖엔 0(창 없음·그대로·못 읽음 모두).
+    """
+    if usage_check is None:
+        return 0
+    try:
+        buckets = st.claimed_buckets(st.load_state())
+    except Exception:
+        return 0
+    if not buckets:
+        print("[창 지키기] 떠 있는 창 없음")
+        return 0
+    switched = False
+    for name in buckets:
+        rc = ensure_usable(bucket=name)
+        if rc == ENSURE_SWITCHED:
+            switched = True
+            log(f"창 지키기: 떠 있는 창의 {name} 칸이 바닥나 계정을 갈아끼웠다")
+        elif rc == 2:
+            log(f"창 지키기: 떠 있는 창의 {name} 칸이 바닥났지만 갈아탈 계정이 없다")
+    if not switched:
+        print(f"[창 지키기] 떠 있는 창의 칸({', '.join(buckets)}) 그대로 쓸 수 있음")
+    return ENSURE_SWITCHED if switched else 0
 
 
 def claim_session(pid, model: str | None = None, argv=None) -> str | None:
@@ -1815,6 +1857,9 @@ def main():
         # 뒤에 붙는 건 켜려는 claude 의 인자를 그대로 넘겨받은 것이다.
         # 모르는 인자는 무시하고 --model 만 본다.
         return ensure_usable(intended_model(argv[1:]))
+    if argv[0] == "--tend":
+        # 떠 있는 사람 창의 칸이 바닥났으면 갈아끼운다(주기 작업용, 창 없으면 조회 0).
+        return tend_windows()
     if argv[0] == "--use":
         if len(argv) < 2:
             print("사용법: python claude_pool.py --use <라벨>")

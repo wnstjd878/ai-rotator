@@ -2740,7 +2740,7 @@ def main():
                      case_window_claim, case_window_claim_edges,
                      case_limit_with_split_cred, case_cred_refresh,
                      case_stale_scoped_block, case_stale_account_block,
-                     case_push_fail_alert):
+                     case_push_fail_alert, case_tend_windows):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -2822,7 +2822,7 @@ def case_stale_scoped_block(tmp):
 
     rc = run_ensure(usage)
     after = st.load_state()
-    check("켜기 전 확인이 정상으로 끝난다", rc == 0, rc)
+    check("켜기 전 확인이 갈아탔다고 알린다(종료코드 3)", rc == claude_pool.ENSURE_SWITCHED, rc)
     check("실제로 비어 있는 A 로 갈아탄다", after.get("current") == "A", after.get("current"))
     check("A 의 낡은 막힘은 풀린다", not st.is_scoped_blocked(after, "A", "Fable"))
     check("진짜 찬 B 의 막힘은 그대로", st.is_scoped_blocked(after, "B", "Fable"))
@@ -2984,7 +2984,7 @@ def case_stale_account_block(tmp):
 
     rc = run_ensure(usage)
     after = st.load_state()
-    check("켜기 전 확인이 정상으로 끝난다", rc == 0, rc)
+    check("켜기 전 확인이 갈아탔다고 알린다(종료코드 3)", rc == claude_pool.ENSURE_SWITCHED, rc)
     check("실제로 열려 있는 A 로 갈아탄다", after.get("current") == "A", after.get("current"))
     check("A 의 낡은 막힘은 풀린다", not st.is_blocked(after, "A"))
     check("진짜 찬 B 의 막힘은 그대로", st.is_blocked(after, "B"))
@@ -3091,6 +3091,94 @@ def case_stale_account_block(tmp):
     left = float(after["blocked"]["D"]) - time.time()
     check("주간이 찼으면 주간 풀릴 때까지 재운다", 39 * 3600 < left < 41 * 3600,
           f"{left / 3600:.1f}시간")
+
+
+def case_tend_windows(tmp):
+    """[56] 떠 있는 창의 칸이 대화 중에 바닥나면 주기 작업이 갈아끼운다 (2026-09-06).
+
+    그동안은 창이 켜질 때(--ensure)와 끝난 뒤(ccauto)만 봐서, 대화 중 Fable 이 바닥나면
+    사람이 새 창에서 cc 를 다시 쳐야 했다. --tend 가 창 표시(session_claims)의 칸을 보고
+    지금 계정에서 그 칸이 100% 면 갈아끼운다. 창이 없으면 조회도 안 한다.
+    """
+    print()
+    print("[56] 떠 있는 창의 칸이 바닥나면 주기 작업이 갈아끼운다")
+    import usage_check as uc
+
+    now = time.time()
+    fable_full = {"weekly_pct": 45.0, "session_pct": 30.0,
+                  "weekly_reset": now + 48 * 3600, "session_reset": now + 3600,
+                  "scoped": {"Fable": {"pct": 100.0, "reset": now + 48 * 3600}}}
+    fable_free = {"weekly_pct": 20.0, "session_pct": 5.0,
+                  "weekly_reset": now + 60 * 3600, "session_reset": None,
+                  "scoped": {"Fable": {"pct": 10.0, "reset": now + 60 * 3600}}}
+    weekly_full = dict(fable_free, weekly_pct=100.0)
+
+    real_alive = st._pid_alive
+    alive = set()
+    st._pid_alive = lambda pid: str(pid) in alive
+
+    def run_tend(table, current):
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B"], current)
+        s = st.load_state()
+        s["reclaim_at"] = None
+        st.save_state(s)
+        seen = []
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None
+        def get(path):
+            seen.append(Path(path).stem)
+            return table.get(Path(path).stem)
+        uc.get_usage = get
+        try:
+            if alive:
+                claude_pool.claim_session(4242, model="claude-fable-5-1")
+            return claude_pool.tend_windows(), seen
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+
+    try:
+        # (1) 떠 있는 창이 없으면 조회도 교체도 없다
+        rc, seen = run_tend({"A": fable_full, "B": fable_free}, "A")
+        check("창이 없으면 그대로(0)", rc == 0, rc)
+        check("창이 없으면 사용량을 안 읽는다", seen == [], seen)
+        check("계정도 그대로 A", st.load_state().get("current") == "A")
+
+        # (2) Fable 창이 떠 있고 A 의 Fable 칸이 바닥 → B 로 갈아끼운다
+        alive.add("4242")
+        rc, seen = run_tend({"A": fable_full, "B": fable_free}, "A")
+        after = st.load_state()
+        check("갈아탔다고 알린다(3)", rc == claude_pool.ENSURE_SWITCHED, rc)
+        check("Fable 이 남은 B 로 간다", after.get("current") == "B", after.get("current"))
+        check("A 는 Fable 칸만 막는다", st.is_scoped_blocked(after, "A", "Fable")
+              and not st.is_blocked(after, "A"))
+        check("창 표시는 남아 있다", st.claimed_buckets(after) == ("Fable",),
+              st.claimed_buckets(after))
+
+        # (3) 칸에 여유가 있으면 아무것도 안 한다(선제 전환 아님)
+        rc, seen = run_tend({"A": dict(fable_full, scoped={"Fable": {"pct": 97.0, "reset": now + 48 * 3600}}),
+                             "B": fable_free}, "A")
+        check("97% 면 그대로(0)", rc == 0, rc)
+        check("계정 그대로 A", st.load_state().get("current") == "A")
+        check("조회는 지금 계정 한 번", seen == ["A"], seen)
+
+        # (4) 계정 전체 주간이 바닥나도 갈아끼운다(칸보다 먼저 본다)
+        rc, seen = run_tend({"A": weekly_full, "B": fable_free}, "A")
+        after = st.load_state()
+        check("주간 소진도 갈아탄다(3)", rc == claude_pool.ENSURE_SWITCHED, rc)
+        check("A 는 통째로 막힌다", st.is_blocked(after, "A"))
+        check("B 로 간다", after.get("current") == "B", after.get("current"))
+
+        # (5) 갈아탈 계정이 없으면 0 으로 조용히 끝난다(창은 그대로, 알림은 --ensure 몫)
+        rc, seen = run_tend({"A": fable_full, "B": fable_full}, "A")
+        check("갈아탈 데 없으면 0", rc == 0, rc)
+    finally:
+        st._pid_alive = real_alive
+        claude_pool.release_session(4242)
 
 
 

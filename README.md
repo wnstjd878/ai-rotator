@@ -36,7 +36,7 @@ A가 주간한도로 오래 막히면 다 같이 B로 넘어간다. 5시간 한�
 |---|---|---|
 | winserver (192.168.0.3) | viral-radar 전체 (작업 스케줄러) | `install_shim.ps1` 로 가로채기 |
 | Mac mini | makwangsu-chat, mkt-agent, content-layer (launchd) | `install_shim.sh` 로 가로채기 |
-| Windows 본체 | 대화형 claude code | `claude_pool.py --next` 수동 |
+| Windows 본체 | 대화형 claude code | `cc`(ccauto.ps1) + 작업 스케줄러 `ai-rotator-tend-windows`(3분, `--tend`) |
 
 ## 셋업
 
@@ -103,6 +103,14 @@ cn    지금 계정을 건너뛰고 다음 계정으로 넘긴 뒤 켜기
 cs    계정별 남은 사용량 보기
 ```
 
+대화 중에 칸이 바닥나면(2026-09-06): 자격은 컴퓨터 한 대에 한 벌이고 claude 는 요청마다
+자격 파일을 다시 읽으므로, 파일만 갈아끼우면 떠 있는 창도 **다음 메시지부터** 새 계정으로
+간다(창을 다시 켤 필요 없음). Windows 본체는 작업 스케줄러 `ai-rotator-tend-windows` 가
+3분마다 `claude_pool.py --tend` 를 돌려 떠 있는 창이 잡은 칸(예: Fable)이 지금 계정에서
+100% 면 갈아끼운다. 창이 없으면 조회도 안 한다. 급하면 다른 터미널에서 `cn` 을 쳐도 같다.
+창이 끝난 뒤의 확인도 haiku 찔러보기(Fable 칸은 못 봄)에 더해 `--ensure` 종료코드(3=갈아탐)를
+본다. Mac 은 아직 주기 작업이 없다(launchd 로 같은 명령을 걸면 된다).
+
 Mac 은 Orca 원격 터미널을 켜면 이 셸이 뜬다. 맥에서 `cc` 는 원래 C 컴파일러(`/usr/bin/cc`)라
 등록 전에는 조용히 엉뚱한 게 돌았다. `~/.zshrc` 는 이 저장소 밖이라 백업이 안 되므로
 설치용 세 줄을 `ccauto.sh` 헤더 주석에 적어뒀다.
@@ -113,6 +121,7 @@ Mac 은 Orca 원격 터미널을 켜면 이 셸이 뜬다. 맥에서 `cc` 는 �
 python claude_pool.py --status     현재 계정과 각 계정 상태(공유 반영)
 python claude_pool.py --next       한도 걸렸을 때 다음 계정으로 (대화형용)
 python claude_pool.py --use B      B 계정으로 바로 지정
+python claude_pool.py --tend       떠 있는 창의 칸이 바닥났으면 갈아끼우기(주기 작업이 부름)
 ```
 
 ## 동작 요약

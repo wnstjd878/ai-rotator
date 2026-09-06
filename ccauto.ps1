@@ -39,11 +39,18 @@ while ($true) {
     # "reached your ..." 는 모델별 한도 문구다(실제: "You've reached your Fable 5 limit").
     # 이게 없어서 2026-08-12 에 Fable 이 막혔는데도 자동 전환이 안 걸렸다.
     $limited = $j -match "weekly limit|usage limit reached|hit your .{0,40}limit|reached your .{0,40}limit|OAuth session expired|5-hour limit|rate.?limit"
+    # haiku 로 찔러보면 Fable 칸만 바닥난 경우는 안 잡힌다(그 칸은 haiku 가 안 쓴다).
+    # 그래서 사용량 조회(--ensure)를 한 번 더 한다. 종료코드 3 = 그 칸이 바닥나 이미 갈아탔음.
+    $switchedAlready = $false
+    if (-not $limited) {
+        python $POOL --ensure @runArgs
+        if ($LASTEXITCODE -eq 3) { $limited = $true; $switchedAlready = $true }
+    }
 
     if ($limited) {
         Write-Host ""
         Write-Host "[자동순환] 한도 도달 감지 -> 다음 계정으로 전환합니다..." -ForegroundColor Yellow
-        python $POOL --next @runArgs
+        if (-not $switchedAlready) { python $POOL --next @runArgs }
         # 이어받기 인자가 아직 없고, 사용자가 --resume 으로 특정 대화를 고른 게 아니면 붙인다
         $hasResume = ($runArgs -contains "--continue") -or ($runArgs -contains "-c") -or ($runArgs -contains "--resume") -or ($runArgs -contains "-r")
         if (-not $hasResume) {

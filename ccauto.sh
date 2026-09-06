@@ -11,7 +11,7 @@
 # 외부 의존: claude_pool.py (--ensure / --status / --next), 진짜 claude 실행 파일
 # 의도적 미구현: 봇 단발 호출(-p) 순환은 claude_shim.py 가 맡는다. 여기는 사람 창 전용.
 #              (두 곳에서 같이 순환시키면 계정이 이중으로 튄다 — 재구현 금지)
-# 마지막 점검: 2026-07-31
+# 마지막 점검: 2026-09-06
 
 POOL="$HOME/projects/ai-rotator/claude_pool.py"
 PY=/usr/bin/python3
@@ -57,10 +57,21 @@ while true; do
 
   # "reached your ..." 는 모델별 한도 문구다(실제: "You've reached your Fable 5 limit").
   # 이게 없어서 2026-08-12 에 Fable 이 막혔는데도 자동 전환이 안 걸렸다.
+  limited=0
+  switched_already=0
   if printf '%s' "$probe" | grep -qiE "weekly limit|usage limit reached|hit your .{0,40}limit|reached your .{0,40}limit|OAuth session expired|5-hour limit|rate.?limit"; then
+    limited=1
+  else
+    # haiku 로 찔러보면 Fable 칸만 바닥난 경우는 안 잡힌다(그 칸은 haiku 가 안 쓴다).
+    # 그래서 사용량 조회(--ensure)를 한 번 더 한다. 종료코드 3 = 그 칸이 바닥나 이미 갈아탔음.
+    "$PY" "$POOL" --ensure "${run_args[@]}"
+    if [ "$?" -eq 3 ]; then limited=1; switched_already=1; fi
+  fi
+
+  if [ "$limited" -eq 1 ]; then
     echo ""
     echo "[자동순환] 한도 도달 감지 -> 다음 계정으로 전환합니다..."
-    "$PY" "$POOL" --next "${run_args[@]}"
+    if [ "$switched_already" -eq 0 ]; then "$PY" "$POOL" --next "${run_args[@]}"; fi
 
     has_resume=0
     for a in "${run_args[@]}"; do
