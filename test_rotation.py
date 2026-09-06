@@ -2740,7 +2740,8 @@ def main():
                      case_window_claim, case_window_claim_edges,
                      case_limit_with_split_cred, case_cred_refresh,
                      case_stale_scoped_block, case_stale_account_block,
-                     case_push_fail_alert, case_tend_windows):
+                     case_push_fail_alert, case_tend_windows,
+                     case_usage_cache_backoff):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -2761,6 +2762,83 @@ def main():
         return 1
     print("전부 통과")
     return 0
+
+
+def case_usage_cache_backoff(tmp):
+    """[57] 사용량 조회에 짧은 TTL 캐시 + 429 백오프가 걸려 잇단 조회를 줄인다 (2026-09-06).
+
+    --tend(3분)·봇 shim·cs 가 같은 계정을 잇달아 조회하면 서버가 429 로 막았다.
+    상태줄 조회기처럼 최근 성공값을 다시 쓰고, 429 를 받으면 잠시 안 두드린다.
+    통신 자체를 가짜로 바꿔 조회 횟수를 센다(진짜 서버·자격은 안 건드린다).
+    """
+    print("
+[57] 사용량 조회 캐시 + 429 백오프")
+    import io as _io, urllib.request as _ur, urllib.error as _ue, json as _json
+    from pathlib import Path as _P
+    import usage_check as uc
+
+    real_open = _ur.urlopen
+    real_cache = uc._CACHE_FILE
+    uc._CACHE_FILE = _P(tmp) / ".rotator-usage-cache.json"
+    cred = _P(tmp) / "A.json"
+    cred.write_text(_json.dumps({"claudeAiOauth": {"accessToken": "x"}}), encoding="utf-8")
+
+    calls = {"n": 0}
+    mode = {"raise": None}
+    body = _json.dumps({
+        "five_hour": {"utilization": 15.0, "resets_at": "2026-09-07T00:00:00Z"},
+        "seven_day": {"utilization": 40.0, "resets_at": "2026-09-11T00:00:00Z"},
+        "limits": [{"kind": "weekly_scoped",
+                    "scope": {"model": {"display_name": "Fable"}},
+                    "percent": 6.0, "resets_at": "2026-09-11T00:00:00Z"}],
+    }).encode()
+
+    class _Resp:
+        def read(self): return body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_open(req, timeout=None):
+        calls["n"] += 1
+        if mode["raise"] == "429":
+            raise _ue.HTTPError(uc.USAGE_URL, 429, "Too Many", {}, _io.BytesIO(b""))
+        return _Resp()
+
+    _ur.urlopen = fake_open
+    try:
+        u = uc.get_usage(cred)
+        check("첫 조회는 성공값을 준다", bool(u) and u["session_pct"] == 15.0, u)
+        check("첫 조회는 통신 1회", calls["n"] == 1, calls)
+
+        uc.get_usage(cred)
+        check("TTL 안 재조회는 통신하지 않는다", calls["n"] == 1, calls)
+
+        # TTL 을 강제로 늙히고 429 를 받게 한다
+        c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
+        c["A"]["at"] -= 999
+        uc._CACHE_FILE.write_text(_json.dumps(c), encoding="utf-8")
+        mode["raise"] = "429"
+        u3 = uc.get_usage(cred)
+        check("429 면 None + last_status 429", u3 is None and uc.last_status == 429, uc.last_status)
+        check("429 는 통신을 한 번 했다", calls["n"] == 2, calls)
+
+        u4 = uc.get_usage(cred)
+        check("백오프 중에는 통신하지 않는다", calls["n"] == 2 and u4 is None, calls)
+
+        # 백오프 풀고 정상화
+        c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
+        c["A"]["backoff_until"] = 0
+        uc._CACHE_FILE.write_text(_json.dumps(c), encoding="utf-8")
+        mode["raise"] = None
+        u5 = uc.get_usage(cred)
+        check("백오프 풀리면 다시 성공값", bool(u5) and u5["session_pct"] == 15.0, u5)
+        c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
+        check("성공 시 백오프가 지워진다", not c["A"].get("backoff_until"), c["A"])
+        check("자격 값은 캐시에 안 담긴다",
+              "accessToken" not in uc._CACHE_FILE.read_text(encoding="utf-8"))
+    finally:
+        _ur.urlopen = real_open
+        uc._CACHE_FILE = real_cache
 
 
 def case_stale_scoped_block(tmp):

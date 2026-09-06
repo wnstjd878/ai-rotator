@@ -21,10 +21,15 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import os
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 UA = "claude-cli/2.1.0 (external, cli)"
@@ -32,6 +37,46 @@ TIMEOUT = 10
 _WEEKDAY = "월화수목금토일"
 last_error = None  # 마지막 조회 실패 사유(종류만, 자격 값은 절대 안 담는다)
 last_status = None  # 마지막 조회의 서버 응답 번호. 401(자격 만료)만 갱신을 부른다.
+
+# 같은 계정을 여러 부름(주기 작업 --tend, 봇 shim 켜기 전 확인, cs)이 잇달아 조회하면
+# 서버가 429(조회 제한)로 막는다(2026-09-06 실측: --tend 를 켠 직후부터 시작).
+# 상태줄 조회기(usage_probe.py)처럼 짧은 TTL 캐시 + 429 백오프를 둬서 조회 수를 줄인다.
+# 캐시는 계정 라벨별로 마지막 성공값과 429 쉬는 시각만 담는다(자격 값은 절대 안 담는다).
+_CACHE_TTL = 120      # 이 초 안에 읽어둔 성공값이 있으면 다시 조회하지 않는다
+_BACKOFF_429 = 90     # 429 를 받으면 이 초 동안 그 계정을 다시 두드리지 않는다
+_CACHE_FILE = Path.home() / ".claude" / ".rotator-usage-cache.json"
+
+
+def _label_of(cred_path) -> str:
+    """creds/<라벨>.json 에서 '<라벨>'. 지금 계정 살아있는 자격(.credentials)도 제 이름으로 담는다."""
+    try:
+        return Path(cred_path).stem
+    except Exception:
+        return str(cred_path)
+
+
+def _cache_load() -> dict:
+    try:
+        return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _cache_save(cache: dict) -> None:
+    """원자적으로 쓴다(찢긴 쓰기를 다음 읽기가 무시하게). 실패해도 조용히 넘긴다 - 캐시는 편의다."""
+    tmp = None
+    try:
+        _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(_CACHE_FILE.parent), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+        os.replace(tmp, str(_CACHE_FILE))
+    except Exception:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
 
 
 def _iso_to_epoch(text):
@@ -52,6 +97,21 @@ def get_usage(cred_path) -> dict | None:
     global last_error, last_status
     last_error = None
     last_status = None
+
+    # 잇단 조회를 줄인다: 최근 성공값이 살아 있으면 통신 없이 그대로 돌려주고,
+    # 방금 429 를 받았으면 쉬는 동안 다시 두드리지 않는다. 판단은 실제 거절로도 잡히므로
+    # 최대 _CACHE_TTL 초 낡은 값으로 결정해도 안전하다(상태줄 조회기와 같은 규율).
+    label = _label_of(cred_path)
+    now = time.time()
+    cache = _cache_load()
+    ent = cache.get(label) or {}
+    if ent.get("usage") and (now - float(ent.get("at") or 0)) < _CACHE_TTL:
+        return copy.deepcopy(ent["usage"])
+    if float(ent.get("backoff_until") or 0) > now:
+        last_status = 429
+        last_error = "조회 제한(429). 잠시 뒤 다시"
+        return None  # 쉬는 중: 통신하지 않는다(멀쩡한 계정을 막지 않게 값도 지어내지 않는다)
+
     try:
         d = json.load(open(cred_path, encoding="utf-8"))
     except Exception:
@@ -72,19 +132,26 @@ def get_usage(cred_path) -> dict | None:
     except urllib.error.HTTPError as e:
         last_status = e.code
         last_error = "조회 제한(429). 잠시 뒤 다시" if e.code == 429 else f"HTTP {e.code}"
+        if e.code == 429:
+            ent["backoff_until"] = now + _BACKOFF_429  # 그 계정을 잠시 쉬게 한다(이전 성공값은 남겨둔다)
+            cache[label] = ent
+            _cache_save(cache)
         return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
         last_error = type(e).__name__
         return None
     fh = j.get("five_hour") or {}
     sd = j.get("seven_day") or {}
-    return {
+    usage = {
         "session_pct": fh.get("utilization"),
         "session_reset": _iso_to_epoch(fh.get("resets_at")),
         "weekly_pct": sd.get("utilization"),
         "weekly_reset": _iso_to_epoch(sd.get("resets_at")),
         "scoped": _scoped(j),
     }
+    cache[label] = {"at": now, "usage": usage}  # 성공하면 백오프도 지운다
+    _cache_save(cache)
+    return usage
 
 
 def _scoped(body: dict) -> dict:
