@@ -48,7 +48,7 @@ CHROME_DIR = BASE / "chrome"          # 계정별 전용 크롬 폴더 (git 제�
 LIVE_BACKUP = BASE / "creds" / "prev" / "_before_relogin.json"  # 되돌릴 자격 임시 보관
 CREDS_DIR = BASE / "creds"
 ACCOUNTS = BASE / "accounts.json"
-BASE_PORT = 9240                       # 기존 크롬들(9222~9233)과 안 겹치게
+BASE_PORT = 9250                       # 9240대는 백도씨·아임웹 크롬(9241)과 겹쳐 9250대로 옮김(2026-09-06)
 CALLBACK_HOST = "platform.claude.com"
 LOGIN_TIMEOUT = 900                    # 사람이 로그인해야 할 때 기다리는 시간(초)
 
