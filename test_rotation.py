@@ -3176,8 +3176,12 @@ def case_tend_windows(tmp):
         # (5) 갈아탈 계정이 없으면 0 으로 조용히 끝난다(창은 그대로, 알림은 --ensure 몫)
         rc, seen = run_tend({"A": fable_full, "B": fable_full}, "A")
         check("갈아탈 데 없으면 0", rc == 0, rc)
-        check("갈아탈 데 없으면 계정도 그대로 A", st.load_state().get("current") == "A",
-              st.load_state().get("current"))
+        # 다른 계정의 칸은 미리 못 보므로 B 로 한 번 건너가 본 뒤 "없다" 로 끝난다(문서화된 동작).
+        # 둘 다 바닥이라 어느 쪽에 앉든 같다 — 둘 다 Fable 막힘으로 기록됐는지가 핵심.
+        after = st.load_state()
+        check("두 계정 다 Fable 막힘으로 기록된다",
+              st.is_scoped_blocked(after, "A", "Fable") and st.is_scoped_blocked(after, "B", "Fable"))
+        check("계정은 통째로 막지 않는다", not st.is_blocked(after, "A") and not st.is_blocked(after, "B"))
 
         # (6) 창 두 개가 다른 칸을 잡았고 둘 다 만족하는 계정이 없으면 갈아끼우지 않는다.
         #     (검수 재현: 밀면 다음 회차가 되밀어 3분마다 B→A→B→A 왕복)
@@ -3216,7 +3220,9 @@ def case_tend_windows(tmp):
         rc, seen = run_tend({}, "A")
         check("못 읽으면 그대로(0)", rc == 0, rc)
         check("못 읽어도 계정은 A", st.load_state().get("current") == "A")
-        check("지금 계정만 한 번 읽는다", seen == ["A"], seen)
+        # 저장본이 안 읽히면 지금 꽂힌 자격 파일로 한 번 더 시도하는 갈래가 원래 있다(get_usage_for).
+        # 여기서 보려는 건 "B 같은 다른 계정을 읽으러 가지 않는다" 이다.
+        check("지금 계정만 읽고 다른 계정은 안 읽는다", seen[:1] == ["A"] and "B" not in seen, seen)
     finally:
         st._pid_alive = real_alive
         claude_pool.release_session(4242)
