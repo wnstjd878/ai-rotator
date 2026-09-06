@@ -109,7 +109,7 @@ cs    계정별 남은 사용량 보기
 3분마다 `claude_pool.py --tend` 를 돌려 떠 있는 창이 잡은 칸(예: Fable)이 지금 계정에서
 100% 면 갈아끼운다. 창이 없으면 조회도 안 한다. 급하면 다른 터미널에서 `cn` 을 쳐도 같다.
 창이 끝난 뒤의 확인도 haiku 찔러보기(Fable 칸은 못 봄)에 더해 `--ensure` 종료코드(3=갈아탐)를
-본다. Mac 은 아직 주기 작업이 없다(launchd 로 같은 명령을 걸면 된다).
+본다. Mac 은 `~/Library/LaunchAgents/com.user.claude-tend.plist`(저장소에 원본, 180초)가 같은 일을 한다.
 
 Mac 은 Orca 원격 터미널을 켜면 이 셸이 뜬다. 맥에서 `cc` 는 원래 C 컴파일러(`/usr/bin/cc`)라
 등록 전에는 조용히 엉뚱한 게 돌았다. `~/.zshrc` 는 이 저장소 밖이라 백업이 안 되므로

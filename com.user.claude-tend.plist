@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 떠 있는 claude 창의 모델 칸(예: Fable)이 지금 계정에서 바닥나면 다음 구독 계정으로
+         갈아끼운다(claude_pool.py --tend). 창이 없으면 조회 0. Windows 본체의 작업 스케줄러
+         ai-rotator-tend-windows 와 같은 일을 Mac 에서 한다(2026-09-06).
+         설치: cp 이 파일 ~/Library/LaunchAgents/ ; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-tend.plist
+         LaunchAgent 여야 한다(열쇠꾸러미 접근) — Daemon 으로 올리지 말 것. -->
+    <key>Label</key>
+    <string>com.user.claude-tend</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/kwon/projects/ai-rotator/claude_pool.py</string>
+        <string>--tend</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONIOENCODING</key>
+        <string>utf-8</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/kwon/projects/ai-rotator</string>
+    <key>StartInterval</key>
+    <integer>180</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/kwon/.claude/claude-tend-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kwon/.claude/claude-tend-launchd.log</string>
+</dict>
+</plist>
