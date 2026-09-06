@@ -3176,6 +3176,47 @@ def case_tend_windows(tmp):
         # (5) 갈아탈 계정이 없으면 0 으로 조용히 끝난다(창은 그대로, 알림은 --ensure 몫)
         rc, seen = run_tend({"A": fable_full, "B": fable_full}, "A")
         check("갈아탈 데 없으면 0", rc == 0, rc)
+        check("갈아탈 데 없으면 계정도 그대로 A", st.load_state().get("current") == "A",
+              st.load_state().get("current"))
+
+        # (6) 창 두 개가 다른 칸을 잡았고 둘 다 만족하는 계정이 없으면 갈아끼우지 않는다.
+        #     (검수 재현: 밀면 다음 회차가 되밀어 3분마다 B→A→B→A 왕복)
+        opus_full_a = dict(fable_full, scoped={"Fable": {"pct": 100.0, "reset": now + 48 * 3600},
+                                              "Opus": {"pct": 5.0, "reset": now + 48 * 3600}})
+        opus_full_b = dict(fable_free, scoped={"Fable": {"pct": 10.0, "reset": now + 60 * 3600},
+                                              "Opus": {"pct": 100.0, "reset": now + 60 * 3600}})
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B"], "A")
+        s = st.load_state()
+        s["reclaim_at"] = None
+        st.mark_scoped_blocked(s, "B", "Opus", now + 60 * 3600)   # B 의 Opus 는 이미 알려진 바닥
+        st.save_state(s)
+        alive.add("4343")
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None
+        uc.get_usage = lambda path: {"A": opus_full_a, "B": opus_full_b}[Path(path).stem]
+        try:
+            claude_pool.claim_session(4242, model="claude-fable-5-1")
+            claude_pool.claim_session(4343, model="claude-opus-5")
+            outs = []
+            for _ in range(3):
+                outs.append((claude_pool.tend_windows(), st.load_state().get("current")))
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+            claude_pool.release_session(4343)
+            alive.discard("4343")
+        check("둘 다 만족하는 계정이 없으면 한 번도 안 갈아탄다",
+              all(rc == 0 and cur == "A" for rc, cur in outs), outs)
+
+        # (7) 사용량을 못 읽으면 아무것도 안 하고 흔적만 남긴다
+        rc, seen = run_tend({}, "A")
+        check("못 읽으면 그대로(0)", rc == 0, rc)
+        check("못 읽어도 계정은 A", st.load_state().get("current") == "A")
+        check("지금 계정만 한 번 읽는다", seen == ["A"], seen)
     finally:
         st._pid_alive = real_alive
         claude_pool.release_session(4242)

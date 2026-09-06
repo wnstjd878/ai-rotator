@@ -518,7 +518,8 @@ def intended_model(argv=None) -> str | None:
 ENSURE_SWITCHED = 3   # ensure_usable 종료코드: 갈아탔다(0 은 그대로, 2 는 갈아탈 데 없음)
 
 
-def ensure_usable(model: str | None = None, *, bucket: str | None = None) -> int:
+def ensure_usable(model: str | None = None, *, bucket: str | None = None,
+                  keep_windows: bool = False) -> int:
     """켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 다음 계정으로 바꾼다.
 
     선제 전환이 아니다. 잔여가 조금이라도 있으면 그대로 둔다(거절 기반 순환은 그대로).
@@ -530,6 +531,8 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None) -> int
     남은 Opus 몫을 버리게 되므로 **그 칸만 막고** 다음 계정으로 넘긴다.
     Opus 로 켜는데 여유가 있으면 아무것도 안 바뀐다(그 계정 그대로 쓴다).
     `bucket` 을 직접 주면 모델 이름 대신 그 칸을 본다(떠 있는 창의 칸을 그대로 넘길 때).
+    `keep_windows` 면 떠 있는 창의 칸을 다 만족하는 계정이 없을 때 갈아끼우지 않는다(주기
+    작업용). 안 그러면 창끼리 서로 밀어내며 회차마다 왕복한다.
 
     종료코드: 0 그대로 / ENSURE_SWITCHED(3) 갈아탔음 / 2 갈아탈 계정 없음 / 1 교체 실패.
     감싸는 코드(ccauto)가 창이 끝난 뒤 이 값으로 "한도라서 갈아탔다" 를 알아본다 —
@@ -554,7 +557,13 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None) -> int
                 break
             u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
             if not u:
-                break  # 못 읽었으면 그대로 쓴다
+                # 못 읽었으면 그대로 쓴다. 다만 흔적은 남긴다 — 주기 작업은 화면이 없어서
+                # 이 줄이 없으면 "조회가 계속 실패해 기능이 통째로 멈춤" 과 "할 일 없음" 을
+                # 구분할 수 없다(2026-09-06 검수). 값은 실패 종류·응답 번호뿐, 자격은 안 담긴다.
+                log(f"켜기 전 확인: '{cur}' 사용량을 못 읽어 그대로 둔다"
+                    f"(사유={getattr(usage_check, 'last_error', None)}, "
+                    f"응답={getattr(usage_check, 'last_status', None)})")
+                break
             st.note_weekly_reset(state, cur, u.get("weekly_reset"))  # 순서 기준으로 쓰인다
             st.note_usage(state, cur, u)  # 계정 목록 화면에 모델 칸까지 남기려고
             # 진짜 소진(100% 사용)일 때만. bucket 을 주면 그 모델 칸까지 본다.
@@ -573,7 +582,7 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None) -> int
                 until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
                 st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
                                 f"{kind_txt} 한도 소진(켜기 전 확인)")
-            nxt = _pick_or_revive(state, exclude=cur, bucket=bucket)
+            nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows)
             if nxt is None:
                 st.save_state(state)
                 reset_at = st.earliest_reset(state, bucket=bucket)
@@ -623,15 +632,20 @@ def tend_windows() -> int:
     if not buckets:
         print("[창 지키기] 떠 있는 창 없음")
         return 0
-    switched = False
+    switched, stuck = False, []
     for name in buckets:
-        rc = ensure_usable(bucket=name)
+        # keep_windows: 떠 있는 창들을 다 만족하는 계정이 없으면 갈아끼우지 않는다.
+        # 주기 작업이 창을 밀면 다음 회차가 되밀어 왕복한다(검수 재현 2026-09-06).
+        rc = ensure_usable(bucket=name, keep_windows=True)
         if rc == ENSURE_SWITCHED:
             switched = True
             log(f"창 지키기: 떠 있는 창의 {name} 칸이 바닥나 계정을 갈아끼웠다")
         elif rc == 2:
+            stuck.append(name)
             log(f"창 지키기: 떠 있는 창의 {name} 칸이 바닥났지만 갈아탈 계정이 없다")
-    if not switched:
+    if stuck:
+        print(f"[창 지키기] 떠 있는 창의 칸({', '.join(stuck)})이 바닥났지만 갈아탈 계정이 없음")
+    elif not switched:
         print(f"[창 지키기] 떠 있는 창의 칸({', '.join(buckets)}) 그대로 쓸 수 있음")
     return ENSURE_SWITCHED if switched else 0
 
@@ -691,16 +705,23 @@ def _wanted_buckets(state: dict, bucket=None) -> tuple:
     return tuple(names)
 
 
-def _pick_account(state: dict, exclude: str | None, bucket=None):
+def _pick_account(state: dict, exclude: str | None, bucket=None, strict: bool = False):
     """갈아탈 계정 하나. 떠 있는 창의 칸까지 만족하는 계정을 먼저 찾는다.
 
     다 만족하는 계정이 없으면 이번 호출 칸만 보고 고른다 — 봇을 멈추는 것보다 창이
     한 번 밀리는 편이 낫다(밀린 창은 다시 켜면 제자리를 찾는다). 그때는 로그를 남긴다.
+    `strict` 면 그 폴백을 안 한다(None). 주기 작업(--tend)이 쓴다 — 되풀이되는 자리에서
+    창을 밀면 다음 회차가 되밀어 3분마다 왕복한다(2026-09-06 검수 재현: Fable 창 + Opus 창,
+    두 칸을 다 만족하는 계정이 없을 때 B→A→B→A 무한 반복).
     """
     wanted = _wanted_buckets(state, bucket)
     nxt = st.pick_next(state, exclude=exclude, bucket=wanted)
     if nxt is not None or set(wanted) == set(st.bucket_names(bucket)):
         return nxt
+    if strict:
+        claimed = ", ".join(st.claimed_buckets(state)) or "없음"
+        log(f"떠 있는 창의 칸({claimed})까지 만족하는 계정이 없어 갈아끼우지 않습니다(주기 작업).")
+        return None
     nxt = st.pick_next(state, exclude=exclude, bucket=bucket)
     if nxt is not None:
         claimed = ", ".join(st.claimed_buckets(state)) or "없음"
@@ -845,18 +866,18 @@ def sweep_stale_blocks(min_interval: float = 1800) -> list:
     return freed
 
 
-def _pick_or_revive(state: dict, exclude: str | None, bucket=None):
+def _pick_or_revive(state: dict, exclude: str | None, bucket=None, strict: bool = False):
     """갈아탈 계정 하나. 없으면 낡은 칸 막힘을 실제 사용량으로 한 번 검증하고 다시 고른다."""
-    nxt = _pick_account(state, exclude=exclude, bucket=bucket)
+    nxt = _pick_account(state, exclude=exclude, bucket=bucket, strict=strict)
     if nxt is not None:
         return nxt
     # 계정 전체 막힘부터 본다. 식힘 시간이 실제보다 길게 잡혀 있는 경우가 흔하다.
     if _revive_account_blocks(state):
-        nxt = _pick_account(state, exclude=exclude, bucket=bucket)
+        nxt = _pick_account(state, exclude=exclude, bucket=bucket, strict=strict)
     if nxt is not None:
         return nxt
     if _revive_scoped(state, _wanted_buckets(state, bucket)):
-        nxt = _pick_account(state, exclude=exclude, bucket=bucket)
+        nxt = _pick_account(state, exclude=exclude, bucket=bucket, strict=strict)
     return nxt
 
 

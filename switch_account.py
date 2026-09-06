@@ -476,7 +476,19 @@ def switch_file(src: Path, leaving=None, label=None) -> bool:
                 PENDING.unlink(missing_ok=True)
             except Exception:
                 pass
-    shutil.copy2(src, LIVE)
+    # 한 번에 바꿔 끼운다. 떠 있는 창이 요청마다 이 파일을 다시 읽으므로(2026-09-06 부터
+    # 주기 작업이 대화 중에도 갈아끼움) 반쯤 쓰인 파일을 읽는 틈을 없앤다. 바꿔치기가
+    # 안 되는 환경(다른 프로세스가 붙잡고 있는 등)이면 예전대로 덮어쓴다.
+    tmp = LIVE.parent / ("." + LIVE.name + ".swap")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, LIVE)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        shutil.copy2(src, LIVE)
     return True
 
 
