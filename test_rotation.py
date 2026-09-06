@@ -2031,7 +2031,7 @@ def case_scoped_exhausted_message(tmp):
 
     # (3) 문구
     msg = claude_pool._exhausted_message(state, "Fable", "08월 21일 16:00")
-    check("칸이 바닥이라고 말한다", "Fable 칸이 계정 전부 바닥" in msg, msg)
+    check("칸이 바닥이라고 말한다", "Fable 칸이 이 컴퓨터가 쓸 수 있는 계정 전부에서 바닥" in msg, msg)
     check("구독이 통째로 떨어진 것처럼 말하지 않는다", "구독 계정이 전부 한도" not in msg, msg)
     check("받은 사람이 할 수 있는 행동을 적는다", "다른 모델로 켜면" in msg, msg)
 
@@ -2080,7 +2080,7 @@ def case_scoped_exhausted_message(tmp):
 
     check("쓸 계정이 없다고 올린다", raised is not None)
     text = (raised.notify_message or "") if raised else ""
-    check("알림도 칸 소진으로 나간다", "Fable 칸이 계정 전부 바닥" in text, text)
+    check("알림도 칸 소진으로 나간다", "Fable 칸이 이 컴퓨터가 쓸 수 있는 계정 전부에서 바닥" in text, text)
     check("알림 시각이 그 칸이 풀리는 시각",
           raised is not None and raised.reset_at is not None
           and abs(raised.reset_at - fable_b) < 2,
