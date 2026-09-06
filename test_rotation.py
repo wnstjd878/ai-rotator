@@ -2771,8 +2771,7 @@ def case_usage_cache_backoff(tmp):
     상태줄 조회기처럼 최근 성공값을 다시 쓰고, 429 를 받으면 잠시 안 두드린다.
     통신 자체를 가짜로 바꿔 조회 횟수를 센다(진짜 서버·자격은 안 건드린다).
     """
-    print("
-[57] 사용량 조회 캐시 + 429 백오프")
+    print("[57] 사용량 조회 캐시 + 429 백오프")
     import io as _io, urllib.request as _ur, urllib.error as _ue, json as _json
     from pathlib import Path as _P
     import usage_check as uc
