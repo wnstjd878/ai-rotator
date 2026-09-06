@@ -79,6 +79,42 @@ def _cache_save(cache: dict) -> None:
                 pass
 
 
+# 상태줄 조회기(usage_probe.py)가 현재 계정을 이미 180초마다 조회해 여기에 적는다.
+# 순환기가 그 값을 재사용하면 같은 창구(/api/oauth/usage)를 두 번 두드리지 않는다 —
+# 이 두 겹침이 2026-09-06 429 폭주의 원인이었다(tend 켜기 전엔 조회기 하나뿐이라 없었다).
+_PROBE_CACHE = Path.home() / ".claude" / ".usage-cache.json"
+_PROBE_TTL = 200      # 조회기가 적어둔 값을 이 초 안이면 그대로 쓴다(제 조회를 안 한다)
+
+
+def _probe_usage(label: str):
+    """상태줄 조회기가 적어둔 현재 계정 사용량을 순환기 형태로 돌려준다. 없거나 낡거나
+    다른 계정이면 None(그러면 제 조회로 떨어진다). 그 파일은 현재 계정만 적으므로
+    account 가 이 라벨일 때만 쓴다. 세션·주간이 둘 다 없으면(옛 판) 계정 전체 한도를
+    몰라 세션 소진을 놓치므로 안 쓴다."""
+    try:
+        d = json.loads(_PROBE_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if d.get("account") != label:
+        return None
+    if (time.time() - float(d.get("at") or 0)) >= _PROBE_TTL:
+        return None
+    se = d.get("session") or {}
+    wk = d.get("weekly") or {}
+    if se.get("pct") is None and wk.get("pct") is None:
+        return None
+    scoped = {}
+    for row in (d.get("scoped") or []):
+        nm = row.get("name")
+        if nm:
+            scoped[nm] = {"pct": row.get("used_pct"), "reset": row.get("resets_at")}
+    return {
+        "session_pct": se.get("pct"), "session_reset": se.get("reset"),
+        "weekly_pct": wk.get("pct"), "weekly_reset": wk.get("reset"),
+        "scoped": scoped,
+    }
+
+
 def _iso_to_epoch(text):
     if not text:
         return None
@@ -111,6 +147,13 @@ def get_usage(cred_path) -> dict | None:
         last_status = 429
         last_error = "조회 제한(429). 잠시 뒤 다시"
         return None  # 쉬는 중: 통신하지 않는다(멀쩡한 계정을 막지 않게 값도 지어내지 않는다)
+
+    # 상태줄 조회기가 방금 이 계정을 조회해 뒀으면 그 값을 재사용한다(제 조회를 안 해 429 를 피한다).
+    pu = _probe_usage(label)
+    if pu is not None:
+        cache[label] = {"at": now, "usage": pu}
+        _cache_save(cache)
+        return pu
 
     try:
         d = json.load(open(cred_path, encoding="utf-8"))

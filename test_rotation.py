@@ -2846,6 +2846,28 @@ def case_usage_cache_backoff(tmp):
         u6 = uc.get_usage_for(cred, is_current=True)
         check("A 백오프 중엔 살아있는 자격 갈래도 통신 안 함",
               u6 is None and calls["n"] == before, (u6, before, calls["n"]))
+
+        # 조회기(usage_probe) 캐시 재사용: 그 파일에 현재 계정이 신선하게 적혀 있으면
+        # 순환기는 제 조회를 하지 않고 그 값을 쓴다(같은 창구 두 번 안 두드림 = 429 폭주 제거).
+        real_probe = uc._PROBE_CACHE
+        uc._PROBE_CACHE = _P(tmp) / ".usage-cache.json"
+        uc._PROBE_CACHE.write_text(_json.dumps({
+            "at": __import__("time").time(), "account": "P",
+            "scoped": [{"name": "Fable", "used_pct": 12.0, "resets_at": None}],
+            "session": {"pct": 22.0, "reset": None}, "weekly": {"pct": 33.0, "reset": None},
+        }), encoding="utf-8")
+        # 순환기 자기 캐시에는 P 가 없어 미스 → 조회기 캐시로 떨어져야 한다
+        c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
+        c.pop("P", None)
+        uc._CACHE_FILE.write_text(_json.dumps(c), encoding="utf-8")
+        pcred = _P(tmp) / "P.json"
+        pcred.write_text(_json.dumps({"claudeAiOauth": {"accessToken": "z"}}), encoding="utf-8")
+        before = calls["n"]
+        up = uc.get_usage(pcred)
+        check("조회기 캐시가 신선하면 통신 없이 그 값을 쓴다",
+              up is not None and up["session_pct"] == 22.0 and up["weekly_pct"] == 33.0
+              and calls["n"] == before, (up, before, calls["n"]))
+        uc._PROBE_CACHE = real_probe
     finally:
         _ur.urlopen = real_open
         uc._CACHE_FILE = real_cache
