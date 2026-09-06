@@ -4,6 +4,10 @@
       relogin.py 로 자동 갱신한다. 전용 크롬(chrome/<라벨>)에 로그인 세션이 살아 있으면
       사람 손 없이 끝난다(2026-08-18 실측: A 를 3대에서 무인 갱신). 갱신이 실패하거나
       연장 폭이 작으면(크롬 세션이 낡은 신호) 텔레그램으로 사람을 부른다.
+      (2026-09-06) 서버가 CLI 승인 때 재로그인(reauth=1)을 요구하게 바뀌어, 사람 없는
+      아침 실행은 대개 시간 초과로 끝난다. 그래서 알림에 "본체에서 계정당 클릭 1회 →
+      곧바로 Mac·winserver 연달아" 순서를 명령 그대로 담는다(막 로그인한 세션은
+      재인증을 안 물어 나머지 머신은 무인 통과).
 실행 시점: Windows 본체 작업 스케줄러 `ai-rotator-auto-relogin` 매일 09:20
       (본체는 꺼질 수 있는 PC 다 — 놓친 날은 켜진 뒤 곧바로 실행되게 등록했고,
        열쇠 수명 30일 대비 문턱 10일이라 며칠 꺼져 있어도 여유가 크다.)
@@ -96,6 +100,33 @@ def relogin(host: str | None, label: str) -> bool:
     return r.returncode == 0
 
 
+def human_steps(problems: list[tuple]) -> str:
+    """실패 목록을 사람이 그 자리에서 칠 명령 순서로 바꾼다.
+
+    계정별로 묶는다. 본체에서 그 계정을 한 번 클릭해 갱신하면 세션이 신선해져
+    Mac·winserver 는 클릭 없이 통과하므로, 본체 줄을 항상 맨 앞에 둔다(본체가
+    실패 목록에 없어도 넣는다). 12.2: 받은 사람이 복붙만 하면 끝나게 적는다.
+    """
+    by_label: dict[str, list[tuple]] = {}
+    for name, host, label, days in problems:
+        by_label.setdefault(label, []).append((name, host, days))
+    lines = ["구독 계정 자동 갱신이 안 됐습니다. 본체 PowerShell 에서 아래를 순서대로 실행해 주세요.",
+             "(첫 줄을 치면 크롬 창이 뜹니다. 구글 계정 선택에서 그 계정을 한 번 누르면 나머지는 자동입니다.)",
+             "",
+             "cd C:\Users\JUNSEONG\ai-rotator"]
+    for label, items in by_label.items():
+        left = ", ".join(f"{n} {d}일" for n, _, d in items if d is not None)
+        lines.append("")
+        lines.append(f"[{label} 계정] 남은 기간: {left or '확인 불가'}")
+        lines.append(f"python relogin.py {label}")
+        for _, host, _ in items:
+            if host:
+                lines.append(f"python relogin.py --remote {host} {label}")
+    lines += ["", "끝나면 python relogin.py --status 로 남은 일수가 27일 이상인지 보세요."]
+    return "
+".join(lines)
+
+
 def main() -> int:
     dry = "--dry-run" in sys.argv[1:]
     problems: list[str] = []
@@ -127,15 +158,12 @@ def main() -> int:
             else:
                 got = f"{new_days}일" if new_days is not None else "확인 불가"
                 log(f"{name} {label}: 갱신 뒤에도 만료 {got} — 사람 확인 필요")
-                problems.append(f"{name} 의 {label}(만료 {days}일 남음)")
+                problems.append((name, host, label, days))
 
     if problems and not dry:
         # 크롬 세션이 낡으면 relogin 이 붙잡히거나 연장 폭이 작아진다. 사람이 한 번
         # 로그인해 주면 다시 무인으로 돈다. 12.2: 받은 사람이 그 자리에서 할 일을 적는다.
-        notify.send(
-            "구독 계정 자동 갱신이 안 됐습니다: " + ", ".join(problems) + ".\n"
-            "본체에서 `python relogin.py <라벨>` 을 한 번 실행하고, 떠 있는 크롬 창에서 "
-            "그 계정으로 로그인해 주세요. 그 뒤로는 다시 자동으로 갱신됩니다.")
+        notify.send(human_steps(problems))
     log(f"끝. 갱신 {renewed}건, 사람 확인 필요 {len(problems)}건")
     return 0
 
