@@ -296,7 +296,7 @@ def _exhausted_message(state: dict, bucket: str | None, when: str,
             tail = "다른 모델로 켜면 지금도 쓸 수 있습니다."
             if others:
                 tail += " 다만 " + ", ".join(others) + " 칸도 바닥이라 그 모델은 빼야 합니다."
-            return (f"{lead}{bucket} 칸이 계정 전부 바닥입니다(계정 주간은 여유 있음). "
+            return (f"{lead}{bucket} 칸이 이 컴퓨터가 쓸 수 있는 계정 전부에서 바닥입니다(계정 주간은 여유 있음, 다른 컴퓨터의 계정은 별개). "
                     f"{tail} "
                     f"{bucket} 칸이 가장 빨리 풀리는 시각: {when}")
     return f"{lead}구독 계정이 전부 한도에 걸렸습니다. 가장 빨리 풀리는 시각: {when}"
