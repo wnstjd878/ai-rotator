@@ -510,7 +510,10 @@ def intended_model(argv=None) -> str | None:
     return None
 
 
-def ensure_usable(model: str | None = None) -> int:
+ENSURE_SWITCHED = 3   # ensure_usable 종료코드: 갈아탔다(0 은 그대로, 2 는 갈아탈 데 없음)
+
+
+def ensure_usable(model: str | None = None, *, bucket: str | None = None) -> int:
     """켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 다음 계정으로 바꾼다.
 
     선제 전환이 아니다. 잔여가 조금이라도 있으면 그대로 둔다(거절 기반 순환은 그대로).
@@ -521,10 +524,16 @@ def ensure_usable(model: str | None = None) -> int:
     Fable 만 100% 소진인 경우가 실제로 있었고(2026-08-12), 그때 계정을 통째로 막으면
     남은 Opus 몫을 버리게 되므로 **그 칸만 막고** 다음 계정으로 넘긴다.
     Opus 로 켜는데 여유가 있으면 아무것도 안 바뀐다(그 계정 그대로 쓴다).
+    `bucket` 을 직접 주면 모델 이름 대신 그 칸을 본다(떠 있는 창의 칸을 그대로 넘길 때).
+
+    종료코드: 0 그대로 / ENSURE_SWITCHED(3) 갈아탔음 / 2 갈아탈 계정 없음 / 1 교체 실패.
+    감싸는 코드(ccauto)가 창이 끝난 뒤 이 값으로 "한도라서 갈아탔다" 를 알아본다 —
+    haiku 로 찔러보는 확인은 Fable 칸만 바닥난 경우를 못 잡는다(2026-09-06).
     """
     if usage_check is None:
         return 0
-    bucket = usage_check.bucket_for_model(model)
+    if bucket is None:
+        bucket = usage_check.bucket_for_model(model)
     started_from = None   # 처음 쓰던 계정 (알림·안내용)
     first_kind = ""       # 그 계정이 무슨 한도로 막혔는지
     landed = None         # 최종으로 고른 계정
