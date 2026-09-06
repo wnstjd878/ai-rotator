@@ -2835,6 +2835,17 @@ def case_usage_cache_backoff(tmp):
         check("성공 시 백오프가 지워진다", not c["A"].get("backoff_until"), c["A"])
         check("자격 값은 캐시에 안 담긴다",
               "accessToken" not in uc._CACHE_FILE.read_text(encoding="utf-8"))
+
+        # is_current 갈래: 지금 계정(A)이 429 백오프면, 저장 자격이 낡아 살아있는 자격으로
+        # 넘어가더라도 계정 라벨 백오프를 먼저 봐서 통신하지 않는다(폭주 절반 방지 수정).
+        c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
+        c["A"]["backoff_until"] = 9_999_999_999
+        c["A"].pop("usage", None)   # 저장 자격이 낡아 살아있는 자격 갈래로 내려가게 한다
+        uc._CACHE_FILE.write_text(_json.dumps(c), encoding="utf-8")
+        before = calls["n"]
+        u6 = uc.get_usage_for(cred, is_current=True)
+        check("A 백오프 중엔 살아있는 자격 갈래도 통신 안 함",
+              u6 is None and calls["n"] == before, (u6, before, calls["n"]))
     finally:
         _ur.urlopen = real_open
         uc._CACHE_FILE = real_cache

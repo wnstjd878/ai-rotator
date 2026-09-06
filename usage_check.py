@@ -229,9 +229,17 @@ def get_usage_for(cred_path, *, is_current: bool = False,
     if u:
         return u
     if is_current:
-        from pathlib import Path
         live = Path.home() / ".claude" / ".credentials.json"
-        return get_usage(live) if live.exists() else None
+        if not live.exists():
+            return None
+        # 지금 계정이 429 로 쉬는 중이면 살아있는 자격도 두드리지 않는다. 안 그러면 저장 자격이
+        # 쉬는 동안 이 갈래가 .credentials 라는 딴 키로 한 번 더 두드려 폭주가 반만 잡힌다(2026-09-06).
+        ent = _cache_load().get(_label_of(cred_path)) or {}
+        if float(ent.get("backoff_until") or 0) > time.time():
+            globals()["last_status"] = 429
+            globals()["last_error"] = "조회 제한(429). 잠시 뒤 다시"
+            return None
+        return get_usage(live)
     if allow_refresh and last_status == 401:
         why = None
         try:
