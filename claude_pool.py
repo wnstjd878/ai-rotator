@@ -63,6 +63,26 @@ BASE = Path(__file__).resolve().parent
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+
+def _hidden_child_flags() -> int:
+    """창 없는 파이썬(pythonw, 예약 작업 `--tend`) 아래서만 자식 콘솔 창을 숨긴다.
+
+    부모에 콘솔이 없으면 claude·ssh 같은 콘솔 프로그램이 새 콘솔을 만들고, 기본 터미널인
+    Windows Terminal 이 그걸 창으로 띄워 포커스를 가져간다(2026-09-07 사용자 지적).
+    콘솔이 있는 자리(사람 터미널·가로채기 claude_shim)에서는 0 을 돌려줘 동작을 안 바꾼다.
+    """
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+
+        if ctypes.windll.kernel32.GetConsoleWindow():
+            return 0
+    except Exception:
+        return 0
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 import limit_detect  # noqa: E402
 import pool_state as st  # noqa: E402
 import usage_view  # 남은 사용량 표시 글자(지피티 쪽과 한 벌)  # noqa: E402
@@ -137,6 +157,7 @@ def _switch(label: str, leaving: str | None = None) -> bool:
         cmd += ["--from", leaving]
     ret = subprocess.run(
         cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=_hidden_child_flags(),
     )
     if ret.returncode != 0:
         log(f"자격 교체 실패({label}): {(ret.stderr or ret.stdout).strip()[:200]}")
@@ -1800,6 +1821,9 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         used_label = _switch_if_blocked(state, bucket)
 
         try:
+            _hidden = _hidden_child_flags()
+            if _hidden:
+                kwargs.setdefault("creationflags", _hidden)
             proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)
         except Exception:
             raise
