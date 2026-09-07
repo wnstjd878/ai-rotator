@@ -76,7 +76,9 @@ def _hidden_child_flags() -> int:
     try:
         import ctypes
 
-        if ctypes.windll.kernel32.GetConsoleWindow():
+        # 콘솔이 붙어 있으면 GetConsoleCP 가 0 이 아니다. (GetConsoleWindow 는 Claude Code 의
+        # 숨긴 콘솔·ConPTY 아래서 0 을 돌려줘 오판하므로 쓰지 않는다 — 2026-09-07 실측.)
+        if ctypes.windll.kernel32.GetConsoleCP():
             return 0
     except Exception:
         return 0
