@@ -3363,89 +3363,102 @@ def case_tend_windows(tmp):
 
 
 def case_nudge_stalled(tmp):
-    """[57] 한도로 멈춘 창에 이어가라는 메시지를 보낸다 (2026-09-10).
+    """[57] 한도로 멈춘 창에 이어가라는 줄을 넣는다 (2026-09-10).
 
     창은 한도 거절을 받으면 하던 작업을 멈추고 사람 입력을 기다린다. 계정을 갈아끼워도
-    누가 "계속" 을 쳐야 이어졌다. 창끼리 주고받는 메시지 통로로 한 통 보내 이어 가게 한다.
+    누가 "계속" 을 쳐야 이어졌다. 화면을 읽어 멈춘 창을 찾고 입력 칸에 한 줄을 넣는다.
+    화면 예시는 2026-09-10 시험 창에서 실제로 읽은 글자를 본떴다.
     """
     print()
-    print("[57] 한도로 멈춘 창에 이어가라는 메시지를 보낸다")
+    print("[57] 한도로 멈춘 창에 이어가라는 줄을 넣는다")
     import session_nudge as sn
 
+    rule = "─" * 100
+    rule_t = "─" * 90 + " rotator-test ─"
+    status_f = "  JUNSEONG | - | Fable 5.1 | [■□□□□□□□□□] 10% | 남은 5h 95% 내일 1시 재설정"
+    status_o = "  JUNSEONG | - | Opus 5 (1M context) | [■■□□□□□□□□] 18% | 남은 5h 95%"
+    stalled = ["✻ Baked for 1m 10s · done 오후 8:31", "> 안녕, 한 줄로 답해 줘",
+               "  ⎿ \xa0You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+               "✻ Churned for 0s · done 오후 8:32", rule_t, ">", rule, status_f,
+               "  ⏵⏵ bypass permissions on (shift+tab to cycle)"]
+    session_hit = ["● 렌더 이어서 돌립니다",
+                   "  ⎿  You've hit your session limit · resets 1am (Asia/Seoul)",
+                   "● Ran 7 stop hooks",
+                   "  ⎿ \xa0Stop hook error: Failed with non-blocking status code: No stderr output",
+                   "● Remote Control disconnected — run /remote-control to retry",
+                   rule, "❯", rule, status_o]
+    v = sn.parse_screen(stalled)
+    check("Fable 한도 화면 = 멈춤", v["stalled"] and v["input_empty"] and not v["busy"], v)
+    check("상태줄에서 모델을 읽는다", (v["model"] or "").startswith("Fable"), v["model"])
+    v = sn.parse_screen(session_hit)
+    check("세션 한도 + 뒤따르는 부속 줄도 멈춤", v["stalled"] and v["input_empty"], v)
+    after_nudge = session_hit[:5] + ["> " + sn.NUDGE_LINE, rule, "❯", rule, status_o]
+    check("이어가기 줄을 넣은 뒤엔 멈춤 아님(같은 멈춤에 두 번 안 넣는다)",
+          not sn.parse_screen(after_nudge)["stalled"])
+    resumed = session_hit[:5] + ["> " + sn.NUDGE_LINE, "● 12편부터 이어서 렌더합니다",
+                                 rule, "❯", rule, status_o]
+    check("다시 일한 뒤엔 멈춤 아님", not sn.parse_screen(resumed)["stalled"])
+    busy = ["> 작업해", "  ⎿  You've hit your session limit · resets 1am",
+            "* Inferring… (running stop hooks… 5/7 · 16s)", rule, ">", rule, status_o]
+    vb = sn.parse_screen(busy)
+    check("일하는 중이면 멈춤 아님", not vb["stalled"] and vb["busy"], vb)
+    typing = session_hit[:5] + [rule, "❯ 사람이 치는 중", rule, status_o]
+    check("입력 칸에 글자가 있으면 넣지 않는다", not sn.parse_screen(typing)["input_empty"])
+    normal = ["● 끝났습니다", "✻ Worked for 3m · done", rule, "❯", rule, status_o]
+    check("평소 끝난 창은 멈춤 아님", not sn.parse_screen(normal)["stalled"])
+
+    # 판단 흐름(화면 읽기·입력 넣기를 가짜로 바꿔 끼운다)
     home = Path(tmp) / "nudge_home"
     (home / "sessions").mkdir(parents=True, exist_ok=True)
+    state_file = Path(tmp) / "nudge_state.json"
+    now = time.time()
+    screens = {1: {"title": "마광수 강의 편집 변환", "lines": session_hit},
+               2: {"title": "평소 창", "lines": normal},
+               3: {"title": "일하는 창", "lines": busy}}
+    typed = []
+
+    def run(usable=lambda m: True, t=now, typer=None):
+        return sn.nudge_stalled(usable, log=lambda *_: None, now=t, home=home, state_file=state_file,
+                                windows=lambda: [1, 2, 3], reader=lambda ps: screens,
+                                typer=typer or (lambda pid: typed.append(pid) or {"ok": True}),
+                                start_of=lambda pid: 111)
+
+    check("멈춘 창에만 넣는다", run() == ["마광수 강의 편집 변환"] and typed == [1], typed)
+    check("10분 안엔 다시 안 넣는다", run(t=now + 300) == [])
+    check("지금 계정도 막혀 있으면 안 넣는다", run(usable=lambda m: False, t=now + 700) == [])
+    models = []
+    run(usable=lambda m: models.append(m) or False, t=now + 700)
+    check("모델은 화면 상태줄에서 읽어 넘긴다", bool(models) and models[0].startswith("Opus"), models)
+    check("넣기 실패면 넣은 것으로 안 친다",
+          run(t=now + 700, typer=lambda pid: {"ok": False, "why": "그 사이 상태가 바뀜"}) == [])
+    check("다음 회차에 넣는다", run(t=now + 800) == ["마광수 강의 편집 변환"])
+    for i in range(10):
+        run(t=now + 800 + 700 * (i + 1))
+    check(f"하루 {sn.DAY_CAP}통을 넘기지 않는다", typed.count(1) == sn.DAY_CAP, typed.count(1))
+
+    # 등록된 창은 대화 기록도 한도 거절로 끝나 있어야 넣는다
     proj = home / "projects" / sn._slug("C:\\work")
     proj.mkdir(parents=True, exist_ok=True)
-    now = time.time()
+    (home / "sessions" / "9.json").write_text(
+        json.dumps({"pid": 9, "sessionId": "s9", "cwd": "C:\\work"}), encoding="utf-8")
+    tx = proj / "s9.jsonl"
+    tx.write_text(json.dumps({"type": "assistant", "uuid": "a1",
+                              "message": {"model": "claude-opus-5", "content": []}}) + "\n", encoding="utf-8")
+    typed.clear()
 
-    def iso(t):
-        return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+    def run9(sf):
+        return sn.nudge_stalled(lambda m: True, log=lambda *_: None, now=now, home=home,
+                                state_file=Path(tmp) / sf, windows=lambda: [9],
+                                reader=lambda ps: {9: {"title": "등록창", "lines": session_hit}},
+                                typer=lambda pid: typed.append(pid) or {"ok": True}, start_of=lambda pid: 1)
 
-    def write_sess(pid, sid, status="idle", kind="interactive"):
-        (home / "sessions" / f"{pid}.json").write_text(json.dumps({
-            "pid": pid, "sessionId": sid, "cwd": "C:\\work", "kind": kind, "status": status,
-            "messagingSocketPath": f"\\\\.\\pipe\\LOCAL\\cc-msg-{pid:032x}", "name": f"w{pid}"}),
-            encoding="utf-8")
-
-    def write_tx(sid, stalled, at=None, uid="u1"):
-        recs = [{"type": "user", "message": {"role": "user", "content": "작업해"}},
-                {"type": "assistant", "uuid": "a0",
-                 "message": {"model": "claude-opus-5", "content": [{"type": "text", "text": "하는 중"}]}}]
-        if stalled:
-            recs.append({"type": "assistant", "uuid": uid, "isApiErrorMessage": True,
-                         "error": "rate_limit", "timestamp": iso(at if at is not None else now - 60),
-                         "message": {"model": "<synthetic>", "content": [
-                             {"type": "text", "text": "You've hit your session limit"}]}})
-            recs.append({"type": "system", "subtype": "turn_duration"})
-        (proj / f"{sid}.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n",
-                                           encoding="utf-8")
-
-    sent = []
-
-    def sender(target, text):
-        sent.append(target)
-        return None
-
-    state_file = Path(tmp) / "nudge_state.json"
-
-    def run(usable=lambda m: True, t=now, snd=sender):
-        return sn.nudge_stalled(usable, log=lambda *_: None, now=t, home=home,
-                                state_file=state_file, sender=snd, pid_alive=lambda pid: True)
-
-    write_sess(1, "s1"); write_tx("s1", True)
-    write_sess(2, "s2"); write_tx("s2", False)                        # 멀쩡히 끝난 창
-    write_sess(3, "s3", status="busy"); write_tx("s3", True)          # 일하는 중
-    write_sess(4, "s4"); write_tx("s4", True, at=now - 13 * 3600)     # 너무 오래전에 멈춤
-    check("멈춰서 쉬는 창에만 보낸다", run() == ["w1"], sent)
-    check("같은 멈춤엔 다시 안 보낸다", run(t=now + 700) == [])
-    write_tx("s1", True, uid="u2")
-    check("10분 안에 또 멈추면 기다린다", run(t=now + 300) == [])
-    check("10분 지나 새로 멈추면 다시 보낸다", run(t=now + 700) == ["w1"])
-    write_tx("s1", True, uid="u3")
-    check("지금 계정도 막혀 있으면 안 보낸다", run(usable=lambda m: False, t=now + 1400) == [])
-    models = []
-    run(usable=lambda m: models.append(m) or True, t=now + 1400)
-    check("모델은 거절 전 진짜 답변에서 가져온다", models == ["claude-opus-5"], models)
-    write_tx("s1", True, uid="u4")
-    check("보내기 실패면 보낸 것으로 안 친다",
-          run(t=now + 2200, snd=lambda a, b: "OSError(2)") == [])
-    check("다음 회차에 다시 보낸다", run(t=now + 2300) == ["w1"])
-    for k in range(5, 12):
-        write_tx("s1", True, uid=f"u{k}")
-        run(t=now + 2300 + 700 * (k - 4))
-    w1 = "\\\\.\\pipe\\LOCAL\\cc-msg-" + f"{1:032x}"
-    check(f"하루 {sn.DAY_CAP}통을 넘기지 않는다", sent.count(w1) == sn.DAY_CAP, sent.count(w1))
-
-    fr = json.loads(sn.build_frame("\\\\.\\pipe\\LOCAL\\cc-msg-" + "a" * 32, "이어서"))
-    body = fr["message"]["content"]
-    check("받는 쪽 형식(msgV 1, 사용자 차례, 다른 창 표시로 감쌈)",
-          fr["msgV"] == 1 and fr["type"] == "user" and fr["priority"] == "next"
-          and body.startswith("<cross-session-message ") and body.endswith("</cross-session-message>")
-          and "이어서" in body and 'from-name="계정 순환기"' in body, body[:120])
-    check("Mac 주소면 같은 폴더의 소켓 모양으로 적는다",
-          sn._from_addr("/tmp/cc-socks/123.sock").startswith("uds:/tmp/cc-socks/")
-          and sn._from_addr("/tmp/cc-socks/123.sock").endswith(".sock"))
-
+    check("기록은 이어졌는데 화면에 옛 문구만 남았으면 안 넣는다", run9("n2.json") == [] and typed == [])
+    tx.write_text(json.dumps({"type": "assistant", "uuid": "a2", "isApiErrorMessage": True,
+                              "error": "rate_limit",
+                              "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(now - 60)),
+                              "message": {"model": "<synthetic>", "content": []}}) + "\n", encoding="utf-8")
+    check("기록도 한도로 끝났으면 넣는다", run9("n3.json") == ["등록창"])
+    check("이어가기 줄은 한 줄이다(줄바꿈이면 중간에 먼저 보내진다)", "\n" not in sn.NUDGE_LINE)
 
 
 if __name__ == "__main__":
