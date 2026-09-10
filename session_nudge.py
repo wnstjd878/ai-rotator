@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import socket
 import time
@@ -154,7 +155,8 @@ def _from_addr(target: str) -> str:
     tag = hashlib.sha256(b"ai-rotator").hexdigest()[:32]
     if target.startswith("\\\\.\\pipe\\"):
         return f"uds:\\\\.\\pipe\\LOCAL\\cc-msg-{tag}"
-    return f"uds:{os.path.join(os.path.dirname(target), tag[:16] + '.sock')}"
+    # 유닉스 주소는 '/' 로 잇는다(os.path 는 Windows 에서 '\' 를 붙인다)
+    return f"uds:{posixpath.join(posixpath.dirname(target), tag[:16] + '.sock')}"
 
 
 def build_frame(target: str, text: str, from_name: str = FROM_NAME) -> bytes:
