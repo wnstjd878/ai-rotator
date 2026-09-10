@@ -2741,7 +2741,7 @@ def main():
                      case_limit_with_split_cred, case_cred_refresh,
                      case_stale_scoped_block, case_stale_account_block,
                      case_push_fail_alert, case_tend_windows,
-                     case_usage_cache_backoff):
+                     case_usage_cache_backoff, case_nudge_stalled):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -3270,12 +3270,35 @@ def case_tend_windows(tmp):
         check("창 표시는 남아 있다", st.claimed_buckets(after) == ("Fable",),
               st.claimed_buckets(after))
 
-        # (3) 칸에 여유가 있으면 아무것도 안 한다(선제 전환 아님)
-        rc, seen = run_tend({"A": dict(fable_full, scoped={"Fable": {"pct": 97.0, "reset": now + 48 * 3600}}),
+        # (3) 문턱(97%) 아래면 아무것도 안 한다
+        rc, seen = run_tend({"A": dict(fable_full, scoped={"Fable": {"pct": 96.0, "reset": now + 48 * 3600}}),
                              "B": fable_free}, "A")
-        check("97% 면 그대로(0)", rc == 0, rc)
+        check("96% 면 그대로(0)", rc == 0, rc)
         check("계정 그대로 A", st.load_state().get("current") == "A")
         check("조회는 지금 계정 한 번", seen == ["A"], seen)
+
+        # (3-1) 97% 면 거절받기 전에 미리 넘긴다(2026-09-10 사용자 결정: 창은 거절받으면 작업이 멈춘다)
+        rc, seen = run_tend({"A": dict(fable_full, scoped={"Fable": {"pct": 97.0, "reset": now + 48 * 3600}}),
+                             "B": fable_free}, "A")
+        after = st.load_state()
+        check("97% 면 미리 넘긴다(3)", rc == claude_pool.ENSURE_SWITCHED, rc)
+        check("미리 넘겨도 B 로 간다", after.get("current") == "B", after.get("current"))
+        # 세션 97% 로 미리 넘긴 계정은 낡은 막힘 풀기가 되살리면 안 된다(되살리면 되돌림이 끌고 와 왕복)
+        rc, seen = run_tend({"A": dict(fable_free, session_pct=98.0, session_reset=now + 3600),
+                             "B": fable_free}, "A")
+        after = st.load_state()
+        check("세션 98% 도 미리 넘긴다", rc == claude_pool.ENSURE_SWITCHED and after.get("current") == "B",
+              (rc, after.get("current")))
+        claude_pool.usage_check = uc   # run_tend 가 끝나며 비워 두므로 되살리기 판정에 다시 꽂는다
+        try:
+            freed = claude_pool._revive_account_blocks(
+                after, {"A": dict(fable_free, session_pct=98.0)}, probe=False)
+            check("문턱 위 계정은 되살리지 않는다", freed == [] and st.is_blocked(after, "A"), freed)
+            freed = claude_pool._revive_account_blocks(
+                after, {"A": dict(fable_free, session_pct=10.0)}, probe=False)
+            check("세션이 풀리면 되살린다", freed == ["A"], freed)
+        finally:
+            claude_pool.usage_check = None
 
         # (4) 계정 전체 주간이 바닥나도 갈아끼운다(칸보다 먼저 본다)
         rc, seen = run_tend({"A": weekly_full, "B": fable_free}, "A")
@@ -3337,6 +3360,91 @@ def case_tend_windows(tmp):
     finally:
         st._pid_alive = real_alive
         claude_pool.release_session(4242)
+
+
+def case_nudge_stalled(tmp):
+    """[57] 한도로 멈춘 창에 이어가라는 메시지를 보낸다 (2026-09-10).
+
+    창은 한도 거절을 받으면 하던 작업을 멈추고 사람 입력을 기다린다. 계정을 갈아끼워도
+    누가 "계속" 을 쳐야 이어졌다. 창끼리 주고받는 메시지 통로로 한 통 보내 이어 가게 한다.
+    """
+    print()
+    print("[57] 한도로 멈춘 창에 이어가라는 메시지를 보낸다")
+    import session_nudge as sn
+
+    home = Path(tmp) / "nudge_home"
+    (home / "sessions").mkdir(parents=True, exist_ok=True)
+    proj = home / "projects" / sn._slug("C:\\work")
+    proj.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+
+    def iso(t):
+        return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+    def write_sess(pid, sid, status="idle", kind="interactive"):
+        (home / "sessions" / f"{pid}.json").write_text(json.dumps({
+            "pid": pid, "sessionId": sid, "cwd": "C:\\work", "kind": kind, "status": status,
+            "messagingSocketPath": f"\\\\.\\pipe\\LOCAL\\cc-msg-{pid:032x}", "name": f"w{pid}"}),
+            encoding="utf-8")
+
+    def write_tx(sid, stalled, at=None, uid="u1"):
+        recs = [{"type": "user", "message": {"role": "user", "content": "작업해"}},
+                {"type": "assistant", "uuid": "a0",
+                 "message": {"model": "claude-opus-5", "content": [{"type": "text", "text": "하는 중"}]}}]
+        if stalled:
+            recs.append({"type": "assistant", "uuid": uid, "isApiErrorMessage": True,
+                         "error": "rate_limit", "timestamp": iso(at if at is not None else now - 60),
+                         "message": {"model": "<synthetic>", "content": [
+                             {"type": "text", "text": "You've hit your session limit"}]}})
+            recs.append({"type": "system", "subtype": "turn_duration"})
+        (proj / f"{sid}.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n",
+                                           encoding="utf-8")
+
+    sent = []
+
+    def sender(target, text):
+        sent.append(target)
+        return None
+
+    state_file = Path(tmp) / "nudge_state.json"
+
+    def run(usable=lambda m: True, t=now, snd=sender):
+        return sn.nudge_stalled(usable, log=lambda *_: None, now=t, home=home,
+                                state_file=state_file, sender=snd, pid_alive=lambda pid: True)
+
+    write_sess(1, "s1"); write_tx("s1", True)
+    write_sess(2, "s2"); write_tx("s2", False)                        # 멀쩡히 끝난 창
+    write_sess(3, "s3", status="busy"); write_tx("s3", True)          # 일하는 중
+    write_sess(4, "s4"); write_tx("s4", True, at=now - 13 * 3600)     # 너무 오래전에 멈춤
+    check("멈춰서 쉬는 창에만 보낸다", run() == ["w1"], sent)
+    check("같은 멈춤엔 다시 안 보낸다", run(t=now + 700) == [])
+    write_tx("s1", True, uid="u2")
+    check("10분 안에 또 멈추면 기다린다", run(t=now + 300) == [])
+    check("10분 지나 새로 멈추면 다시 보낸다", run(t=now + 700) == ["w1"])
+    write_tx("s1", True, uid="u3")
+    check("지금 계정도 막혀 있으면 안 보낸다", run(usable=lambda m: False, t=now + 1400) == [])
+    models = []
+    run(usable=lambda m: models.append(m) or True, t=now + 1400)
+    check("모델은 거절 전 진짜 답변에서 가져온다", models == ["claude-opus-5"], models)
+    write_tx("s1", True, uid="u4")
+    check("보내기 실패면 보낸 것으로 안 친다",
+          run(t=now + 2200, snd=lambda a, b: "OSError(2)") == [])
+    check("다음 회차에 다시 보낸다", run(t=now + 2300) == ["w1"])
+    for k in range(5, 12):
+        write_tx("s1", True, uid=f"u{k}")
+        run(t=now + 2300 + 700 * (k - 4))
+    w1 = "\\\\.\\pipe\\LOCAL\\cc-msg-" + f"{1:032x}"
+    check(f"하루 {sn.DAY_CAP}통을 넘기지 않는다", sent.count(w1) == sn.DAY_CAP, sent.count(w1))
+
+    fr = json.loads(sn.build_frame("\\\\.\\pipe\\LOCAL\\cc-msg-" + "a" * 32, "이어서"))
+    body = fr["message"]["content"]
+    check("받는 쪽 형식(msgV 1, 사용자 차례, 다른 창 표시로 감쌈)",
+          fr["msgV"] == 1 and fr["type"] == "user" and fr["priority"] == "next"
+          and body.startswith("<cross-session-message ") and body.endswith("</cross-session-message>")
+          and "이어서" in body and 'from-name="계정 순환기"' in body, body[:120])
+    check("Mac 주소면 같은 폴더의 소켓 모양으로 적는다",
+          sn._from_addr("/tmp/cc-socks/123.sock").startswith("uds:/tmp/cc-socks/")
+          and sn._from_addr("/tmp/cc-socks/123.sock").endswith(".sock"))
 
 
 

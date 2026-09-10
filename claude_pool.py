@@ -661,9 +661,43 @@ def tend_windows() -> int:
         buckets = st.claimed_buckets(st.load_state())
     except Exception:
         return 0
+    rc = _tend_claimed(buckets) if buckets else 0
     if not buckets:
         print("[창 지키기] 떠 있는 창 없음")
-        return 0
+    # 미리 넘겨도 한 번에 3% 넘게 쓰면 거절받고 멈춘 창이 생긴다. 그 창에 이어가라고 보낸다.
+    # 창 표시가 없는 창(claude 를 직접 친 창)도 대상이라 창 표시 유무와 따로 돈다.
+    _nudge_stalled_windows()
+    return rc
+
+
+def _usable_now(model) -> bool:
+    """지금 계정으로 그 모델을 쓸 수 있나(미리 넘기는 문턱 아래인가). 못 읽으면 False."""
+    if usage_check is None:
+        return False
+    try:
+        cur = st.load_state().get("current")
+    except Exception:
+        return False
+    if not cur:
+        return False
+    u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
+    if not u:
+        return False
+    return usage_check.which_limit(u, threshold=PREEMPT_PCT,
+                                   bucket=usage_check.bucket_for_model(model)) is None
+
+
+def _nudge_stalled_windows() -> list:
+    """한도로 멈춘 창에 이어가라는 메시지를 보낸다. 실패해도 창 지키기는 멈추지 않는다."""
+    try:
+        import session_nudge
+        return session_nudge.nudge_stalled(_usable_now, log=log)
+    except Exception as e:
+        log(f"이어가기: 확인 중 오류({type(e).__name__})")
+        return []
+
+
+def _tend_claimed(buckets) -> int:
     switched, stuck = False, []
     for name in buckets:
         # keep_windows: 떠 있는 창들을 다 만족하는 계정이 없으면 갈아끼우지 않는다.
