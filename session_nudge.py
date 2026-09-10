@@ -4,23 +4,28 @@
 실행 시점: claude_pool.py --tend 안에서 매번(본체 작업 스케줄러 ai-rotator-tend-windows 3분).
            Mac 에서는 아무것도 안 한다(아래 의도적 미구현).
 입력: 이 PC 에 떠 있는 claude 창들의 화면 글자(콘솔 화면 읽기) + 등록된 창이면 대화 기록 끝부분
-출력: 한도 거절로 멈춘 창의 입력 칸에 "이어서 계속" 한 줄 + Enter.
-      보낸 기록 nudge_state.json, 사람이 읽는 기록 rotator.log.
+출력: 한도 거절로 멈춘 창의 입력 칸에 이어가기 한 줄 + Enter.
+      넣은 기록 nudge_state.json(저장소 제외), 사람이 읽는 기록 rotator.log "이어가기:".
 외부 의존: Windows 콘솔 입력 넣기(AttachConsole + WriteConsoleInputW). 2026-09-10 시험 창에서
-           한글 문장 + Enter 를 넣어 창이 실제로 답하는 것까지 확인했다. 콘솔 창·Windows Terminal
-           탭 둘 다 화면 읽기가 된다.
+           진짜 Fable 한도 멈춤을 만들고 넣기 → 전송까지 확인했다. 콘솔 창·Windows Terminal 탭 둘 다 된다.
+판정 원칙(검수 반영 2026-09-10):
+  - 한도 문구는 오류 표시(⎿)로 시작하는 줄일 때만 인정한다. 답변·도구 결과가 문구를 인용한 건 무시한다.
+  - 그 뒤에 사람 입력(>)이나 새 답변(●)이 없고, 일하는 중 표시가 없고, 입력 칸이 비어 있어야 한다.
+  - 등록 파일은 창 시작 시각(procStart)까지 맞아야 믿고, 믿을 수 있으면 대화 기록도 한도로 끝나 있어야 한다.
+  - 넣은 뒤 입력 칸 내용이 넣은 문장과 똑같을 때만 Enter 를 누른다(사람 글자와 섞였으면 안 누른다).
+  - 이어가기 문장은 "이미 끝났으면 다시 하지 말라" 는 조건을 달아 잘못 넣어도 작업을 되풀이하지 않게 한다.
 의도적 미구현:
   - 창끼리 메시지 통로(~/.claude/sessions 의 messagingSocketPath): 받는 쪽이 보낸 사람이 등록된
     창인지 확인해서, 주기 작업이 보낸 메시지는 전달은 되지만 무시된다(2026-09-10 실측). 게다가
     다른 창에서 띄운 창(자식 표시를 물려받은 창)은 등록 자체가 안 돼 있다.
   - Mac: 콘솔 입력 넣기가 없다(Orca 터미널). 필요하면 따로 설계한다.
-  - 입력 칸에 글자가 있거나 일하는 중인 창, 권한 확인을 기다리는 창은 건드리지 않는다.
-  - 멈춘 지 12시간 넘은 창, 같은 창 10분 안 재발송, 하루 6통 초과는 보내지 않는다.
+  - 멈춤을 처음 본 지 12시간 넘은 창, 같은 창 10분 안 재발송, 하루 6통 초과는 넣지 않는다.
 재시작 정책: 없음(주기 작업 안에서 매번 새로 판단)
 마지막 점검: 2026-09-10
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -38,54 +43,65 @@ NUDGE_FILE = BASE / "nudge_state.json"
 SHELLS = {"powershell.exe", "pwsh.exe", "cmd.exe", "bash.exe", "wsl.exe", "nu.exe"}
 MIN_GAP = 10 * 60                  # 같은 창에 다시 넣기까지 최소 간격
 DAY_CAP = 6                        # 같은 창에 하루 최대
-MAX_AGE = 12 * 3600                # 대화 기록으로 본 멈춤이 이보다 오래됐으면 사람이 일부러 둔 것
+MAX_AGE = 12 * 3600                # 멈춤이 이보다 오래됐으면 사람이 일부러 둔 것으로 본다
 TAIL_BYTES = 512 * 1024
 
 # 한 줄로만 쓴다. 줄바꿈이 들어가면 그 자리에서 먼저 보내진다.
-NUDGE_LINE = ("[계정 순환기 자동 이어가기] 계정 한도로 멈췄던 작업입니다. 남은 계정으로 바꿔 두었으니 "
-              "멈춘 지점부터 그대로 이어서 계속 진행해 주세요.")
+NUDGE_LINE = ("[계정 순환기 자동 이어가기] 한도 오류로 끊긴 작업이 있으면 끊긴 지점부터 이어서 진행하고, "
+              "이미 끝났으면 다시 하지 말고 '이어갈 작업 없음'이라고만 답해 주세요.")
 
-# 실측 문구 두 가지: "You've hit your session limit · resets 7am" /
-# "You've reached your Fable limit. Run /usage-credits to continue ..."
-LIMIT_RE = re.compile(r"You've (?:hit|reached) your\b.{0,60}?\blimit")
+# 실측 문구 두 가지(세션 한도 / 모델 한도). 오류는 '⎿' 로 시작하는 줄에 찍힌다.
+LIMIT_LINE_RE = re.compile(r"^\s*⎿\s+(You've (?:hit|reached) your\b.{0,60}?\blimit)")
+LIMIT_BUCKET_RE = re.compile(r"your (Fable|Opus|Sonnet|Haiku)\b")
 BUSY_RE = re.compile(r"…\s*\(|esc to interrupt", re.I)          # 일하는 중 표시(돌아가는 동사…(초))
 RULE_RE = re.compile(r"^─{20,}")
 MODEL_RE = re.compile(r"\|\s*((?:Fable|Opus|Sonnet|Haiku)[^|]*?)\s*\|")
-# 멈춘 뒤에 붙어도 되는 부속 줄(끝난 뒤 걸린 시간, 끼어드는 스크립트 결과, 요약, 알림)
+# 멈춘 뒤에 붙어도 되는 부속 줄(끝난 뒤 걸린 시간, 끼어드는 스크립트 결과, 알림)
 NOISE_BULLET = re.compile(r"^●\s*(Ran \d+ .*hook|Remote Control|Update installed)", re.I)
 
 
 # ── 화면 판정(순수 함수, 시험 대상) ─────────────────────────────────────────────
 
-def parse_screen(lines: list) -> dict:
-    """창 화면 글자 → {stalled, busy, input_empty, model, limit}.
-
-    화면 아래는 [가로줄] 입력 칸 [가로줄] 상태줄 순서다. 입력 칸 위가 대화 내용이다.
-    멈춤 = 대화 내용에 한도 문구가 있고, 그 뒤로 사람 입력(> 로 시작)이나 새 답변(●)이 없다.
-    이어가기 줄을 넣으면 그 줄이 한도 문구 뒤에 '>' 로 찍히므로 같은 멈춤에 두 번 넣지 않는다.
-    """
+def _split_screen(lines: list):
+    """화면 → (대화 내용, 입력 칸 줄들, 상태줄 이하). 입력 칸 테두리가 안 보이면 None."""
     lines = [str(l).replace("\xa0", " ").rstrip() for l in lines]
     rules = [i for i, l in enumerate(lines) if RULE_RE.match(l.strip())]
-    res = {"stalled": False, "busy": False, "input_empty": False, "model": None, "limit": ""}
     if len(rules) < 2:
-        return res
+        return None
     top, bottom = rules[-2], rules[-1]
-    box = [l.strip() for l in lines[top + 1:bottom]]
-    res["input_empty"] = bool(box) and all(l in ("", ">", "❯") for l in box)
-    for l in lines[bottom + 1:]:
+    return lines[:top], lines[top + 1:bottom], lines[bottom + 1:]
+
+
+def _squash(s: str) -> str:
+    """입력 칸 글자 비교용: 공백·줄바꿈·앞의 '>' 표시를 뺀다(칸 폭에 따라 줄이 접힌다)."""
+    return re.sub(r"\s", "", s or "").lstrip(">❯")
+
+
+def parse_screen(lines: list) -> dict:
+    """창 화면 글자 → {stalled, busy, input_empty, model, limit, limit_bucket, sig}."""
+    res = {"stalled": False, "busy": False, "input_empty": False, "model": None,
+           "limit": "", "limit_bucket": None, "sig": ""}
+    parts = _split_screen(lines)
+    if parts is None:
+        return res
+    history, box, tail = parts
+    res["input_empty"] = bool(box) and all(l.strip() in ("", ">", "❯") for l in box)
+    for l in tail:
         m = MODEL_RE.search(l)
         if m:
             res["model"] = m.group(1)
             break
-    history = lines[:top]
     res["busy"] = any(BUSY_RE.search(l) for l in history[-8:])
     last = None
     for i, l in enumerate(history):
-        if LIMIT_RE.search(l):
+        if LIMIT_LINE_RE.match(l):
             last = i
     if last is None:
         return res
-    res["limit"] = LIMIT_RE.search(history[last]).group(0)
+    res["limit"] = LIMIT_LINE_RE.match(history[last]).group(1)
+    b = LIMIT_BUCKET_RE.search(res["limit"])
+    res["limit_bucket"] = b.group(1) if b else None
+    res["sig"] = hashlib.sha1("\n".join(history[max(0, last - 2):last + 1]).encode("utf-8")).hexdigest()[:16]
     for l in history[last + 1:]:
         s = l.strip()
         if s.startswith((">", "❯", "›")):
@@ -220,7 +236,8 @@ def _console_lines(k) -> list:
         k.CloseHandle(h)
 
 
-def _console_type(k, text: str) -> bool:
+def _console_type(k, text: str) -> dict:
+    """입력 칸에 글자를 넣고, 칸에 그 글자만 보이면 Enter 를 누른다. {ok, why}."""
     import ctypes
     import ctypes.wintypes as wt
 
@@ -236,7 +253,7 @@ def _console_type(k, text: str) -> bool:
 
     k.WriteConsoleInputW.argtypes = [wt.HANDLE, ctypes.POINTER(REC), wt.DWORD, ctypes.POINTER(wt.DWORD)]
 
-    def keys(s):
+    def put(h, s) -> bool:
         recs = []
         for ch in s:
             for down in (True, False):
@@ -244,19 +261,27 @@ def _console_type(k, text: str) -> bool:
                 r.EventType = 1   # KEY_EVENT
                 r.Event.KeyEvent = KEY(down, 1, 0x0D if ch == "\r" else 0, 0, ch, 0)
                 recs.append(r)
-        return (REC * len(recs))(*recs), len(recs)
+        arr = (REC * len(recs))(*recs)
+        n = wt.DWORD()
+        return bool(k.WriteConsoleInputW(h, arr, len(recs), ctypes.byref(n))) and n.value == len(recs)
 
     h = k.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
     try:
-        ok = True
+        if not put(h, text):
+            return {"ok": False, "why": "글자 넣기 실패"}
         # 글자와 Enter 를 나눠 넣는다. 한 번에 넣으면 클로드가 붙여넣기로 보고 Enter 를 줄바꿈으로
-        # 삼킨다(2026-09-10 실측: 75자 문장 끝의 Enter 가 입력 칸 줄바꿈이 됐다, 30자는 됐다).
-        for part, pause in ((text, 0.8), ("\r", 0.0)):
-            arr, cnt = keys(part)
-            n = wt.DWORD()
-            ok = ok and bool(k.WriteConsoleInputW(h, arr, cnt, ctypes.byref(n))) and n.value == cnt
-            time.sleep(pause)
-        return ok
+        # 삼킨다(2026-09-10 실측: 75자 문장 끝의 Enter 가 입력 칸 줄바꿈이 됐다).
+        # 그 사이 사람이 친 글자와 섞였으면 Enter 를 누르지 않는다(검수 반영).
+        want, got = _squash(text), ""
+        for _ in range(6):
+            time.sleep(0.5)
+            parts = _split_screen(_console_lines(k))
+            got = _squash("".join(parts[1])) if parts else ""
+            if got == want:
+                break
+        if got != want:
+            return {"ok": False, "why": "입력 칸 내용이 넣은 문장과 달라 Enter 를 안 눌렀다"}
+        return {"ok": put(h, "\r"), "why": ""}
     finally:
         k.CloseHandle(h)
 
@@ -291,7 +316,7 @@ def _helper_main(argv) -> int:
                 if not (scr["stalled"] and scr["input_empty"]):
                     res = {"ok": False, "why": "그 사이 상태가 바뀜"}
                 else:
-                    res = {"ok": _console_type(k, NUDGE_LINE), "why": ""}
+                    res = _console_type(k, NUDGE_LINE)
             finally:
                 k.FreeConsole()
     Path(out).write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
@@ -349,7 +374,7 @@ def claude_windows() -> list:
 
 
 def _proc_start(pid: int) -> int:
-    """프로세스 시작 시각(번호 재사용 구분용). 못 읽으면 0."""
+    """프로세스 시작 시각(FILETIME, 등록 파일의 procStart 와 같은 단위). 못 읽으면 0."""
     import ctypes
     import ctypes.wintypes as wt
     k = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -374,7 +399,8 @@ def _proc_start(pid: int) -> int:
 
 def _load(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        d = json.loads(path.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -392,7 +418,6 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
 
     `usable(model)` 은 지금 계정으로 그 모델을 쓸 수 있으면 True. 못 쓰면 넣어 봐야 또 멈추므로
     넣지 않는다(다음 회차가 계정이 바뀐 뒤 넣는다).
-    등록된 창(대화 기록이 있는 창)은 기록도 한도 거절로 끝나 있어야 넣는다(두 번 확인).
     """
     if os.name != "nt" and windows is None:
         return []
@@ -401,10 +426,13 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
     if not pids:
         return []
     screens = (reader or (lambda ps: _run_helper(["--read", *map(str, ps)])))(pids) or {}
-    typer = typer or (lambda pid: _run_helper(["--type", str(pid)]) or {"ok": False, "why": "도우미 실패"})
+    typer = typer or (lambda pid: _run_helper(["--type", str(pid)], timeout=45)
+                      or {"ok": False, "why": "도우미 실패"})
     start_of = start_of or _proc_start
     regs = _registered(home)
-    rec = _load(state_file)
+    data = _load(state_file)
+    wins = data.get("windows") if isinstance(data.get("windows"), dict) else {}
+    seen = data.get("seen") if isinstance(data.get("seen"), dict) else {}
     changed, sent, ok_cache = False, [], {}
     for pid in pids:
         got = screens.get(pid) or screens.get(str(pid))
@@ -414,8 +442,19 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
         if not (scr["stalled"] and scr["input_empty"]):
             continue
         name = got.get("title") or str(pid)
-        model = scr["model"]
+        started = start_of(pid)
+        key = f"{pid}:{started}"
+        # 화면에는 멈춘 시각이 없어서 멈춤을 처음 본 때부터 센다(3분마다 보므로 실제와 몇 분 차이)
+        skey = f"{key}|{scr['sig']}"
+        if skey not in seen:
+            seen[skey] = now
+            changed = True
+        if now - float(seen[skey]) > MAX_AGE:
+            continue
+        model = scr["limit_bucket"] or scr["model"]   # 한도 문구에 모델 이름이 있으면 그게 정답
         sess = regs.get(pid)
+        if sess and started and abs(int(sess.get("procStart") or 0) - started) > 20_000_000:
+            sess = None   # 번호만 같은 옛 창의 등록 파일이다(시작 시각이 2초 넘게 다름)
         if sess:
             tp = transcript_path(sess, home)
             if tp is not None:
@@ -424,17 +463,15 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
                     continue    # 화면엔 한도 문구가 남아 있어도 대화는 이미 이어졌다
                 if info["at"] is not None and now - info["at"] > MAX_AGE:
                     continue
-                # 모델은 화면 상태줄이 우선이다. 기록에는 /model 로 바꾸기 전 이름이 남아 있을 수 있다
                 model = model or info.get("model")
-        key = f"{pid}:{start_of(pid)}"
-        r = rec.get(key) or {}
+        r = wins.get(key) or {}
         times = [t for t in (r.get("times") or []) if now - t < 86400]
         if times and now - max(times) < MIN_GAP:
             continue
         if len(times) >= DAY_CAP:
             if not r.get("capped"):
                 log(f"이어가기: '{name}' 창은 오늘 {DAY_CAP}번 넣었는데 또 멈춰 더 넣지 않는다")
-                rec[key] = dict(r, capped=True)
+                wins[key] = dict(r, capped=True)
                 changed = True
             continue
         if model not in ok_cache:
@@ -449,14 +486,15 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
             log(f"이어가기: '{name}' 창에 넣기 실패({res.get('why') or '알 수 없음'})")
             continue
         times.append(now)
-        rec[key] = {"times": times, "name": name}
+        wins[key] = {"times": times, "name": name}
         changed = True
         sent.append(name)
         log(f"이어가기: 한도로 멈춘 '{name}' 창에 이어서 하라고 넣었다 ({scr['limit']}, 모델 {model or '모름'})")
     if changed:
-        rec = {k: v for k, v in rec.items() if any(now - t < 2 * 86400 for t in (v.get("times") or [now]))}
+        wins = {k: v for k, v in wins.items() if any(now - t < 2 * 86400 for t in (v.get("times") or [now]))}
+        seen = {k: v for k, v in seen.items() if now - float(v) < 2 * 86400}
         try:
-            _save(state_file, rec)
+            _save(state_file, {"windows": wins, "seen": seen})
         except OSError as e:
             log(f"이어가기: 넣은 기록 저장 실패({type(e).__name__})")
     return sent

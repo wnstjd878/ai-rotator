@@ -2712,6 +2712,7 @@ def case_pid_alive():
 
 
 def main():
+    os.environ["AIROTATOR_NO_NUDGE"] = "1"   # 창 지키기가 실제 창에 이어가기 줄을 넣지 않게
     real_run = subprocess.run
     real_switch = claude_pool._switch
     real_notify = claude_pool.notify
@@ -3300,6 +3301,33 @@ def case_tend_windows(tmp):
         finally:
             claude_pool.usage_check = None
 
+        # (3-2) 97~100% 인데 갈 곳이 없으면 두 번째 회차부터는 지금 계정만 읽고 끝낸다
+        #       (검수 반영: 3분마다 막음 기록·전 계정 조회를 되풀이했다)
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B"], "A")
+        s = st.load_state()
+        s["reclaim_at"] = None
+        st.save_state(s)
+        seen2 = []
+        full98 = dict(fable_free, session_pct=98.0, session_reset=now + 3600)
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None
+        uc.get_usage = lambda path: (seen2.append(Path(path).stem), full98)[1]
+        try:
+            claude_pool.claim_session(4242, model="claude-fable-5-1")
+            r1 = claude_pool.tend_windows()
+            seen2.clear()
+            r2 = claude_pool.tend_windows()
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+        check("둘 다 97% 넘으면 갈 곳 없음으로 조용히 끝난다", r1 == 0 and r2 == 0, (r1, r2))
+        check("두 번째 회차는 지금 계정 한 번만 읽는다",
+              seen2 == [st.load_state().get("current")], seen2)
+
         # (4) 계정 전체 주간이 바닥나도 갈아끼운다(칸보다 먼저 본다)
         rc, seen = run_tend({"A": weekly_full, "B": fable_free}, "A")
         after = st.load_state()
@@ -3459,6 +3487,46 @@ def case_nudge_stalled(tmp):
                               "message": {"model": "<synthetic>", "content": []}}) + "\n", encoding="utf-8")
     check("기록도 한도로 끝났으면 넣는다", run9("n3.json") == ["등록창"])
     check("이어가기 줄은 한 줄이다(줄바꿈이면 중간에 먼저 보내진다)", "\n" not in sn.NUDGE_LINE)
+
+    # 검수 반영: 한도 문구를 인용만 한 화면은 멈춤이 아니다
+    quoted = ["● 로그를 보니 \"You've hit your session limit\" 문구가 찍혀 있습니다.",
+              "  예전 기록이라 지금은 문제없습니다.", rule, "❯", rule, status_o]
+    check("답변이 한도 문구를 인용하면 멈춤 아님", not sn.parse_screen(quoted)["stalled"])
+    tool_quote = ["● Bash(tail rotator.log)",
+                  "  ⎿  2026-09-10 20:33:03 이어가기: 멈춘 창 (You've reached your Fable limit. Run /usage-credits)",
+                  rule, "❯", rule, status_o]
+    check("도구 결과 한가운데 인용도 멈춤 아님", not sn.parse_screen(tool_quote)["stalled"])
+    check("한도 문구에서 모델 이름을 뽑는다", sn.parse_screen(stalled)["limit_bucket"] == "Fable")
+    check("세션 한도 문구엔 모델 이름이 없다", sn.parse_screen(session_hit)["limit_bucket"] is None)
+
+    # 등록 파일은 창 시작 시각이 맞아야 믿는다(번호 재사용)
+    (home / "sessions" / "9.json").write_text(json.dumps(
+        {"pid": 9, "sessionId": "s9", "cwd": "C:\\work", "procStart": 5_000_000_000}), encoding="utf-8")
+    tx.write_text(json.dumps({"type": "assistant", "uuid": "a3",
+                              "message": {"model": "claude-opus-5", "content": []}}) + "\n", encoding="utf-8")
+
+    def run_reg(sf, start):
+        typed.clear()
+        return sn.nudge_stalled(lambda m: True, log=lambda *_: None, now=now, home=home,
+                                state_file=Path(tmp) / sf, windows=lambda: [9],
+                                reader=lambda ps: {9: {"title": "재사용", "lines": session_hit}},
+                                typer=lambda pid: typed.append(pid) or {"ok": True}, start_of=lambda pid: start)
+
+    check("시작 시각이 다른 등록 파일은 남의 것으로 보고 화면만으로 판단한다", run_reg("n4.json", 1) == ["재사용"])
+    check("시작 시각이 맞으면 기록으로 한 번 더 확인해 막는다", run_reg("n5.json", 5_000_000_000) == [])
+
+    # 12시간 제한은 멈춤을 처음 본 때부터 센다(등록 안 된 창에도 걸린다)
+    sf6 = Path(tmp) / "n6.json"
+    typed.clear()
+
+    def run6(t, usable=lambda m: True):
+        return sn.nudge_stalled(usable, log=lambda *_: None, now=t, home=home, state_file=sf6,
+                                windows=lambda: [7],
+                                reader=lambda ps: {7: {"title": "오래 멈춘 창", "lines": stalled}},
+                                typer=lambda pid: typed.append(pid) or {"ok": True}, start_of=lambda pid: 1)
+
+    run6(now, usable=lambda m: False)      # 처음 본다(계정이 막혀 있어 넣지 않음)
+    check("처음 본 지 12시간 넘은 멈춤엔 안 넣는다", run6(now + 13 * 3600) == [] and typed == [], typed)
 
 
 if __name__ == "__main__":

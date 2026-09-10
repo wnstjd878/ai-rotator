@@ -600,20 +600,33 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
             kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
             if not kind:
                 break
-            if kind.startswith("model:"):
-                # 그 모델만 바닥났다. 계정은 살려 두고 그 칸만 막는다 —
-                # 통째로 막으면 이 계정으로 아직 쓸 수 있는 다른 모델까지 버린다.
-                kind_txt = bucket  # 뒤에 붙는 문구가 '한도 소진' 이라 여기선 이름만
-                until = usage_check.scoped_reset(u, bucket)
-                st.mark_scoped_blocked(state, cur,
-                                       bucket, until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
+            scoped = kind.startswith("model:")
+            # 칸만 찼으면 칸 이름만(뒤에 붙는 문구가 '한도 소진' 이다)
+            kind_txt = bucket if scoped else ("주간" if kind == "weekly" else "세션(5시간)")
+            # 창 지키기(문턱 97)가 지난 회차에 이미 막아 둔 계정이면 막음 기록·전 계정 조회를
+            # 되풀이하지 않고 갈 곳만 조회 없이 다시 본다. 97~100% 구간에서 갈 곳이 없으면
+            # 3분마다 같은 일을 되풀이했다(검수 반영 2026-09-10).
+            already = threshold < 100.0 and (st.is_scoped_blocked(state, cur, bucket) if scoped
+                                              else st.is_blocked(state, cur))
+            if already:
+                nxt = _pick_account(state, exclude=cur, bucket=bucket, strict=keep_windows)
+                if nxt is None:
+                    st.save_state(state)
+                    return 2
             else:
-                kind_txt = "주간" if kind == "weekly" else "세션(5시간)"
-                until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
-                st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
-                                f"{kind_txt} 한도 소진("
-                                + ("창 지키기, 미리 넘김" if threshold < 100.0 else "켜기 전 확인") + ")")
-            nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows)
+                if scoped:
+                    # 그 모델만 바닥났다. 계정은 살려 두고 그 칸만 막는다 —
+                    # 통째로 막으면 이 계정으로 아직 쓸 수 있는 다른 모델까지 버린다.
+                    until = usage_check.scoped_reset(u, bucket)
+                    st.mark_scoped_blocked(state, cur,
+                                           bucket, until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
+                else:
+                    until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
+                    st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
+                                    f"{kind_txt} 한도 소진("
+                                    + ("창 지키기, 미리 넘김" if threshold < 100.0 else "켜기 전 확인") + ")")
+                # 되살리기 기준은 이번 문턱을 따른다: cc 켜기 전(100)은 97~99% 계정도 살려 쓴다
+                nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows, below=threshold)
             if nxt is None:
                 st.save_state(state)
                 reset_at = st.earliest_reset(state, bucket=bucket)
@@ -688,7 +701,9 @@ def _usable_now(model) -> bool:
 
 
 def _nudge_stalled_windows() -> list:
-    """한도로 멈춘 창에 이어가라는 메시지를 보낸다. 실패해도 창 지키기는 멈추지 않는다."""
+    """한도로 멈춘 창에 이어가라는 줄을 넣는다. 실패해도 창 지키기는 멈추지 않는다."""
+    if os.environ.get("AIROTATOR_NO_NUDGE"):
+        return []   # 시험 중엔 실제 창을 건드리지 않는다(검수 반영: 시험이 실제 창 목록을 읽었다)
     try:
         import session_nudge
         return session_nudge.nudge_stalled(_usable_now, log=log)
@@ -796,7 +811,7 @@ def _pick_account(state: dict, exclude: str | None, bucket=None, strict: bool = 
     return nxt
 
 
-def _revive_scoped(state: dict, bucket=None) -> list:
+def _revive_scoped(state: dict, bucket=None, below: float = PREEMPT_PCT) -> list:
     """막힘으로 적어둔 모델 칸 중 **실제로는 다시 열린 칸**을 풀어 준다. 푼 [(계정, 칸)].
 
     막힘 해제 시각은 막던 순간에 조회한 값이라, 그 뒤 실제 한도가 그보다 먼저 풀려도
@@ -829,7 +844,7 @@ def _revive_scoped(state: dict, bucket=None) -> list:
         st.note_weekly_reset(state, label, u.get("weekly_reset"))
         for name in sorted(blocked):
             pct = usage_check.scoped_pct(u, name)
-            if pct is None or pct >= PREEMPT_PCT:
+            if pct is None or pct >= below:
                 continue    # 못 읽었거나 찼다(미리 넘긴 문턱 위도 찬 것으로 본다)
             if st.clear_scoped_bucket(state, label, name):
                 freed.append((label, name))
@@ -839,7 +854,7 @@ def _revive_scoped(state: dict, bucket=None) -> list:
 
 
 def _revive_account_blocks(state: dict, usages: dict | None = None,
-                           probe: bool = True) -> list:
+                           probe: bool = True, below: float = PREEMPT_PCT) -> list:
     """계정 전체 막힘 중 **실제로는 이미 풀린 것**을 푼다. 푼 계정 목록.
 
     막을 때 붙이는 식힘 시간은 고정값(기본 5시간)이라 실제보다 훨씬 길게 잡힌다.
@@ -876,7 +891,7 @@ def _revive_account_blocks(state: dict, usages: dict | None = None,
         wk, se = u.get("weekly_pct"), u.get("session_pct")
         if wk is None or se is None:
             continue
-        if float(wk) >= PREEMPT_PCT or float(se) >= PREEMPT_PCT:
+        if float(wk) >= below or float(se) >= below:
             continue    # 찼거나, 창 지키기가 미리 넘긴 문턱 위다(풀면 되돌림이 도로 끌고 온다)
         if st.clear_account_block(state, label, now):
             freed.append(label)
@@ -932,17 +947,22 @@ def sweep_stale_blocks(min_interval: float = 1800) -> list:
     return freed
 
 
-def _pick_or_revive(state: dict, exclude: str | None, bucket=None, strict: bool = False):
-    """갈아탈 계정 하나. 없으면 낡은 칸 막힘을 실제 사용량으로 한 번 검증하고 다시 고른다."""
+def _pick_or_revive(state: dict, exclude: str | None, bucket=None, strict: bool = False,
+                    below: float = PREEMPT_PCT):
+    """갈아탈 계정 하나. 없으면 낡은 칸 막힘을 실제 사용량으로 한 번 검증하고 다시 고른다.
+
+    `below`: 이 % 미만이면 열린 것으로 보고 되살린다. 창 지키기(97)는 97, cc 켜기 전(100)은 100 —
+    cc 는 97~99% 계정도 쓸 수 있는데 97 로 보면 "갈아탈 계정 없음" 이 된다(검수 반영 2026-09-10).
+    """
     nxt = _pick_account(state, exclude=exclude, bucket=bucket, strict=strict)
     if nxt is not None:
         return nxt
     # 계정 전체 막힘부터 본다. 식힘 시간이 실제보다 길게 잡혀 있는 경우가 흔하다.
-    if _revive_account_blocks(state):
+    if _revive_account_blocks(state, below=below):
         nxt = _pick_account(state, exclude=exclude, bucket=bucket, strict=strict)
     if nxt is not None:
         return nxt
-    if _revive_scoped(state, _wanted_buckets(state, bucket)):
+    if _revive_scoped(state, _wanted_buckets(state, bucket), below=below):
         nxt = _pick_account(state, exclude=exclude, bucket=bucket, strict=strict)
     return nxt
 
