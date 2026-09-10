@@ -101,7 +101,10 @@ def parse_screen(lines: list) -> dict:
     res["limit"] = LIMIT_LINE_RE.match(history[last]).group(1)
     b = LIMIT_BUCKET_RE.search(res["limit"])
     res["limit_bucket"] = b.group(1) if b else None
-    res["sig"] = hashlib.sha1("\n".join(history[max(0, last - 2):last + 1]).encode("utf-8")).hexdigest()[:16]
+    # 멈춤 서명은 한도 문구만으로 만든다. 앞뒤 줄을 섞으면 창 크기가 바뀌어 줄이 다시 접힐 때마다
+    # 새 멈춤으로 보여 "처음 본 시각" 이 초기화된다(재검수). 같은 창의 다음 멈춤과 구분하는 건
+    # 멈춤이 풀리는 순간 기록을 지우는 쪽이 맡는다(nudge_stalled).
+    res["sig"] = hashlib.sha1(_squash(res["limit"]).encode("utf-8")).hexdigest()[:16]
     for l in history[last + 1:]:
         s = l.strip()
         if s.startswith((">", "❯", "›")):
@@ -236,8 +239,8 @@ def _console_lines(k) -> list:
         k.CloseHandle(h)
 
 
-def _console_type(k, text: str) -> dict:
-    """입력 칸에 글자를 넣고, 칸에 그 글자만 보이면 Enter 를 누른다. {ok, why}."""
+def _put(k, h, s: str, vk: int = 0, ctrl: int = 0) -> bool:
+    """입력 칸에 키를 넣는다(누름·뗌 한 쌍씩). `vk`/`ctrl` 은 Ctrl+C 같은 조합키용."""
     import ctypes
     import ctypes.wintypes as wt
 
@@ -252,36 +255,50 @@ def _console_type(k, text: str) -> dict:
         _fields_ = [("EventType", wt.WORD), ("Event", EV)]
 
     k.WriteConsoleInputW.argtypes = [wt.HANDLE, ctypes.POINTER(REC), wt.DWORD, ctypes.POINTER(wt.DWORD)]
+    recs = []
+    for ch in s:
+        for down in (True, False):
+            r = REC()
+            r.EventType = 1   # KEY_EVENT
+            r.Event.KeyEvent = KEY(down, 1, vk or (0x0D if ch == "\r" else 0), 0, ch, ctrl)
+            recs.append(r)
+    arr = (REC * len(recs))(*recs)
+    n = wt.DWORD()
+    return bool(k.WriteConsoleInputW(h, arr, len(recs), ctypes.byref(n))) and n.value == len(recs)
 
-    def put(h, s) -> bool:
-        recs = []
-        for ch in s:
-            for down in (True, False):
-                r = REC()
-                r.EventType = 1   # KEY_EVENT
-                r.Event.KeyEvent = KEY(down, 1, 0x0D if ch == "\r" else 0, 0, ch, 0)
-                recs.append(r)
-        arr = (REC * len(recs))(*recs)
-        n = wt.DWORD()
-        return bool(k.WriteConsoleInputW(h, arr, len(recs), ctypes.byref(n))) and n.value == len(recs)
 
+def _box(k) -> str:
+    """지금 입력 칸 글자(공백·줄바꿈 뺀 것). 테두리가 안 보이면 빈 문자열."""
+    parts = _split_screen(_console_lines(k))
+    return _squash("".join(parts[1])) if parts else ""
+
+
+def _clear_box(k, h) -> bool:
+    """Ctrl+C 로 입력 칸을 비운다(글자가 있을 때만 부른다 — 빈 칸에 두 번 누르면 창이 닫힌다)."""
+    _put(k, h, "\x03", vk=0x43, ctrl=0x0008)   # LEFT_CTRL_PRESSED
+    time.sleep(0.8)
+    return _box(k) == ""
+
+
+def _console_type(k, text: str) -> dict:
+    """입력 칸에 글자를 넣고, 칸에 그 글자만 보이면 Enter 를 누른다. {ok, why}."""
     h = k.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
     try:
-        if not put(h, text):
+        if not _put(k, h, text):
             return {"ok": False, "why": "글자 넣기 실패"}
         # 글자와 Enter 를 나눠 넣는다. 한 번에 넣으면 클로드가 붙여넣기로 보고 Enter 를 줄바꿈으로
         # 삼킨다(2026-09-10 실측: 75자 문장 끝의 Enter 가 입력 칸 줄바꿈이 됐다).
         # 그 사이 사람이 친 글자와 섞였으면 Enter 를 누르지 않는다(검수 반영).
-        want, got = _squash(text), ""
-        for _ in range(6):
+        want = _squash(text)
+        for _ in range(12):          # 화면이 늦게 그려질 수 있어 최대 6초 기다린다
             time.sleep(0.5)
-            parts = _split_screen(_console_lines(k))
-            got = _squash("".join(parts[1])) if parts else ""
-            if got == want:
-                break
-        if got != want:
-            return {"ok": False, "why": "입력 칸 내용이 넣은 문장과 달라 Enter 를 안 눌렀다"}
-        return {"ok": put(h, "\r"), "why": ""}
+            if _box(k) == want:
+                return {"ok": _put(k, h, "\r"), "why": ""}
+        # 끝내 안 맞으면 Enter 대신 입력 칸을 비운다. 안 비우면 나중에 사람이 친 글과 같이 전송되고,
+        # 칸이 차 있어 다음 회차도 손을 못 댄다(재검수 반영).
+        cleared = _box(k) != "" and _clear_box(k, h)
+        return {"ok": False, "why": "입력 칸 내용이 넣은 문장과 달라 Enter 대신 "
+                + ("입력 칸을 비웠다" if cleared else "그대로 뒀다(비우기 실패)")}
     finally:
         k.CloseHandle(h)
 
@@ -434,16 +451,21 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
     wins = data.get("windows") if isinstance(data.get("windows"), dict) else {}
     seen = data.get("seen") if isinstance(data.get("seen"), dict) else {}
     changed, sent, ok_cache = False, [], {}
+    keep = set()   # 처음 본 시각을 남길 창: 지금도 멈춰 있거나 이번에 화면을 못 읽은 창
     for pid in pids:
-        got = screens.get(pid) or screens.get(str(pid))
-        if not got:
-            continue
-        scr = parse_screen(got.get("lines") or [])
-        if not (scr["stalled"] and scr["input_empty"]):
-            continue
-        name = got.get("title") or str(pid)
         started = start_of(pid)
         key = f"{pid}:{started}"
+        got = screens.get(pid) or screens.get(str(pid))
+        if not got:
+            keep.add(key)
+            continue
+        scr = parse_screen(got.get("lines") or [])
+        if not scr["stalled"]:
+            continue    # 멈춤이 풀린 창의 처음 본 시각은 아래에서 지운다(다음 멈춤은 새로 센다)
+        keep.add(key)
+        if not scr["input_empty"]:
+            continue
+        name = got.get("title") or str(pid)
         # 화면에는 멈춘 시각이 없어서 멈춤을 처음 본 때부터 센다(3분마다 보므로 실제와 몇 분 차이)
         skey = f"{key}|{scr['sig']}"
         if skey not in seen:
@@ -490,9 +512,13 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
         changed = True
         sent.append(name)
         log(f"이어가기: 한도로 멈춘 '{name}' 창에 이어서 하라고 넣었다 ({scr['limit']}, 모델 {model or '모름'})")
+    # 처음 본 시각은 멈춤이 풀린 창·닫힌 창 것만 지운다. 나이로 지우면 이틀 넘게 멈춰 둔 창이
+    # 새 멈춤처럼 보여 한 번 들어간다(재검수 반영).
+    pruned = {k: v for k, v in seen.items() if k.split("|", 1)[0] in keep}
+    if pruned != seen:
+        seen, changed = pruned, True
     if changed:
         wins = {k: v for k, v in wins.items() if any(now - t < 2 * 86400 for t in (v.get("times") or [now]))}
-        seen = {k: v for k, v in seen.items() if now - float(v) < 2 * 86400}
         try:
             _save(state_file, {"windows": wins, "seen": seen})
         except OSError as e:

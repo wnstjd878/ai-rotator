@@ -545,6 +545,9 @@ ENSURE_SWITCHED = 3   # ensure_usable 종료코드: 갈아탔다(0 은 그대로
 # 100%(거절 기반)다. 낡은 막힘을 푸는 쪽도 이 문턱을 같이 써야 한다 — 97% 에서 막은 계정을
 # "100% 아니니 열렸다" 로 풀면 되돌림이 도로 끌고 와 3분마다 왕복한다.
 PREEMPT_PCT = 97.0
+# 창 지키기가 이미 막힌 계정에 앉아 있을 때 다른 계정의 낡은 막힘을 확인하는 최소 간격(초).
+# 매 회차 하면 3분마다 전 계정 조회, 아예 안 하면 낡은 칸 막힘이 안 풀려 창이 멈춘다(재검수 2026-09-10).
+TEND_REVIVE_GAP = 1800
 
 
 def ensure_usable(model: str | None = None, *, bucket: str | None = None,
@@ -610,6 +613,11 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                                               else st.is_blocked(state, cur))
             if already:
                 nxt = _pick_account(state, exclude=cur, bucket=bucket, strict=keep_windows)
+                if nxt is None and time.time() - float(state.get("tend_revive_at") or 0) >= TEND_REVIVE_GAP:
+                    # 이 PC 에서 칸 막힘을 예정보다 먼저 푸는 곳은 여기뿐이라 아예 빼면 안 된다
+                    state["tend_revive_at"] = time.time()
+                    nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows,
+                                          below=threshold)
                 if nxt is None:
                     st.save_state(state)
                     return 2
@@ -626,6 +634,8 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                                     f"{kind_txt} 한도 소진("
                                     + ("창 지키기, 미리 넘김" if threshold < 100.0 else "켜기 전 확인") + ")")
                 # 되살리기 기준은 이번 문턱을 따른다: cc 켜기 전(100)은 97~99% 계정도 살려 쓴다
+                if threshold < 100.0:
+                    state["tend_revive_at"] = time.time()   # 방금 확인했으니 30분은 다시 안 본다
                 nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows, below=threshold)
             if nxt is None:
                 st.save_state(state)

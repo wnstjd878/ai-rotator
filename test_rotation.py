@@ -3328,6 +3328,41 @@ def case_tend_windows(tmp):
         check("두 번째 회차는 지금 계정 한 번만 읽는다",
               seen2 == [st.load_state().get("current")], seen2)
 
+        # (3-3) 이미 막힌 계정에 앉아 있어도 30분에 한 번은 다른 계정의 낡은 칸 막힘을 풀어 갈아탄다
+        #       (재검수: 되살리기를 통째로 빼자 이 PC 에선 낡은 칸 막힘을 푸는 곳이 없어졌다)
+        a98 = dict(fable_free, scoped={"Fable": {"pct": 98.0, "reset": now + 3600}})
+
+        def stale_run(revive_at):
+            if st.STATE_FILE.exists():
+                st.STATE_FILE.unlink()
+            setup(tmp, ["A", "B"], "A")
+            s = st.load_state()
+            s["reclaim_at"] = None
+            st.mark_scoped_blocked(s, "A", "Fable", now + 3600)   # 지난 회차가 막아 둠
+            st.mark_scoped_blocked(s, "B", "Fable", now + 7200)   # 낡은 막힘(실제로는 풀려 있음)
+            s["tend_revive_at"] = revive_at
+            st.save_state(s)
+            got_seen = []
+            real_get, real_status = uc.get_usage, uc.last_status
+            install(Fake({x: (0, OK_OUT, "") for x in ("A", "B")}))
+            claude_pool.usage_check = uc
+            uc.last_status = None
+            uc.get_usage = lambda path: (got_seen.append(Path(path).stem),
+                                         {"A": a98, "B": fable_free}[Path(path).stem])[1]
+            try:
+                claude_pool.claim_session(4242, model="claude-fable-5-1")
+                return claude_pool.tend_windows(), st.load_state().get("current"), got_seen
+            finally:
+                uc.get_usage, uc.last_status = real_get, real_status
+                claude_pool.usage_check = None
+
+        rc3, cur3, _ = stale_run(now - 3600)
+        check("30분 지났으면 낡은 칸 막힘을 풀고 갈아탄다",
+              rc3 == claude_pool.ENSURE_SWITCHED and cur3 == "B", (rc3, cur3))
+        rc3, cur3, seen3 = stale_run(now)
+        check("30분 안이면 조회 없이 그대로 둔다", rc3 == 0 and cur3 == "A" and "B" not in seen3,
+              (rc3, cur3, seen3))
+
         # (4) 계정 전체 주간이 바닥나도 갈아끼운다(칸보다 먼저 본다)
         rc, seen = run_tend({"A": weekly_full, "B": fable_free}, "A")
         after = st.load_state()
@@ -3527,6 +3562,25 @@ def case_nudge_stalled(tmp):
 
     run6(now, usable=lambda m: False)      # 처음 본다(계정이 막혀 있어 넣지 않음)
     check("처음 본 지 12시간 넘은 멈춤엔 안 넣는다", run6(now + 13 * 3600) == [] and typed == [], typed)
+    check("이틀이 지나도 계속 멈춰 있으면 처음 본 시각을 지우지 않는다(다시 넣지 않는다)",
+          run6(now + 50 * 3600) == [] and run6(now + 50 * 3600 + 700) == [] and typed == [], typed)
+
+    # 멈춤 서명은 창 크기가 바뀌어 앞 줄이 달라져도 같고, 멈춤이 풀리면 처음 본 시각을 지운다
+    rewrapped = ["● 창 폭이 바뀌어 다르게 접힌 줄", "  이어지는 줄"] + stalled[2:]
+    check("앞 줄이 달라져도 같은 멈춤 서명", sn.parse_screen(rewrapped)["sig"] == sn.parse_screen(stalled)["sig"])
+    sf7 = Path(tmp) / "n7.json"
+    scr7 = {7: {"title": "창7", "lines": stalled}}
+
+    def run7(t, lines):
+        scr7[7]["lines"] = lines
+        return sn.nudge_stalled(lambda m: False, log=lambda *_: None, now=t, home=home, state_file=sf7,
+                                windows=lambda: [7], reader=lambda ps: scr7,
+                                typer=lambda pid: {"ok": True}, start_of=lambda pid: 1)
+
+    run7(now, stalled)
+    check("멈춘 창의 처음 본 시각을 적는다", len(json.loads(sf7.read_text(encoding="utf-8"))["seen"]) == 1)
+    run7(now + 60, normal)
+    check("멈춤이 풀리면 처음 본 시각을 지운다", json.loads(sf7.read_text(encoding="utf-8"))["seen"] == {})
 
 
 if __name__ == "__main__":
