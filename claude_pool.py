@@ -540,12 +540,19 @@ def intended_model(argv=None) -> str | None:
 
 ENSURE_SWITCHED = 3   # ensure_usable 종료코드: 갈아탔다(0 은 그대로, 2 는 갈아탈 데 없음)
 
+# 떠 있는 창을 미리 넘기는 문턱(%). 창은 한도 거절을 받으면 하던 작업이 멈추고 사람 입력을
+# 기다리므로, 거절받기 전에 넘긴다(2026-09-10 사용자 결정). 봇 호출·켜기 전 확인은 그대로
+# 100%(거절 기반)다. 낡은 막힘을 푸는 쪽도 이 문턱을 같이 써야 한다 — 97% 에서 막은 계정을
+# "100% 아니니 열렸다" 로 풀면 되돌림이 도로 끌고 와 3분마다 왕복한다.
+PREEMPT_PCT = 97.0
+
 
 def ensure_usable(model: str | None = None, *, bucket: str | None = None,
-                  keep_windows: bool = False) -> int:
+                  keep_windows: bool = False, threshold: float = 100.0) -> int:
     """켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 다음 계정으로 바꾼다.
 
-    선제 전환이 아니다. 잔여가 조금이라도 있으면 그대로 둔다(거절 기반 순환은 그대로).
+    기본은 선제 전환이 아니다. 잔여가 조금이라도 있으면 그대로 둔다(거절 기반 순환은 그대로).
+    `threshold` 를 낮춰 주면 그 % 에서 미리 넘긴다 — 떠 있는 창 지키기(--tend)만 PREEMPT_PCT 를 준다.
     사용량을 못 읽으면(네트워크 실패 등) 아무것도 안 한다 — 멀쩡한 계정을 막으면 안 되므로.
     전환할 때는 그 계정을 실제 리셋 시각까지 쉬게 표시하므로 세 머신이 같이 건너뛴다.
 
@@ -589,8 +596,8 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                 break
             st.note_weekly_reset(state, cur, u.get("weekly_reset"))  # 순서 기준으로 쓰인다
             st.note_usage(state, cur, u)  # 계정 목록 화면에 모델 칸까지 남기려고
-            # 진짜 소진(100% 사용)일 때만. bucket 을 주면 그 모델 칸까지 본다.
-            kind = usage_check.which_limit(u, threshold=100.0, bucket=bucket)
+            # 기본은 진짜 소진(100% 사용)일 때만. bucket 을 주면 그 모델 칸까지 본다.
+            kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
             if not kind:
                 break
             if kind.startswith("model:"):
@@ -604,7 +611,8 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                 kind_txt = "주간" if kind == "weekly" else "세션(5시간)"
                 until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
                 st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
-                                f"{kind_txt} 한도 소진(켜기 전 확인)")
+                                f"{kind_txt} 한도 소진("
+                                + ("창 지키기, 미리 넘김" if threshold < 100.0 else "켜기 전 확인") + ")")
             nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows)
             if nxt is None:
                 st.save_state(state)
@@ -640,7 +648,8 @@ def tend_windows() -> int:
     끝난 뒤(ccauto)만 봐서, 대화 중에 Fable 이 바닥나면 사람이 cc 를 다시 쳐야 했다.
 
     - 창 표시(session_claims)가 하나도 없으면 아무 조회도 안 한다(봇만 도는 머신에서 공짜).
-    - 창들이 잡은 칸마다 --ensure 와 같은 판정을 한다(100% 소진일 때만, 선제 전환 아님).
+    - 창들이 잡은 칸마다 --ensure 와 같은 판정을 하되 PREEMPT_PCT(97%)에서 미리 넘긴다.
+      100% 에서 넘기면 이미 거절을 받은 뒤라 창의 작업이 멈춘다(2026-09-10 사용자 결정).
       갈아탈 계정은 _wanted_buckets 로 **떠 있는 창들의 칸을 다 만족하는** 곳을 고른다.
     - 사용량 조회는 칸 종류 수만큼(대개 1회). 3분 주기면 상태줄 조회보다 적다.
     - 갈아탔으면 --ensure 가 텔레그램 알림까지 보낸다(따로 안 보낸다).
@@ -659,7 +668,7 @@ def tend_windows() -> int:
     for name in buckets:
         # keep_windows: 떠 있는 창들을 다 만족하는 계정이 없으면 갈아끼우지 않는다.
         # 주기 작업이 창을 밀면 다음 회차가 되밀어 왕복한다(검수 재현 2026-09-06).
-        rc = ensure_usable(bucket=name, keep_windows=True)
+        rc = ensure_usable(bucket=name, keep_windows=True, threshold=PREEMPT_PCT)
         if rc == ENSURE_SWITCHED:
             switched = True
             log(f"창 지키기: 떠 있는 창의 {name} 칸이 바닥나 계정을 갈아끼웠다")
@@ -786,8 +795,8 @@ def _revive_scoped(state: dict, bucket=None) -> list:
         st.note_weekly_reset(state, label, u.get("weekly_reset"))
         for name in sorted(blocked):
             pct = usage_check.scoped_pct(u, name)
-            if pct is None or pct >= 100.0:
-                continue    # 못 읽었거나 진짜로 찼다
+            if pct is None or pct >= PREEMPT_PCT:
+                continue    # 못 읽었거나 찼다(미리 넘긴 문턱 위도 찬 것으로 본다)
             if st.clear_scoped_bucket(state, label, name):
                 freed.append((label, name))
                 log(f"'{label}' 의 {name} 칸이 실제로는 열려 있어 막힘을 풉니다 "
@@ -833,8 +842,8 @@ def _revive_account_blocks(state: dict, usages: dict | None = None,
         wk, se = u.get("weekly_pct"), u.get("session_pct")
         if wk is None or se is None:
             continue
-        if float(wk) >= 100.0 or float(se) >= 100.0:
-            continue    # 진짜로 찼다
+        if float(wk) >= PREEMPT_PCT or float(se) >= PREEMPT_PCT:
+            continue    # 찼거나, 창 지키기가 미리 넘긴 문턱 위다(풀면 되돌림이 도로 끌고 온다)
         if st.clear_account_block(state, label, now):
             freed.append(label)
             log(f"'{label}' 계정이 실제로는 열려 있어 막힘을 풉니다"
