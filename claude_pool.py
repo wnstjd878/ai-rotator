@@ -2060,9 +2060,11 @@ def main():
     if argv[0] == "--tend":
         # 떠 있는 사람 창의 칸이 바닥났으면 갈아끼운다(주기 작업용, 창 없으면 조회 0).
         return tend_windows()
-    if argv[0] in ("--slot-prepare", "--slot-next"):
-        # cc 가 켜기 직전(또는 한도로 끝난 뒤 되켤 때) 부른다. 표준출력에는 자리 폴더 경로만 찍는다
-        # (cc 가 그 줄을 CLAUDE_CONFIG_DIR 로 쓴다). 저장본이 없는 칸이면 아무것도 안 찍는다 = 예전 방식.
+    if argv[0] in ("--slot-prepare", "--slot-check", "--slot-next"):
+        # cc 가 켜기 직전(--slot-prepare: 초기화가 이른 계정으로 되돌리기까지), 창이 끝난 뒤
+        # (--slot-check: 바닥났나만, 되돌리기 없음), 한도로 끝난 뒤 되켤 때(--slot-next) 부른다.
+        # 표준출력에는 자리 폴더 경로만 찍는다(cc 가 그 줄을 CLAUDE_CONFIG_DIR 로 쓴다).
+        # 저장본이 없는 칸이면 아무것도 안 찍는다 = 예전 방식.
         bucket = usage_check.bucket_for_model(intended_model(argv[1:])) if usage_check else None
         if argv[0] == "--slot-next":
             if not (bucket and slot_pool.enabled() and slot_pool.stored_labels(bucket)):
@@ -2071,7 +2073,7 @@ def main():
             if cur:
                 print(str(slot_pool.slot_dir(bucket)))
             return rc
-        rc, path = slot_pool.prepare(bucket)
+        rc, path = slot_pool.prepare(bucket, reclaim=(argv[0] == "--slot-prepare"))
         if path:
             print(path)
         return rc

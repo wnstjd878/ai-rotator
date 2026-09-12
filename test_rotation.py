@@ -2713,6 +2713,9 @@ def case_pid_alive():
 
 
 def main():
+    # 자리(slot) 창 안에서 돌리면 CLAUDE_CONFIG_DIR 이 살아 있어 claim_session 이 모든 표시에
+    # slot 을 붙인다. 그러면 공용 계정 선택 시험 18건이 통째로 깨진다(2026-09-12 실측).
+    os.environ.pop("CLAUDE_CONFIG_DIR", None)
     os.environ["AIROTATOR_NO_NUDGE"] = "1"   # 창 지키기가 실제 창에 이어가기 줄을 넣지 않게
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -3744,6 +3747,54 @@ def case_slot_pool(tmp):
         check("자리 창의 모델 사용 가능 판단 = 자리 계정(C, Fable 바닥) → False",
               sp.usable_now("Fable", claude_pool.PREEMPT_PCT) is False)
         check("자리에 창이 없는 칸은 None(공용 판단으로)", sp.usable_now("Opus", claude_pool.PREEMPT_PCT) is None)
+        # (8) 켤 때 되돌리기(2026-09-12): Opus 자리가 B 인데 A 의 주간 초기화가 더 이르고 Opus 가 남았으면 A 로
+        a_soon = dict(free, weekly_reset=now + 6 * 3600)
+        table.update({"A": a_soon, "B": dict(free, weekly_reset=now + 72 * 3600),
+                      "C": dict(free, weekly_reset=now + 96 * 3600)})
+        with st.with_lock():
+            s2 = st.load_state()
+            sp.switch(s2, "Opus", "B", "시험")
+            st.save_state(s2)
+        rc, _ = sp.prepare("Opus", reclaim=False)
+        check("창이 끝난 뒤 확인(--slot-check)은 되돌리지 않는다",
+              rc == 0 and sp.slot_current(st.load_state(), "Opus") == "B")
+        rc, _ = sp.prepare("Opus")
+        st_now = st.load_state()
+        check("켤 때 초기화가 이른 A 로 되돌린다(종료코드 0)", rc == 0 and sp.slot_current(st_now, "Opus") == "A",
+              (rc, sp.slot_current(st_now, "Opus")))
+        check("자리 자격 파일이 A 것", sa._obj_fingerprint(sp._load(sp.live_path("Opus"))) == sa._obj_fingerprint(cred("A")))
+        check("Fable 자리는 안 건드린다", sp.slot_current(st_now, "Fable") == "C")
+        # (9) 초기화가 일러도 그 칸이 97% 이상이면 안 옮기고 기록에 막는다
+        with st.with_lock():
+            s2 = st.load_state()
+            sp.switch(s2, "Opus", "B", "시험")
+            st.save_state(s2)
+        table.update({"A": dict(a_soon, scoped={"Fable": {"pct": 100.0, "reset": now + 48 * 3600},
+                                                "Opus": {"pct": 98.0, "reset": now + 6 * 3600}})})
+        rc, _ = sp.prepare("Opus")
+        st_now = st.load_state()
+        check("A 의 Opus 가 98% 면 B 그대로", rc == 0 and sp.slot_current(st_now, "Opus") == "B",
+              (rc, sp.slot_current(st_now, "Opus")))
+        check("A 의 Opus 칸을 기록에 막아 다음 켤 때는 안 읽는다", st.is_scoped_blocked(st_now, "A", "Opus"))
+        # (10) 초기화가 이른 후보의 사용량을 못 읽으면 옮기지 않는다
+        with st.with_lock():
+            s2 = st.load_state()
+            st.note_weekly_reset(s2, "C", now + 3 * 3600)
+            st.save_state(s2)
+        table.update({"C": None})
+        rc, _ = sp.prepare("Opus")
+        st_now = st.load_state()
+        check("C 사용량을 못 읽으면 B 그대로", rc == 0 and sp.slot_current(st_now, "Opus") == "B",
+              (rc, sp.slot_current(st_now, "Opus")))
+        # (11) 지금 계정이 가장 이르면 아무것도 안 읽고 그대로
+        table.update({"C": dict(free, weekly_reset=now + 96 * 3600), "B": dict(free, weekly_reset=now + 1 * 3600)})
+        reads = []
+        orig_get = uc.get_usage
+        uc.get_usage = lambda path: (reads.append(Path(path).stem), orig_get(path))[1]
+        rc, _ = sp.prepare("Opus")
+        uc.get_usage = orig_get
+        check("지금 계정 B 가 가장 이르면 B 그대로, 다른 계정은 안 읽는다",
+              sp.slot_current(st.load_state(), "Opus") == "B" and reads == ["B"], (reads,))
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
          claude_pool.usage_check, st._pid_alive) = real

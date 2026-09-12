@@ -57,7 +57,7 @@ while ($true) {
     # 그래서 사용량 조회(--ensure)를 한 번 더 한다. 종료코드 3 = 그 칸이 바닥나 이미 갈아탔음.
     $switchedAlready = $false
     if (-not $limited) {
-        if ($slotDir) { python $POOL --slot-prepare @runArgs | Out-Null } else { python $POOL --ensure @runArgs }
+        if ($slotDir) { python $POOL --slot-check @runArgs | Out-Null } else { python $POOL --ensure @runArgs }
         if ($LASTEXITCODE -eq 3) { $limited = $true; $switchedAlready = $true }
     }
 

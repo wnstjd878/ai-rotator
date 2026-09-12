@@ -17,6 +17,10 @@
 동작: 자리 폴더의 자격이 그 칸에서 97%(창 지키기) 또는 100%(켜기 전) 이면 그 칸이 남은 다른
       계정 자격으로 갈아끼운다. 갈아끼우기 전에 갱신분을 저장본에 되저장한다. 다른 자리·봇은
       건드리지 않는다. Mac 은 이 기능이 없다(enabled() 가 False → 전부 예전 방식).
+되돌리기(2026-09-12 사용자 요구): cc 로 켤 때 지금 자리 계정이 멀쩡해도 **주간 초기화가 더 이른
+      계정**이 그 칸을 아직 쓸 수 있으면 그쪽으로 옮긴다. 곧 초기화되는 계정의 남은 양은 안 쓰면
+      그냥 사라지므로 그것부터 태운다(공용 자격의 _reclaim_if_better 와 같은 원칙). 켤 때만 한다.
+      창이 끝난 뒤 확인(--slot-check)·창 지키기(tend)·한도로 끝난 뒤(--slot-next)에서는 안 한다.
 의도적 미구현: 창 안에서 /model 로 모델을 바꾼 경우의 자리 이동(자리는 켤 때 정해진다.
       바꾼 모델은 그 자리 계정의 그 칸을 쓴다). 자리 폴더 안 history.jsonl 은 사본이라 갈라진다.
 마지막 점검: 2026-09-12
@@ -321,6 +325,9 @@ def _revive(state: dict, bucket: str, below: float) -> list:
 
 
 ENSURE_SWITCHED = 3
+# 되돌릴 계정의 그 칸 사용량 상한. claude_pool.PREEMPT_PCT(97) 와 같아야 한다. 이보다 높은
+# 계정으로 되돌리면 창 지키기가 3분 안에 도로 밀어내 켤 때마다 왕복한다.
+RECLAIM_MAX_PCT = 97.0
 
 
 def _exhausted_kind(state: dict, cur: str, bucket: str, threshold: float):
@@ -338,17 +345,66 @@ def _exhausted_kind(state: dict, cur: str, bucket: str, threshold: float):
     st.note_weekly_reset(state, cur, u.get("weekly_reset"))
     st.note_usage(state, cur, u)
     kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
-    if kind and not (st.is_scoped_blocked(state, cur, bucket) if kind.startswith("model:")
-                     else st.is_blocked(state, cur)):
-        if kind.startswith("model:"):
-            until = usage_check.scoped_reset(u, bucket)
-            st.mark_scoped_blocked(state, cur, bucket,
-                                   until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
-        else:
-            until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
-            st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
-                            f"{'주간' if kind == 'weekly' else '세션(5시간)'} 한도 소진(자리 {bucket})")
+    _mark_exhausted(state, cur, bucket, kind, u)
     return kind, True
+
+
+def _mark_exhausted(state: dict, label: str, bucket: str, kind, u: dict) -> None:
+    """읽은 사용량이 한도라면 그 종류대로 기록에 막아 둔다(이미 막혀 있으면 그대로)."""
+    if not kind or (st.is_scoped_blocked(state, label, bucket) if kind.startswith("model:")
+                    else st.is_blocked(state, label)):
+        return
+    if kind.startswith("model:"):
+        until = usage_check.scoped_reset(u, bucket)
+        st.mark_scoped_blocked(state, label, bucket,
+                               until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
+    else:
+        until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
+        st.mark_blocked(state, label, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
+                        f"{'주간' if kind == 'weekly' else '세션(5시간)'} 한도 소진(자리 {bucket})")
+
+
+def _earlier_than(state: dict, bucket: str, cur: str, now: float | None = None) -> list:
+    """지금 자리 계정보다 주간 초기화가 이른 계정들(이른 순). 기록상 막힌 것은 뺀다.
+
+    순서는 priority_order 한 벌을 그대로 쓴다(초기화가 이른 것부터, 시각을 모르면 뒤로).
+    지금 계정이 기록상 막혀 있으면 되돌리기가 아니라 일반 교체가 처리하므로 빈 목록.
+    """
+    now = time.time() if now is None else now
+    cands = [l for l in stored_labels(bucket)
+             if not st.is_blocked(state, label=l, now=now)
+             and not st.is_scoped_blocked(state, l, bucket, now)]
+    order = st.priority_order(state, cands, now)
+    if cur not in order:
+        return []
+    return order[:order.index(cur)]
+
+
+def _reclaim(state: dict, bucket: str, cur: str) -> str | None:
+    """켤 때: 초기화가 이른 계정이 그 칸을 아직 쓸 수 있으면 그쪽으로 옮긴다. 옮긴 라벨 또는 None.
+
+    기록만 믿고 옮기지 않는다. 후보의 사용량을 실제로 읽어 그 칸이 RECLAIM_MAX_PCT 미만일 때만
+    옮긴다(막힌 걸 모르고 옮기면 첫 요청부터 거절받고 다시 갈아탄다). 읽은 값이 한도면 기록에
+    막아 두어 다음 켤 때는 안 읽는다. 못 읽은 후보(429 등)는 건너뛰고 그 다음 후보를 본다.
+    """
+    for cand in _earlier_than(state, bucket, cur):
+        u = usage_check.get_usage_for(store_path(bucket, cand), is_current=False)
+        if not u:
+            log(f"자리 {bucket}: 초기화가 이른 '{cand}' 사용량을 못 읽어 되돌리지 않는다"
+                f"(사유={getattr(usage_check, 'last_error', None)})")
+            continue
+        st.note_weekly_reset(state, cand, u.get("weekly_reset"))
+        st.note_usage(state, cand, u)
+        kind = usage_check.which_limit(u, threshold=RECLAIM_MAX_PCT, bucket=bucket)
+        if kind:
+            _mark_exhausted(state, cand, bucket, kind, u)
+            continue
+        # 방금 읽은 초기화 시각으로 다시 견줘 본다(기록이 낡아 앞섰던 것일 수 있다)
+        if st.priority_order(state, [cand, cur])[0] != cand:
+            continue
+        if switch(state, bucket, cand, "주간 초기화가 이른 계정으로 되돌림(켜기 전)"):
+            return cand
+    return None
 
 
 def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: float):
@@ -363,12 +419,16 @@ def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: fl
     return nxt
 
 
-def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False) -> tuple:
+def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
+           reclaim: bool = False) -> tuple:
     """자리의 계정이 그 칸에서 바닥났으면 갈아끼운다. (종료코드, 지금 계정).
 
     종료코드: 0 그대로 / 3 갈아탔음 / 2 갈아탈 데 없음 / 1 교체 실패.
     `threshold` 97 은 창 지키기(거절받기 전에 미리), 100 은 켜기 전 확인.
     `force_next` 면 지금 계정을 두고 무조건 다른 계정으로(창이 한도로 끝난 뒤 되켤 때).
+    `reclaim` 이면(켤 때만) 지금 계정이 멀쩡해도 주간 초기화가 더 이른 계정이 그 칸을 쓸 수
+    있으면 그쪽으로 옮긴다(_reclaim). 이때 종료코드는 0 이다. 3 은 "바닥나서 갈아탔음" 이고
+    cc 는 창이 끝난 뒤 3 을 한도로 본다.
     갈아탄 계정도 바닥일 수 있으므로 쓸 만한 계정이 나올 때까지 이어서 본다(--ensure 와 같은 규율).
     """
     if not enabled() or usage_check is None:
@@ -409,18 +469,24 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False) -> t
                 st.save_state(state)
                 return 1, cur
             cur, switched = nxt, True
+        if reclaim and not switched and cur:
+            got = _reclaim(state, bucket, cur)
+            if got:
+                cur = got
         st.save_state(state)
     return (ENSURE_SWITCHED if switched else 0), cur
 
 
-def prepare(bucket: str | None) -> tuple:
+def prepare(bucket: str | None, reclaim: bool = True) -> tuple:
     """cc 가 켜기 직전에 부른다. (종료코드, 자리 폴더 경로 또는 None).
 
     저장본이 하나도 없는 칸이면 None — cc 는 예전 방식(공용 자격)으로 켠다.
+    `reclaim=False`(--slot-check) 는 창이 끝난 뒤 "바닥났나" 만 보는 길이다. 거기서 되돌리면
+    사람이 창을 닫은 직후에 헛 교체가 생긴다.
     """
     if not enabled() or not bucket or not stored_labels(bucket):
         return 0, None
-    rc, cur = ensure(bucket, threshold=100.0)
+    rc, cur = ensure(bucket, threshold=100.0, reclaim=reclaim)
     if cur is None:
         return rc, None
     ensure_dir(bucket)
