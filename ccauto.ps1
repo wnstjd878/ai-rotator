@@ -16,14 +16,28 @@ $env:AIROTATOR_COLOR = "1"
 # 죽으면 순환기가 알아서 걷어낸다.
 $prevClaimPid = $env:CLAUDE_ROTATOR_CLAIM_PID   # 원래 값(대개 없음)은 끝날 때 되돌린다
 $env:CLAUDE_ROTATOR_CLAIM_PID = "$PID"          # 상태줄이 이 번호의 표시를 갱신한다
+# 모델별 자리(slot, 2026-09-12): 이 창이 쓸 모델의 자리 폴더가 있으면 그 폴더를 CLAUDE_CONFIG_DIR 로
+# 물려준다. 그러면 이 창은 공용 자격이 아니라 그 자리의 자격(그 모델이 남은 계정)을 쓴다.
+# 자리 저장본이 없는 모델이면 아무것도 안 찍히고 예전 방식(공용 자격)으로 켜진다.
+$prevConfigDir = $env:CLAUDE_CONFIG_DIR
+$slotDir = $null
 try {
 while ($true) {
-    # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
-    # (감싸는 코드는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
-    # 인자를 같이 넘긴다 — 그래야 --model 을 보고 그 모델 칸(예: Fable)까지 확인한다.
-    # 인자에 없으면 순환기가 settings.json 에 고정된 모델을 대신 본다.
-    python $POOL --ensure @runArgs
+    if ($null -eq $slotDir) {
+        $slotOut = (python $POOL --slot-prepare @runArgs | Out-String).Trim()
+        if ($slotOut) { $slotDir = $slotOut.Split("`n")[-1].Trim() }
+    }
+    if ($slotDir) {
+        $env:CLAUDE_CONFIG_DIR = $slotDir
+    } else {
+        # 켜기 직전 확인. 지금 계정이 이미 다 찼으면 켜기 전에 갈아끼운다.
+        # (감싸는 코드는 claude 가 끝난 뒤에만 한도를 볼 수 있어서, 이게 없으면 다 찬 계정으로 한 번 켜진다)
+        # 인자를 같이 넘긴다 — 그래야 --model 을 보고 그 모델 칸(예: Fable)까지 확인한다.
+        # 인자에 없으면 순환기가 settings.json 에 고정된 모델을 대신 본다.
+        python $POOL --ensure @runArgs
+    }
     # 계정이 정해진 뒤에 이 창의 모델 칸을 표시한다(같은 번호로 다시 부르면 갱신된다).
+    # CLAUDE_CONFIG_DIR 이 자리 폴더면 표시에 자리 이름도 같이 적힌다.
     python $POOL --claim $PID @runArgs
     # 켜기 직전 계정별 사용량을 화면에 먼저 보여준다(사용자 요구 2026-07-29).
     # claude 안에서는 이 값을 볼 수 없어서, 감싸는 코드가 뜨기 전에 찍는 자리가 유일하다.
@@ -43,14 +57,16 @@ while ($true) {
     # 그래서 사용량 조회(--ensure)를 한 번 더 한다. 종료코드 3 = 그 칸이 바닥나 이미 갈아탔음.
     $switchedAlready = $false
     if (-not $limited) {
-        python $POOL --ensure @runArgs
+        if ($slotDir) { python $POOL --slot-prepare @runArgs | Out-Null } else { python $POOL --ensure @runArgs }
         if ($LASTEXITCODE -eq 3) { $limited = $true; $switchedAlready = $true }
     }
 
     if ($limited) {
         Write-Host ""
         Write-Host "[자동순환] 한도 도달 감지 -> 다음 계정으로 전환합니다..." -ForegroundColor Yellow
-        if (-not $switchedAlready) { python $POOL --next @runArgs }
+        if (-not $switchedAlready) {
+            if ($slotDir) { python $POOL --slot-next @runArgs | Out-Null } else { python $POOL --next @runArgs }
+        }
         # 이어받기 인자가 아직 없고, 사용자가 --resume 으로 특정 대화를 고른 게 아니면 붙인다
         $hasResume = ($runArgs -contains "--continue") -or ($runArgs -contains "-c") -or ($runArgs -contains "--resume") -or ($runArgs -contains "-r")
         if (-not $hasResume) {
@@ -72,6 +88,11 @@ while ($true) {
 }
 } finally {
     python $POOL --unclaim $PID | Out-Null
+    if ($null -eq $prevConfigDir) {
+        Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+    } else {
+        $env:CLAUDE_CONFIG_DIR = $prevConfigDir
+    }
     # 이 값을 남기면 같은 PowerShell 창에서 그 뒤에 claude 를 직접 실행했을 때
     # 가로채기가 남의 번호를 이 창의 것으로 오해한다
     # (2026-08-22 코덱스 검수가 잡음. bash 쪽은 자식 프로세스라 저절로 사라진다).
