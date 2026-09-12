@@ -188,7 +188,8 @@ def launch_chrome(label, open_login=False):
          "--disable-blink-features=AutomationControlled",  # 자동화 티 안 나게
          f"--window-position={80 * idx},{60 * idx}",
          "--window-size=1150,900"]
-        + ([guide_page(label), login_url] if open_login else ["about:blank"]),
+        # 첫 탭은 항상 "이 창은 A 계정" 안내 쪽 — 창이 여러 개 떠도 어느 계정인지 보이게(2026-09-12 사용자 요청)
+        + [guide_page(label)] + ([login_url] if open_login else []),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(30):
@@ -591,6 +592,8 @@ def relogin_slot(label, bucket):
         _sh.copy2(root_cfg, tmp / ".claude.json")
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     env["CLAUDE_CONFIG_DIR"] = str(tmp)
+    # 기본 브라우저(사용자 크롬)에 인증 탭이 하나씩 쌓이지 않게 빈 브라우저를 꽂는다(BROWSER 는 claude 가 존중함, 2026-09-12 실측).
+    env["BROWSER"] = str(BASE / "browser_noop.cmd")
 
     port = launch_chrome(label)
     print(f"[relogin] {bucket} 자리용 '{label}' 로그인을 시작합니다...")
