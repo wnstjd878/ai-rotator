@@ -229,13 +229,16 @@ def claude_cmd(*args):
     return [exe, *args]
 
 
-def start_login():
-    """claude auth login 을 띄우고 (프로세스, 인증주소) 를 돌려준다."""
+def start_login(env=None):
+    """claude auth login 을 띄우고 (프로세스, 인증주소) 를 돌려준다.
+
+    `env` 를 주면 그 환경으로 띄운다(자리 로그인은 CLAUDE_CONFIG_DIR 을 임시 폴더로 준다).
+    """
     p = subprocess.Popen(
         claude_cmd("auth", "login"),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", bufsize=1,
-        cwd=str(BASE), shell=False,
+        cwd=str(BASE), shell=False, env=env,
     )
     url, deadline = None, time.time() + 60
     buf = ""
@@ -557,6 +560,94 @@ def finish_common(p, code, label, before):
     return 0
 
 
+def relogin_slot(label, bucket):
+    """모델별 자리(slot) 전용 자격을 새로 받는다(2026-09-12). creds/slots/<칸>/<라벨>.json 에 저장.
+
+    공용 자격(creds/<라벨>.json)과는 **다른 로그인(다른 재발급 열쇠)** 이어야 한다. 같은 자격을
+    두 곳에 두면 한쪽이 갱신할 때 다른 쪽 열쇠가 폐기된다. 그래서 임시 설정 폴더에서 로그인해
+    그 결과만 옮기고, 지금 쓰는 공용 자격은 전혀 건드리지 않는다.
+    """
+    import os
+    import shutil as _sh
+
+    import slot_pool
+
+    if label not in labels():
+        print(f"[relogin] '{label}' 은 accounts.json 에 없는 라벨입니다. 쓸 수 있는 라벨: {labels()}")
+        return 1
+    if bucket not in slot_pool.BUCKETS:
+        print(f"[relogin] 칸 이름은 {', '.join(slot_pool.BUCKETS)} 중 하나여야 합니다.")
+        return 1
+    from playwright.sync_api import sync_playwright
+
+    import switch_account as sa
+
+    tmp = slot_pool.POOL_ROOT / f"_login_{bucket}_{label}"
+    if tmp.exists():
+        _sh.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    root_cfg = Path.home() / ".claude.json"
+    if root_cfg.exists():  # 첫 실행 안내를 건너뛰게 설정 사본을 심는다(로그인이 계정 정보를 덮어쓴다)
+        _sh.copy2(root_cfg, tmp / ".claude.json")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
+    env["CLAUDE_CONFIG_DIR"] = str(tmp)
+
+    port = launch_chrome(label)
+    print(f"[relogin] {bucket} 자리용 '{label}' 로그인을 시작합니다...")
+    p, url = start_login(env=env)
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = ctx.new_page()
+            code = approve(page, url, p)
+    except Exception as e:
+        p.kill()
+        print(f"[relogin] 브라우저 단계에서 막혔습니다: {type(e).__name__}: {e}")
+        return 1
+    if not code:
+        p.kill()
+        print("[relogin] 인증 코드를 못 받았습니다.")
+        return 1
+    if code == "DONE":
+        try:
+            p.wait(timeout=30)
+        except Exception:
+            pass
+    else:
+        ok, tail = finish_login(p, code)
+        if not ok:
+            print(f"[relogin] 로그인이 끝나지 않았습니다: {tail}")
+            return 1
+    cred = tmp / ".credentials.json"
+    if not cred.exists():
+        try:
+            tail = re.sub(r"code=[^&\s]+", "code=…", (p.stdout.read() or ""))[-400:]
+        except Exception:
+            tail = ""
+        print(f"[relogin] 로그인은 끝났는데 자격 파일이 안 생겼습니다(종료코드 {p.returncode}). 출력 끝: {tail}")
+        return 1
+    email = sa.cred_email(cred)
+    want = expected_email(label)
+    print(f"[relogin] 로그인된 계정: {email or '(못 읽음)'}")
+    if want and email and want.lower() != email.lower():
+        print(f"[relogin] 경고: '{label}' 는 {want} 여야 하는데 {email} 로 로그인됐습니다. 저장하지 않습니다.")
+        _sh.rmtree(tmp, ignore_errors=True)
+        return 1
+    dest = slot_pool.store_path(bucket, label)
+    obj = json.loads(cred.read_text(encoding="utf-8"))
+    sa._write_owner_only(dest, obj)
+    try:  # 계정 표시 정보(이메일 등)는 자리 폴더의 .claude.json 에 맞춰 넣는 용도
+        info = (json.loads((tmp / ".claude.json").read_text(encoding="utf-8")) or {}).get("oauthAccount")
+        if isinstance(info, dict):
+            slot_pool.account_path(bucket, label).write_text(json.dumps(info), encoding="utf-8")
+    except Exception:
+        pass
+    _sh.rmtree(tmp, ignore_errors=True)
+    print(f"[relogin] {bucket} 자리용 '{label}' 자격을 저장했습니다.")
+    return 0
+
+
 URL_MARK = "__RELOGIN_URL__"
 
 
@@ -753,6 +844,11 @@ def main():
             except Exception as e:
                 print(f"[relogin] 폴더를 다 못 지웠습니다({type(e).__name__}). 창이 아직 떠 있을 수 있습니다.")
         return 0
+    if args[0] == "--slot":  # 모델별 자리 전용 자격
+        if len(args) < 3:
+            print("사용법: python relogin.py --slot <Opus|Fable> <라벨>")
+            return 1
+        return relogin_slot(args[2], args[1])
     label = args[0]
     if "--stay" in args:  # 일부러 그 계정으로 갈아타고 싶을 때
         return relogin(label, keep_current=False)

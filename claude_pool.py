@@ -412,6 +412,10 @@ def status_text(model: str | None = None) -> str:
                     f" (그 칸이 막힌 계정으로는 안 넘어갑니다)")
     if not cur:
         tail.append("쓸 계정이 안 정해져 있습니다. --use <라벨> 로 한 번 정해 주세요.")
+    try:
+        tail += [t.strip() for t in slot_pool.status_lines(state)]   # 모델별 자리(창마다 다른 계정)
+    except Exception:
+        pass
     if tail:
         lines.append("")
         lines += ["  " + t for t in tail]
