@@ -3420,6 +3420,62 @@ def case_tend_windows(tmp):
         # 저장본이 안 읽히면 지금 꽂힌 자격 파일로 한 번 더 시도하는 갈래가 원래 있다(get_usage_for).
         # 여기서 보려는 건 "B 같은 다른 계정을 읽으러 가지 않는다" 이다.
         check("지금 계정만 읽고 다른 계정은 안 읽는다", seen[:1] == ["A"] and "B" not in seen, seen)
+
+        # (8) 2026-09-12 실사고 1: 떠 있는 창의 칸 중 하나(Fable)가 **모든 계정**에서 바닥이면
+        #     그 칸은 조건에서 빼고 나머지 칸(Opus)이 남은 계정으로 간다. 그동안은 "Fable 창까지
+        #     만족하는 계정이 없다" 며 Opus 창들이 4시간 넘게 멈춰 있었다.
+        opus_full_a2 = dict(fable_full, session_pct=98.0, session_reset=now + 3600)  # A: Fable 바닥 + 세션 98%
+        opus_free_b2 = dict(fable_full, session_pct=3.0, session_reset=now + 3600)   # B: Fable 바닥, 세션 여유
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B"], "A")
+        s = st.load_state()
+        s["reclaim_at"] = None
+        st.mark_scoped_blocked(s, "A", "Fable", now + 48 * 3600)
+        st.mark_scoped_blocked(s, "B", "Fable", now + 48 * 3600)
+        st.save_state(s)
+        alive.add("4343")
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None
+        uc.get_usage = lambda path: {"A": opus_full_a2, "B": opus_free_b2}[Path(path).stem]
+        try:
+            claude_pool.claim_session(4242, model="claude-fable-5-1")
+            claude_pool.claim_session(4343, model="claude-opus-5")
+            outs = []
+            for _ in range(3):
+                outs.append((claude_pool.tend_windows(), st.load_state().get("current")))
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+            claude_pool.release_session(4343)
+            alive.discard("4343")
+        check("Fable 이 어디서도 안 되면 그 칸은 빼고 Opus 가 남은 B 로 간다",
+              outs[0][0] == claude_pool.ENSURE_SWITCHED and outs[0][1] == "B", outs[0])
+        check("그 뒤로는 B 에 머문다(왕복 없음)", all(cur == "B" and rc == 0 for rc, cur in outs[1:]), outs)
+
+        # (9) 2026-09-12 실사고 2: 사용량 조회가 429 로 실패해도 **기록상 이미 막힌 계정**이면
+        #     그대로 두지 않고 기록으로 갈아탄다(cc 가 막힌 B 를 그대로 켜 첫 요청부터 거절받았다).
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B"], "A")
+        s = st.load_state()
+        s["reclaim_at"] = None
+        st.mark_blocked(s, "A", now + 3600, "세션 한도 소진(시험)")
+        st.save_state(s)
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None
+        uc.get_usage = lambda path: None   # 조회 실패
+        try:
+            rc9 = claude_pool.ensure_usable(model="claude-opus-5")
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+        check("못 읽어도 기록상 막힌 계정이면 갈아탄다(3)", rc9 == claude_pool.ENSURE_SWITCHED, rc9)
+        check("B 로 간다", st.load_state().get("current") == "B", st.load_state().get("current"))
     finally:
         st._pid_alive = real_alive
         claude_pool.release_session(4242)
@@ -3467,6 +3523,17 @@ def case_nudge_stalled(tmp):
     check("일하는 중이면 멈춤 아님", not vb["stalled"] and vb["busy"], vb)
     typing = session_hit[:5] + [rule, "❯ 사람이 치는 중", rule, status_o]
     check("입력 칸에 글자가 있으면 넣지 않는다", not sn.parse_screen(typing)["input_empty"])
+    # 2026-09-12 실측: 새 판 claude 는 한도 뒤에 대기 표시를 ● 로 붙인다. 답변이 아니라 멈춤이다.
+    waiting = ["  Ran 1 shell command",
+               "  ⎿ \xa0You've hit your session limit · resets 1:10pm (Asia/Seoul)",
+               "     Continuing automatically at 1:10pm · esc to cancel",
+               "     /usage-credits to continue now", "",
+               "● Usage limit reached · continuing automatically at 1:10pm · esc or type to cancel", "",
+               "✻ Sautéed for 16m 54s · done 오후 12:52", rule, ">", rule,
+               "  ⚠ Usage limit reached · continuing automatically at 1:10pm · esc to cancel",
+               "  ⚠ /usage-credits to continue now", status_o]
+    vw = sn.parse_screen(waiting)
+    check("'continuing automatically' 대기 표시가 붙어도 멈춤", vw["stalled"] and vw["input_empty"], vw)
     normal = ["● 끝났습니다", "✻ Worked for 3m · done", rule, "❯", rule, status_o]
     check("평소 끝난 창은 멈춤 아님", not sn.parse_screen(normal)["stalled"])
 
