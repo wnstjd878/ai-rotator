@@ -590,31 +590,24 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                 break
             u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
             if not u:
-                # 못 읽었으면 그대로 쓴다. 다만 흔적은 남긴다 — 주기 작업은 화면이 없어서
-                # 이 줄이 없으면 "조회가 계속 실패해 기능이 통째로 멈춤" 과 "할 일 없음" 을
-                # 구분할 수 없다(2026-09-06 검수). 값은 실패 종류·응답 번호뿐, 자격은 안 담긴다.
-                log(f"켜기 전 확인: '{cur}' 사용량을 못 읽어 그대로 둔다"
-                    f"(사유={getattr(usage_check, 'last_error', None)}, "
-                    f"응답={getattr(usage_check, 'last_status', None)})")
-                break
-            st.note_weekly_reset(state, cur, u.get("weekly_reset"))  # 순서 기준으로 쓰인다
-            st.note_usage(state, cur, u)  # 계정 목록 화면에 모델 칸까지 남기려고
-            # 기본은 진짜 소진(100% 사용)일 때만. bucket 을 주면 그 모델 칸까지 본다.
-            kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
-            if not kind:
-                break
-            scoped = kind.startswith("model:")
-            # 칸만 찼으면 칸 이름만(뒤에 붙는 문구가 '한도 소진' 이다)
-            kind_txt = bucket if scoped else ("주간" if kind == "weekly" else "세션(5시간)")
-            # 창 지키기(문턱 97)가 지난 회차에 이미 막아 둔 계정이면 막음 기록·전 계정 조회를
-            # 되풀이하지 않고 갈 곳만 조회 없이 다시 본다. 97~100% 구간에서 갈 곳이 없으면
-            # 3분마다 같은 일을 되풀이했다(검수 반영 2026-09-10).
-            already = threshold < 100.0 and (st.is_scoped_blocked(state, cur, bucket) if scoped
-                                              else st.is_blocked(state, cur))
-            if already:
+                # 못 읽었으면 원칙은 그대로 쓴다(멀쩡한 계정을 막으면 안 되므로). 단 **기록상 이미
+                # 막힌 계정**이면 그대로 두는 게 아니라 기록으로 갈아탄다. 2026-09-12 실사고: B 가
+                # 세션 소진으로 기록돼 있는데 사용량 조회가 429 로 4시간 넘게 실패해 cc 가 "못 읽어
+                # 그대로 둔다" 로 B 를 켰고, 새 창이 첫 요청부터 한도 거절을 받았다.
+                kind = ("model:" + bucket) if (bucket and st.is_scoped_blocked(state, cur, bucket)) else (
+                    "blocked" if st.is_blocked(state, cur) else None)
+                why = (f"사유={getattr(usage_check, 'last_error', None)}, "
+                       f"응답={getattr(usage_check, 'last_status', None)}")
+                if not kind:
+                    # 흔적은 남긴다 — 주기 작업은 화면이 없어서 이 줄이 없으면 "조회가 계속 실패해
+                    # 기능이 통째로 멈춤" 과 "할 일 없음" 을 구분할 수 없다(2026-09-06 검수).
+                    # 값은 실패 종류·응답 번호뿐, 자격은 안 담긴다.
+                    log(f"켜기 전 확인: '{cur}' 사용량을 못 읽어 그대로 둔다({why})")
+                    break
+                log(f"켜기 전 확인: '{cur}' 사용량을 못 읽었지만 기록상 막혀 있어 기록으로 갈아탄다({why})")
+                kind_txt = bucket if kind.startswith("model:") else "계정"
                 nxt = _pick_account(state, exclude=cur, bucket=bucket, strict=keep_windows)
                 if nxt is None and time.time() - float(state.get("tend_revive_at") or 0) >= TEND_REVIVE_GAP:
-                    # 이 PC 에서 칸 막힘을 예정보다 먼저 푸는 곳은 여기뿐이라 아예 빼면 안 된다
                     state["tend_revive_at"] = time.time()
                     nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows,
                                           below=threshold)
@@ -622,28 +615,22 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                     st.save_state(state)
                     return 2
             else:
-                if scoped:
-                    # 그 모델만 바닥났다. 계정은 살려 두고 그 칸만 막는다 —
-                    # 통째로 막으면 이 계정으로 아직 쓸 수 있는 다른 모델까지 버린다.
-                    until = usage_check.scoped_reset(u, bucket)
-                    st.mark_scoped_blocked(state, cur,
-                                           bucket, until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
-                else:
-                    until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
-                    st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
-                                    f"{kind_txt} 한도 소진("
-                                    + ("창 지키기, 미리 넘김" if threshold < 100.0 else "켜기 전 확인") + ")")
-                # 되살리기 기준은 이번 문턱을 따른다: cc 켜기 전(100)은 97~99% 계정도 살려 쓴다
-                if threshold < 100.0:
-                    state["tend_revive_at"] = time.time()   # 방금 확인했으니 30분은 다시 안 본다
-                nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows, below=threshold)
-            if nxt is None:
-                st.save_state(state)
-                reset_at = st.earliest_reset(state, bucket=bucket)
-                when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
-                print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진. 갈아탈 계정이 없습니다. "
-                      + _exhausted_message(state, bucket, when, lead=""))
-                return 2
+                st.note_weekly_reset(state, cur, u.get("weekly_reset"))  # 순서 기준으로 쓰인다
+                st.note_usage(state, cur, u)  # 계정 목록 화면에 모델 칸까지 남기려고
+                # 기본은 진짜 소진(100% 사용)일 때만. bucket 을 주면 그 모델 칸까지 본다.
+                kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
+                if not kind:
+                    break
+                kind_txt = _kind_txt(kind, bucket)
+                nxt = _next_for_exhausted(state, cur, u, kind, bucket=bucket,
+                                          keep_windows=keep_windows, threshold=threshold)
+                if nxt is None:
+                    st.save_state(state)
+                    reset_at = st.earliest_reset(state, bucket=bucket)
+                    when = time.strftime("%m월 %d일 %H:%M", time.localtime(reset_at)) if reset_at else "알 수 없음"
+                    print(f"[켜기 전 확인] '{cur}' {kind_txt} 한도 소진. 갈아탈 계정이 없습니다. "
+                          + _exhausted_message(state, bucket, when, lead=""))
+                    return 2
             if not _switch(nxt, leaving=cur):
                 st.save_state(state)
                 return 1
@@ -660,6 +647,51 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
     print(f"[켜기 전 확인] '{started_from}' {first_kind} 한도 소진 → '{landed}' 계정으로 바꿔서 켭니다.")
     _notify_switch(started_from, landed, "limit", state, bucket)  # 전송은 잠금 밖에서
     return ENSURE_SWITCHED
+
+
+def _kind_txt(kind: str, bucket) -> str:
+    """which_limit 결과를 사람이 읽는 이름으로. 칸만 찼으면 칸 이름만(뒤에 '한도 소진' 이 붙는다)."""
+    if kind.startswith("model:"):
+        return str(bucket)
+    return "주간" if kind == "weekly" else "세션(5시간)"
+
+
+def _next_for_exhausted(state: dict, cur: str, u: dict, kind: str, *, bucket, keep_windows: bool,
+                        threshold: float):
+    """지금 계정이 소진됐을 때(막음 기록 + 갈 곳 고르기). 갈 계정 라벨, 없으면 None.
+
+    ensure_usable 의 잠금 안에서만 부른다. 상태 저장은 부르는 쪽이 한다.
+    """
+    scoped = kind.startswith("model:")
+    kind_txt = _kind_txt(kind, bucket)
+    # 창 지키기(문턱 97)가 지난 회차에 이미 막아 둔 계정이면 막음 기록·전 계정 조회를
+    # 되풀이하지 않고 갈 곳만 조회 없이 다시 본다. 97~100% 구간에서 갈 곳이 없으면
+    # 3분마다 같은 일을 되풀이했다(검수 반영 2026-09-10).
+    already = threshold < 100.0 and (st.is_scoped_blocked(state, cur, bucket) if scoped
+                                      else st.is_blocked(state, cur))
+    if already:
+        nxt = _pick_account(state, exclude=cur, bucket=bucket, strict=keep_windows)
+        if nxt is None and time.time() - float(state.get("tend_revive_at") or 0) >= TEND_REVIVE_GAP:
+            # 이 PC 에서 칸 막힘을 예정보다 먼저 푸는 곳은 여기뿐이라 아예 빼면 안 된다
+            state["tend_revive_at"] = time.time()
+            nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows,
+                                  below=threshold)
+        return nxt
+    if scoped:
+        # 그 모델만 바닥났다. 계정은 살려 두고 그 칸만 막는다 —
+        # 통째로 막으면 이 계정으로 아직 쓸 수 있는 다른 모델까지 버린다.
+        until = usage_check.scoped_reset(u, bucket)
+        st.mark_scoped_blocked(state, cur,
+                               bucket, until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
+    else:
+        until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
+        st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
+                        f"{kind_txt} 한도 소진("
+                        + ("창 지키기, 미리 넘김" if threshold < 100.0 else "켜기 전 확인") + ")")
+    # 되살리기 기준은 이번 문턱을 따른다: cc 켜기 전(100)은 97~99% 계정도 살려 쓴다
+    if threshold < 100.0:
+        state["tend_revive_at"] = time.time()   # 방금 확인했으니 30분은 다시 안 본다
+    return _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows, below=threshold)
 
 
 def tend_windows() -> int:
@@ -796,6 +828,17 @@ def _wanted_buckets(state: dict, bucket=None) -> tuple:
     return tuple(names)
 
 
+def _dead_everywhere(state: dict, buckets) -> set:
+    """그 칸들 중 **살아 있는 계정 전부**(지금 계정 포함)에서 막힌 칸. 기록만 본다(조회 없음)."""
+    now = time.time()
+    labels = [l for l in st.usable_labels() if not st.is_blocked(state, label=l, now=now)]
+    out = set()
+    for name in st.bucket_names(buckets):
+        if all(st.is_scoped_blocked(state, l, name, now) for l in labels):
+            out.add(name)
+    return out
+
+
 def _pick_account(state: dict, exclude: str | None, bucket=None, strict: bool = False):
     """갈아탈 계정 하나. 떠 있는 창의 칸까지 만족하는 계정을 먼저 찾는다.
 
@@ -809,6 +852,20 @@ def _pick_account(state: dict, exclude: str | None, bucket=None, strict: bool = 
     nxt = st.pick_next(state, exclude=exclude, bucket=wanted)
     if nxt is not None or set(wanted) == set(st.bucket_names(bucket)):
         return nxt
+    # 떠 있는 창의 칸 중 **어느 계정에서도 못 쓰는 칸**은 조건에서 뺀다. 2026-09-12 실사고:
+    # Fable 이 네 계정 모두 바닥난 채로 Opus 창 여러 개가 떠 있었는데, "Fable 창까지 만족하는
+    # 계정이 없다" 며 4시간 넘게 아무것도 안 갈아끼웠다. Opus 는 C·D 에 100% 남아 있었다.
+    # 그 칸은 어디로 가도 못 쓰니 빼도 창끼리 밀어내는 왕복이 안 생긴다(각 칸을 서로 다른
+    # 계정만 만족하는 경우는 그대로 strict 다). 지금 계정만 그 칸을 쓸 수 있으면 빼지 않는다 —
+    # 일하는 창을 밀면서까지 다른 창을 살리지는 않는다.
+    dead = _dead_everywhere(state, wanted)
+    if dead and not (dead & set(st.bucket_names(bucket))):
+        trimmed = tuple(n for n in wanted if n not in dead)
+        nxt = st.pick_next(state, exclude=exclude, bucket=trimmed)
+        if nxt is not None:
+            log(f"떠 있는 창의 칸 중 {', '.join(sorted(dead))} 은 어느 계정에서도 못 써서 빼고 "
+                f"'{nxt}' 로 갑니다(나머지 칸 {', '.join(trimmed) or '없음'} 은 만족).")
+            return nxt
     if strict:
         claimed = ", ".join(st.claimed_buckets(state)) or "없음"
         log(f"떠 있는 창의 칸({claimed})까지 만족하는 계정이 없어 갈아끼우지 않습니다(주기 작업).")

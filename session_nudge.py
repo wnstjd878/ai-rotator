@@ -57,7 +57,11 @@ BUSY_RE = re.compile(r"…\s*\(|esc to interrupt", re.I)          # 일하는 �
 RULE_RE = re.compile(r"^─{20,}")
 MODEL_RE = re.compile(r"\|\s*((?:Fable|Opus|Sonnet|Haiku)[^|]*?)\s*\|")
 # 멈춘 뒤에 붙어도 되는 부속 줄(끝난 뒤 걸린 시간, 끼어드는 스크립트 결과, 알림)
-NOISE_BULLET = re.compile(r"^●\s*(Ran \d+ .*hook|Remote Control|Update installed)", re.I)
+# 2026-09-12 추가: 새 판 claude 는 한도 뒤에 "● Usage limit reached · continuing automatically at 1:10pm ·
+# esc or type to cancel" 을 붙이고 그 계정의 재설정 시각까지 기다린다. 새 답변이 아니라 대기 표시다 —
+# 이걸 답변으로 보면 계정을 갈아끼워도 그 창은 최대 5시간을 헛기다린다(실측: 두 창이 이 상태로 남음).
+# 글자를 넣으면 대기가 취소되고 그 줄이 보내지므로 이어가기 대상이다.
+NOISE_BULLET = re.compile(r"^●\s*(Ran \d+ .*hook|Remote Control|Update installed|Usage limit reached)", re.I)
 
 
 # ── 화면 판정(순수 함수, 시험 대상) ─────────────────────────────────────────────
