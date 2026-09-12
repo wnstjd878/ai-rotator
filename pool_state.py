@@ -520,14 +520,17 @@ def _clean_claims(raw) -> dict:
             started = float(item.get("started"))
         except (TypeError, ValueError):
             started = None
+        slot = item.get("slot")
         out[key] = {"bucket": bucket, "at": at, "started": started,
                     "label": str(label) if label else None,
-                    "model": str(model) if model else None}
+                    "model": str(model) if model else None,
+                    "slot": str(slot) if slot else None}
     return out
 
 
 def note_session_claim(state: dict, pid, bucket: str, label: str | None = None,
-                       now: float | None = None, model: str | None = None) -> dict:
+                       now: float | None = None, model: str | None = None,
+                       slot: str | None = None) -> dict:
     """사람이 쓰는 창이 이 모델 칸을 잡고 있다고 적는다(이 머신 안에서만 쓴다).
 
     같은 프로세스 번호로 다시 부르면 갱신한다(창 안에서 /model 로 모델을 바꾼 경우).
@@ -548,11 +551,15 @@ def note_session_claim(state: dict, pid, bucket: str, label: str | None = None,
     started = _pid_started(key)
     if started is None:
         started = prev.get("started")
+    # 자리(slot)는 켤 때 정해지고 그 뒤 갱신(상태줄의 모델 갱신)에서는 안 넘어오므로 이전 값을 지킨다
+    if slot is None:
+        slot = prev.get("slot")
     claims[key] = {"bucket": str(bucket),
                    "at": time.time() if now is None else now,
                    "started": started,
                    "label": str(label) if label else None,
-                   "model": str(model) if model else None}
+                   "model": str(model) if model else None,
+                   "slot": str(slot) if slot else None}
     state["session_claims"] = claims
     return state
 
@@ -611,6 +618,9 @@ def claimed_buckets(state: dict, now: float | None = None) -> tuple:
         if not _pid_alive(key):
             continue
         if _same_process(key, item.get("started")) is False:
+            continue
+        # 자리(slot) 창은 제 폴더의 자격을 쓰므로 공용 자격의 계정 선택에 끼지 않는다(slot_pool 이 따로 지킨다)
+        if item.get("slot"):
             continue
         if item["bucket"] not in names:
             names.append(item["bucket"])

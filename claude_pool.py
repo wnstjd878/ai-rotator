@@ -87,6 +87,7 @@ def _hidden_child_flags() -> int:
 
 import limit_detect  # noqa: E402
 import pool_state as st  # noqa: E402
+import slot_pool  # 모델별 자리(창마다 다른 계정), Windows 만 켜짐  # noqa: E402
 import usage_view  # 남은 사용량 표시 글자(지피티 쪽과 한 벌)  # noqa: E402
 try:
     import usage_check  # 계정별 세션/주간 사용률 (없어도 순환은 됨)
@@ -712,6 +713,12 @@ def tend_windows() -> int:
     """
     if usage_check is None:
         return 0
+    # 자리(slot) 창은 제 폴더의 자격만 갈아끼운다. 다른 자리·봇은 안 건드린다.
+    try:
+        for b in slot_pool.tend(PREEMPT_PCT):
+            log(f"창 지키기: {b} 자리의 계정을 갈아끼웠다")
+    except Exception as e:
+        log(f"창 지키기: 자리 확인 중 오류({type(e).__name__})")
     try:
         buckets = st.claimed_buckets(st.load_state())
     except Exception:
@@ -729,6 +736,10 @@ def _usable_now(model) -> bool:
     """지금 계정으로 그 모델을 쓸 수 있나(미리 넘기는 문턱 아래인가). 못 읽으면 False."""
     if usage_check is None:
         return False
+    # 그 모델의 자리가 떠 있으면 자리 계정으로 판단한다(그 창들은 공용 자격을 안 쓴다)
+    got = slot_pool.usable_now(usage_check.bucket_for_model(model), PREEMPT_PCT)
+    if got is not None:
+        return got
     try:
         cur = st.load_state().get("current")
     except Exception:
@@ -790,11 +801,13 @@ def claim_session(pid, model: str | None = None, argv=None) -> str | None:
         return None
     if not bucket:
         return None
+    slot = slot_pool.slot_of_env()   # cc 가 자리 폴더를 물려줬으면 그 자리(없으면 None = 공용 자격)
     try:
         with st.with_lock(timeout=CLAIM_LOCK_TIMEOUT):
             state = st.load_state()
             st.prune_claims(state)
-            st.note_session_claim(state, pid, bucket, state.get("current"), model=want)
+            label = slot_pool.slot_current(state, slot) if slot else state.get("current")
+            st.note_session_claim(state, pid, bucket, label, model=want, slot=slot)
             st.save_state(state)
     except Exception:
         return None
@@ -2037,6 +2050,25 @@ def main():
     if argv[0] == "--tend":
         # 떠 있는 사람 창의 칸이 바닥났으면 갈아끼운다(주기 작업용, 창 없으면 조회 0).
         return tend_windows()
+    if argv[0] in ("--slot-prepare", "--slot-next"):
+        # cc 가 켜기 직전(또는 한도로 끝난 뒤 되켤 때) 부른다. 표준출력에는 자리 폴더 경로만 찍는다
+        # (cc 가 그 줄을 CLAUDE_CONFIG_DIR 로 쓴다). 저장본이 없는 칸이면 아무것도 안 찍는다 = 예전 방식.
+        bucket = usage_check.bucket_for_model(intended_model(argv[1:])) if usage_check else None
+        if argv[0] == "--slot-next":
+            if not (bucket and slot_pool.enabled() and slot_pool.stored_labels(bucket)):
+                return 0
+            rc, cur = slot_pool.ensure(bucket, threshold=100.0, force_next=True)
+            if cur:
+                print(str(slot_pool.slot_dir(bucket)))
+            return rc
+        rc, path = slot_pool.prepare(bucket)
+        if path:
+            print(path)
+        return rc
+    if argv[0] == "--slot-status":
+        lines = slot_pool.status_lines(st.load_state())
+        print("\n".join(lines) if lines else "자리(slot) 없음 — 저장본이 있는 칸이 없습니다.")
+        return 0
     if argv[0] == "--use":
         if len(argv) < 2:
             print("사용법: python claude_pool.py --use <라벨>")
