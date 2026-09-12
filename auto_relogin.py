@@ -159,6 +159,33 @@ def main() -> int:
                 log(f"{name} {label}: 갱신 뒤에도 만료 {got} — 사람 확인 필요")
                 problems.append((name, host, label, days))
 
+    # 모델별 자리(slot) 전용 자격(creds/slots/<칸>/<라벨>.json)도 같은 문턱으로 갱신한다(본체만, 2026-09-12).
+    # 공용 자격과 다른 로그인이라 따로 만료된다. 전용 크롬 세션이 살아 있으면 무인으로 끝난다.
+    try:
+        import slot_pool
+        for bucket in slot_pool.BUCKETS:
+            for label in slot_pool.stored_labels(bucket):
+                try:
+                    o = json.loads(slot_pool.store_path(bucket, label).read_text(encoding="utf-8"))["claudeAiOauth"]
+                    days = round((int(o.get("refreshTokenExpiresAt") or 0) / 1000 - time.time()) / 86400, 1)
+                except Exception:
+                    continue
+                if days > THRESHOLD_DAYS:
+                    continue
+                if dry:
+                    log(f"자리 {bucket} {label}: 만료 {days}일 — 갱신 대상 (dry-run이라 실행 안 함)")
+                    continue
+                log(f"자리 {bucket} {label}: 만료 {days}일 — 자동 갱신 시작")
+                r = run([sys.executable, str(BASE / "relogin.py"), "--slot", bucket, label], RELOGIN_TIMEOUT)
+                if r.returncode == 0:
+                    log(f"자리 {bucket} {label}: 갱신 성공")
+                    renewed += 1
+                else:
+                    log(f"자리 {bucket} {label}: 갱신 실패 — 사람 확인 필요")
+                    problems.append(("본체", None, f"--slot {bucket} {label}", days))
+    except Exception as e:
+        log(f"자리 자격 점검 중 오류({type(e).__name__})")
+
     if problems and not dry:
         # 크롬 세션이 낡으면 relogin 이 붙잡히거나 연장 폭이 작아진다. 사람이 한 번
         # 로그인해 주면 다시 무인으로 돈다. 12.2: 받은 사람이 그 자리에서 할 일을 적는다.
