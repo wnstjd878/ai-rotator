@@ -35,6 +35,7 @@ sys.path.insert(0, str(BASE))
 import claude_pool  # noqa: E402
 import limit_detect  # noqa: E402
 import pool_state as st  # noqa: E402
+import switch_account as sa  # noqa: E402
 
 # 이 시험은 claude 호출을 가짜로 바꿔치려고 subprocess.run 자체를 갈아끼운다.
 # 그런데 순환기 안에는 진짜 subprocess 가 필요한 자리도 있다(프로세스 시작 시각 조회).
@@ -2742,7 +2743,7 @@ def main():
                      case_limit_with_split_cred, case_cred_refresh,
                      case_stale_scoped_block, case_stale_account_block,
                      case_push_fail_alert, case_tend_windows,
-                     case_usage_cache_backoff, case_nudge_stalled):
+                     case_usage_cache_backoff, case_nudge_stalled, case_slot_pool):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -3649,6 +3650,103 @@ def case_nudge_stalled(tmp):
     run7(now + 60, normal)
     check("멈춤이 풀리면 처음 본 시각을 지운다", json.loads(sf7.read_text(encoding="utf-8"))["seen"] == {})
 
+
+
+
+def case_slot_pool(tmp):
+    """[58] 모델별 자리(slot): 창마다 다른 계정 (2026-09-12).
+
+    Opus 자리와 Fable 자리가 서로 다른 계정에 앉고, 한 자리가 바닥나도 다른 자리는 안 건드린다.
+    자리 창의 표시는 공용 자격의 계정 선택(claimed_buckets)에 끼지 않는다.
+    """
+    print()
+    print("[58] 모델별 자리: 창마다 다른 계정")
+    import slot_pool as sp
+    import usage_check as uc
+
+    tmp = Path(tmp)
+    setup(tmp, ["A", "B", "C"], "A")
+    if os.name != "nt":
+        check("Windows 가 아니면 자리 기능이 꺼진다", not sp.enabled())
+        return
+    real = (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
+            claude_pool.usage_check, st._pid_alive)
+    sp.POOL_ROOT, sp.STORE_ROOT, sp.LOG_FILE = tmp / "pool", tmp / "creds" / "slots", tmp / "rotator.log"
+    sp.CLAUDE_HOME = tmp / "home"
+    (sp.CLAUDE_HOME / "projects").mkdir(parents=True)
+    (sp.CLAUDE_HOME / "settings.json").write_text('{"model":"opus"}', encoding="utf-8")
+    now = time.time()
+
+    def cred(label):
+        return {"claudeAiOauth": {"accessToken": "x", "refreshToken": f"rt-{label}",
+                                  "expiresAt": int((now + 3600) * 1000)}}
+
+    for b in ("Opus", "Fable"):
+        for l in ("A", "B", "C"):
+            sa._write_owner_only(sp.store_path(b, l), cred(l))
+    alive = set()
+    st._pid_alive = lambda pid: str(pid) in alive
+    table = {}
+    uc.get_usage = lambda path: table.get(Path(path).stem)
+    claude_pool.usage_check = uc
+    free = {"weekly_pct": 10.0, "session_pct": 5.0, "weekly_reset": now + 48 * 3600, "session_reset": now + 3600,
+            "scoped": {"Fable": {"pct": 5.0, "reset": now + 48 * 3600}, "Opus": {"pct": 5.0, "reset": now + 48 * 3600}}}
+    fable_full = dict(free, scoped={"Fable": {"pct": 100.0, "reset": now + 48 * 3600},
+                                    "Opus": {"pct": 5.0, "reset": now + 48 * 3600}})
+    try:
+        # (1) 처음 켤 때: 자리 폴더가 만들어지고 앞순위 계정이 앉는다
+        table.update({"A": free, "B": free, "C": free})
+        rc, path = sp.prepare("Opus")
+        check("자리 준비: 갈아탐(3) + 폴더 경로", rc == 3 and path == str(sp.slot_dir("Opus")), (rc, path))
+        check("자리 폴더에 자격·설정 사본·projects 연결이 있다",
+              sp.live_path("Opus").exists() and (sp.slot_dir("Opus") / "settings.json").exists()
+              and (sp.slot_dir("Opus") / "projects").exists())
+        st_now = st.load_state()
+        check("Opus 자리 계정 A", sp.slot_current(st_now, "Opus") == "A", sp.slot_current(st_now, "Opus"))
+        # (2) Fable 자리: A 는 Fable 이 바닥 → B 에 앉는다(Opus 자리는 그대로 A)
+        table.update({"A": fable_full})
+        rc, path = sp.prepare("Fable")
+        st_now = st.load_state()
+        check("Fable 자리는 Fable 이 남은 B", sp.slot_current(st_now, "Fable") == "B", sp.slot_current(st_now, "Fable"))
+        check("Opus 자리는 그대로 A", sp.slot_current(st_now, "Opus") == "A")
+        check("A 는 Fable 칸만 막힌다", st.is_scoped_blocked(st_now, "A", "Fable") and not st.is_blocked(st_now, "A"))
+        # (3) 창 표시: 자리 창은 공용 계정 선택에 안 낀다
+        os.environ["CLAUDE_CONFIG_DIR"] = str(sp.slot_dir("Fable"))
+        alive.add("7001")
+        claude_pool.claim_session(7001, model="claude-fable-5-1")
+        del os.environ["CLAUDE_CONFIG_DIR"]
+        st_now = st.load_state()
+        cl = st_now["session_claims"]["7001"]
+        check("표시에 자리·계정이 적힌다", cl.get("slot") == "Fable" and cl.get("label") == "B", cl)
+        check("공용 창 목록에는 안 잡힌다", st.claimed_buckets(st_now) == (), st.claimed_buckets(st_now))
+        check("자리 창 목록에는 잡힌다", sp.slot_claims(st_now, "Fable") == ["7001"], sp.slot_claims(st_now, "Fable"))
+        # (4) 창 지키기: Fable 자리의 B 가 97% 넘으면 C 로, Opus 자리는 안 건드린다
+        table.update({"B": dict(free, scoped={"Fable": {"pct": 98.0, "reset": now + 48 * 3600},
+                                              "Opus": {"pct": 5.0, "reset": now + 48 * 3600}})})
+        switched = sp.tend(claude_pool.PREEMPT_PCT)
+        st_now = st.load_state()
+        check("창 지키기가 Fable 자리를 C 로 갈아끼운다", switched == ["Fable"] and sp.slot_current(st_now, "Fable") == "C",
+              (switched, sp.slot_current(st_now, "Fable")))
+        check("Opus 자리는 그대로 A", sp.slot_current(st_now, "Opus") == "A")
+        check("자리 자격 파일이 C 것", sa._obj_fingerprint(sp._load(sp.live_path("Fable"))) == sa._obj_fingerprint(cred("C")))
+        # (5) 되저장: 자리 안에서 갱신된 자격은 저장본으로 돌아간다
+        newer = cred("C"); newer["claudeAiOauth"]["expiresAt"] += 999_000; newer["claudeAiOauth"]["refreshToken"] = "rt-C2"
+        sp._put_live("Fable", newer)
+        note = sp.sync_creds("Fable", "C")
+        check("갱신분 되저장", "되저장" in note and sa._obj_fingerprint(sp._load(sp.store_path("Fable", "C"))) == sa._obj_fingerprint(newer), note)
+        # (6) 갈아탈 데 없으면 2, 그대로
+        table.update({"A": fable_full, "B": fable_full, "C": fable_full})
+        rc, cur = sp.ensure("Fable", threshold=100.0)
+        check("전부 바닥이면 갈아탈 데 없음(2), 계정 그대로 C", rc == 2 and cur == "C", (rc, cur))
+        # (7) 이어가기 판단은 자리 계정 기준
+        check("자리 창의 모델 사용 가능 판단 = 자리 계정(C, Fable 바닥) → False",
+              sp.usable_now("Fable", claude_pool.PREEMPT_PCT) is False)
+        check("자리에 창이 없는 칸은 None(공용 판단으로)", sp.usable_now("Opus", claude_pool.PREEMPT_PCT) is None)
+    finally:
+        (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
+         claude_pool.usage_check, st._pid_alive) = real
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        claude_pool.release_session(7001)
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -122,7 +122,7 @@ def _junction(dst: Path, src: Path) -> bool:
         return True
     try:
         r = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
-                           capture_output=True, text=True, timeout=20,
+                           capture_output=True, timeout=20,   # 출력은 안 읽는다(콘솔 글자표가 달라 깨진다)
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return r.returncode == 0
     except Exception:
@@ -323,87 +323,94 @@ def _revive(state: dict, bucket: str, below: float) -> list:
 ENSURE_SWITCHED = 3
 
 
+def _exhausted_kind(state: dict, cur: str, bucket: str, threshold: float):
+    """자리 계정의 사용량을 읽어 그 칸이 바닥났는지. (kind 또는 None, 읽었는지)."""
+    u = usage_check.get_usage_for(store_path(bucket, cur), is_current=False)
+    if not u:
+        # 못 읽었다. 기록상 막혀 있으면 기록으로 갈아탄다(2026-09-12 사고와 같은 갈래).
+        if st.is_scoped_blocked(state, cur, bucket):
+            return "model:" + bucket, False
+        if st.is_blocked(state, cur):
+            return "blocked", False
+        log(f"자리 {bucket}: '{cur}' 사용량을 못 읽어 그대로 둔다"
+            f"(사유={getattr(usage_check, 'last_error', None)})")
+        return None, False
+    st.note_weekly_reset(state, cur, u.get("weekly_reset"))
+    st.note_usage(state, cur, u)
+    kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
+    if kind and not (st.is_scoped_blocked(state, cur, bucket) if kind.startswith("model:")
+                     else st.is_blocked(state, cur)):
+        if kind.startswith("model:"):
+            until = usage_check.scoped_reset(u, bucket)
+            st.mark_scoped_blocked(state, cur, bucket,
+                                   until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
+        else:
+            until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
+            st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
+                            f"{'주간' if kind == 'weekly' else '세션(5시간)'} 한도 소진(자리 {bucket})")
+    return kind, True
+
+
+def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: float):
+    nxt = pick(state, bucket, exclude=exclude)
+    if nxt is not None:
+        return nxt
+    box = _slots(state).setdefault(bucket, {})
+    if time.time() - float(box.get("revive_at") or 0) >= 1800:
+        box["revive_at"] = time.time()
+        if _revive(state, bucket, threshold):
+            nxt = pick(state, bucket, exclude=exclude)
+    return nxt
+
+
 def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False) -> tuple:
     """자리의 계정이 그 칸에서 바닥났으면 갈아끼운다. (종료코드, 지금 계정).
 
     종료코드: 0 그대로 / 3 갈아탔음 / 2 갈아탈 데 없음 / 1 교체 실패.
     `threshold` 97 은 창 지키기(거절받기 전에 미리), 100 은 켜기 전 확인.
     `force_next` 면 지금 계정을 두고 무조건 다른 계정으로(창이 한도로 끝난 뒤 되켤 때).
+    갈아탄 계정도 바닥일 수 있으므로 쓸 만한 계정이 나올 때까지 이어서 본다(--ensure 와 같은 규율).
     """
     if not enabled() or usage_check is None:
         return 0, None
     if not stored_labels(bucket):
         return 2, None
+    switched = False
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
         cur = slot_current(state, bucket)
         if cur and cur not in stored_labels(bucket):
             cur = None
         if cur is None:
-            nxt = pick(state, bucket) or (_revive(state, bucket, threshold) and pick(state, bucket))
-            if not nxt:
+            nxt = _pick_or_revive(state, bucket, None, threshold)
+            if not nxt or not switch(state, bucket, nxt, "자리 처음 앉힘"):
                 st.save_state(state)
-                return 2, None
-            ok = switch(state, bucket, nxt, "자리 처음 앉힘")
-            st.save_state(state)
-            return (ENSURE_SWITCHED if ok else 1), (nxt if ok else None)
-        note = sync_creds(bucket, cur)
-        if "되저장" in note or "밀어 넣음" in note:
-            log(f"자리 {bucket}: {note}")
-        kind = None
-        if force_next:
-            kind = "forced"
-        else:
-            u = usage_check.get_usage_for(store_path(bucket, cur), is_current=False)
-            if u:
-                st.note_weekly_reset(state, cur, u.get("weekly_reset"))
-                st.note_usage(state, cur, u)
-                kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
-                if kind and not (st.is_scoped_blocked(state, cur, bucket) if kind.startswith("model:")
-                                 else st.is_blocked(state, cur)):
-                    if kind.startswith("model:"):
-                        until = usage_check.scoped_reset(u, bucket)
-                        st.mark_scoped_blocked(state, cur, bucket,
-                                               until or (time.time() + limit_detect.DEFAULT_COOLDOWN))
-                    else:
-                        until = u.get("weekly_reset") if kind == "weekly" else u.get("session_reset")
-                        st.mark_blocked(state, cur, until or (time.time() + limit_detect.DEFAULT_COOLDOWN),
-                                        f"{'주간' if kind == 'weekly' else '세션(5시간)'} 한도 소진(자리 {bucket})")
-                # 저장본을 재발급했을 수 있다(401 뒤). 자리로 밀어 넣는다.
-                sync_creds(bucket, cur)
+                return (2 if not nxt else 1), None
+            cur, switched = nxt, True
+        for _ in range(len(stored_labels(bucket)) + 1):
+            note = sync_creds(bucket, cur)
+            if "되저장" in note or "밀어 넣음" in note:
+                log(f"자리 {bucket}: {note}")
+            if force_next:
+                kind, force_next = "forced", False
             else:
-                # 못 읽었다. 기록상 막혀 있으면 기록으로 갈아탄다(2026-09-12 사고와 같은 갈래).
-                if st.is_scoped_blocked(state, cur, bucket):
-                    kind = "model:" + bucket
-                elif st.is_blocked(state, cur):
-                    kind = "blocked"
-                else:
-                    log(f"자리 {bucket}: '{cur}' 사용량을 못 읽어 그대로 둔다"
-                        f"(사유={getattr(usage_check, 'last_error', None)})")
-        if not kind:
-            st.save_state(state)
-            return 0, cur
-        nxt = pick(state, bucket, exclude=cur)
-        if nxt is None:
-            last = float((_slots(state).get(bucket) or {}).get("revive_at") or 0)
-            if time.time() - last >= 1800:
-                _slots(state).setdefault(bucket, {})["revive_at"] = time.time()
-                if _revive(state, bucket, threshold):
-                    nxt = pick(state, bucket, exclude=cur)
-        if nxt is None:
-            st.save_state(state)
-            log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")
-            return 2, cur
-        why = "미리 넘김" if threshold < 100.0 else ("한도로 끝난 뒤" if force_next else "켜기 전 확인")
-        ok = switch(state, bucket, nxt, f"{bucket} 칸 소진, {why}")
+                kind, read = _exhausted_kind(state, cur, bucket, threshold)
+                if read:
+                    sync_creds(bucket, cur)   # 저장본을 재발급했을 수 있다(401 뒤). 자리로 밀어 넣는다
+            if not kind:
+                break
+            nxt = _pick_or_revive(state, bucket, cur, threshold)
+            if nxt is None:
+                st.save_state(state)
+                log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")
+                return 2, cur
+            why = "미리 넘김" if threshold < 100.0 else ("한도로 끝난 뒤" if kind == "forced" else "켜기 전 확인")
+            if not switch(state, bucket, nxt, f"{bucket} 칸 소진, {why}"):
+                st.save_state(state)
+                return 1, cur
+            cur, switched = nxt, True
         st.save_state(state)
-    if ok:
-        try:
-            import notify  # noqa: F401  (알림 창구는 claude_pool 의 _notify_switch 가 담당. 여기선 기록만)
-        except Exception:
-            pass
-        return ENSURE_SWITCHED, nxt
-    return 1, cur
+    return (ENSURE_SWITCHED if switched else 0), cur
 
 
 def prepare(bucket: str | None) -> tuple:
