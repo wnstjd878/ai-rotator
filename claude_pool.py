@@ -44,7 +44,13 @@
       만족하는 계정을 먼저 찾는다(_wanted_buckets / _pick_account).
       되돌리기는 창을 절대 밀어내지 않고, 갈아타야만 하는 교체는 다른 수가 없을 때만 민다.
       표시는 프로세스가 죽으면 저절로 걷힌다(pool_state.prune_claims).
-마지막 점검: 2026-09-06
+모델별 자리(2026-09-12 추가, Windows 본체만): 사람 창은 이제 모델별 자리 폴더(~/.claude-pool/<칸>/)를
+      CLAUDE_CONFIG_DIR 로 물려받아 **창마다 다른 계정**을 쓴다(slot_pool.py). Opus 창은 Opus 가
+      남은 계정, Fable 창은 Fable 이 남은 계정에 앉고, 한 자리가 바닥나도 다른 자리·봇은 안 건드린다.
+      자리 자격은 계정별로 따로 로그인한 것(creds/slots/<칸>/<라벨>.json, `relogin.py --slot`).
+      cc 는 `--slot-prepare` 로 자리 폴더를 받고, 창 지키기(`--tend`)는 자리부터 본다.
+      위 "떠 있는 창 지키기"의 공용 자격 규칙은 자리 저장본이 없는 칸·Mac·옛 창에만 남는다.
+마지막 점검: 2026-09-12
 """
 
 from __future__ import annotations
