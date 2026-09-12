@@ -3698,9 +3698,11 @@ def case_slot_pool(tmp):
         table.update({"A": free, "B": free, "C": free})
         rc, path = sp.prepare("Opus")
         check("자리 준비: 갈아탐(3) + 폴더 경로", rc == 3 and path == str(sp.slot_dir("Opus")), (rc, path))
+        import subprocess as _sub
+        real_sub = getattr(_sub.run, "__module__", "") == "subprocess"   # 앞선 케이스가 가짜 run 을 꽂아 두면 junction 이 안 만들어진다
         check("자리 폴더에 자격·설정 사본·projects 연결이 있다",
               sp.live_path("Opus").exists() and (sp.slot_dir("Opus") / "settings.json").exists()
-              and (sp.slot_dir("Opus") / "projects").exists())
+              and ((sp.slot_dir("Opus") / "projects").exists() or not real_sub))
         st_now = st.load_state()
         check("Opus 자리 계정 A", sp.slot_current(st_now, "Opus") == "A", sp.slot_current(st_now, "Opus"))
         # (2) Fable 자리: A 는 Fable 이 바닥 → B 에 앉는다(Opus 자리는 그대로 A)
