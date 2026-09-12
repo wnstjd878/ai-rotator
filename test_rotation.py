@@ -2716,6 +2716,10 @@ def main():
     # 자리(slot) 창 안에서 돌리면 CLAUDE_CONFIG_DIR 이 살아 있어 claim_session 이 모든 표시에
     # slot 을 붙인다. 그러면 공용 계정 선택 시험 18건이 통째로 깨진다(2026-09-12 실측).
     os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    # 자리(slot) 기능은 기본적으로 꿄다. case_slot_pool 만 켜서 자기 임시 폴더로 돌린다.
+    # 안 그랬다가 case_tend_windows 같은 다른 시험이 진짜 자리 폴더와 rotator.log 를
+    # 건드렸다(2026-09-12 실측: 시험 한 번에 Opus 자리 자격이 B 로 바뀐 채 기록과 엇갈렸다).
+    os.environ["AIROTATOR_NO_SLOTS"] = "1"
     os.environ["AIROTATOR_NO_NUDGE"] = "1"   # 창 지키기가 실제 창에 이어가기 줄을 넣지 않게
     real_run = subprocess.run
     real_switch = claude_pool._switch
@@ -3669,7 +3673,9 @@ def case_slot_pool(tmp):
 
     tmp = Path(tmp)
     setup(tmp, ["A", "B", "C"], "A")
+    os.environ.pop("AIROTATOR_NO_SLOTS", None)   # main 이 꺼 둔 것을 이 케이스에서만 켠다
     if os.name != "nt":
+        os.environ["AIROTATOR_NO_SLOTS"] = "1"
         check("Windows 가 아니면 자리 기능이 꺼진다", not sp.enabled())
         return
     real = (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
@@ -3798,6 +3804,7 @@ def case_slot_pool(tmp):
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
          claude_pool.usage_check, st._pid_alive) = real
+        os.environ["AIROTATOR_NO_SLOTS"] = "1"
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         claude_pool.release_session(7001)
 
