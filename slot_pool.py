@@ -204,7 +204,27 @@ def slot_claims(state: dict, bucket: str, now: float | None = None) -> list:
         if st._same_process(key, item.get("started")) is False:
             continue
         out.append(key)
-    return out
+    return _has_window(out)
+
+
+def _has_window(keys: list, procs: dict | None = None) -> list:
+    """표시 번호 중 지금 claude 창이 딸린 것만. 프로세스 목록을 못 읽으면 그대로 돌려준다.
+
+    cc 는 창 표시를 셸 번호로 적는다. 창이 끝날 때 표시 지우기(--unclaim)가 잠금 대기로 실패하면
+    셸이 살아 있는 동안 표시가 남고, 정리하는 곳이 그 시각을 계속 새로 찍어 준다(2026-09-13 검수 지적).
+    그 유령 표시의 칸이 자리 계정 고르기를 좁히지 않게, 번호가 claude 자체이거나 claude 자식을 둔 셸일 때만 센다.
+    """
+    if not keys or (procs is None and os.name != "nt"):
+        return keys
+    if procs is None:
+        try:
+            import session_nudge as sn
+            procs = sn._process_table()
+        except Exception:
+            return keys
+    shells = {pp for pp, exe in procs.values() if exe == "claude.exe"}
+    return [k for k in keys
+            if int(k) in shells or (procs.get(int(k)) or (0, ""))[1] == "claude.exe"]
 
 
 def slot_buckets(state: dict, bucket: str, now: float | None = None) -> tuple:
@@ -524,6 +544,10 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                     sync_creds(bucket, cur)   # 저장본을 재발급했을 수 있다(401 뒤). 자리로 밀어 넣는다
             need = _need(state, bucket, wanted)   # 방금 막은 기록까지 반영해 다시 계산한다
             own_hit = forced or bucket in bad
+            if own_hit and bucket not in need and _pick_or_revive(state, bucket, cur, threshold, (bucket,)):
+                # 기록상 어디서도 못 쓰는 자리 칸도 기록이 낡았을 수 있다. 30분에 한 번 실제 사용량을 읽어
+                # 풀린 계정이 있으면 다시 계산한다(옛 코드가 하던 복구. 검수 재현: 기록만 보고 A 에 눌러앉음)
+                need = _need(state, bucket, wanted)
             own_dead = own_hit and bucket not in need   # 자리 칸이 바닥인데 어느 계정에서도 못 쓴다
             if entry_hit is None:
                 # 기록이 낡아 잘못 고른 계정을 다시 옮긴 것은 3 으로 안 센다. 그걸 세면 멀쩡히 닫은 창을

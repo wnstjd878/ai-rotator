@@ -835,15 +835,23 @@ def claim_session(pid, model: str | None = None, argv=None) -> str | None:
 
 
 def release_session(pid) -> bool:
-    """창이 닫혔다고 표시를 지운다. 못 지워도 프로세스가 죽으면 저절로 걷힌다."""
-    try:
-        with st.with_lock(timeout=CLAIM_LOCK_TIMEOUT):
-            state = st.load_state()
-            st.drop_session_claim(state, pid)
-            st.save_state(state)
-        return True
-    except Exception:
-        return False
+    """창이 닫혔다고 표시를 지운다. 못 지워도 프로세스가 죽으면 저절로 걷힌다.
+
+    cc 는 셸 번호로 표시하므로 셸이 살아 있으면 안 걷힌다. 창 지키기가 잠금을 쥔 채 사용량을 여러 번
+    읽는 사이에 닫으면 5초 대기가 모자라 유령 표시가 남는다(2026-09-13 검수). 닫을 때는 기다려도
+    되니 한 번 더 길게 기다리고, 그래도 못 지우면 기록을 남긴다.
+    """
+    for wait in (CLAIM_LOCK_TIMEOUT, 20):
+        try:
+            with st.with_lock(timeout=wait):
+                state = st.load_state()
+                st.drop_session_claim(state, pid)
+                st.save_state(state)
+            return True
+        except Exception:
+            continue
+    log(f"창 표시 지우기 실패(잠금 대기): 번호 {pid}. 이 셸의 표시가 남는다(claude 창이 없으면 자리 판단에선 빠진다)")
+    return False
 
 
 def _wanted_buckets(state: dict, bucket=None) -> tuple:

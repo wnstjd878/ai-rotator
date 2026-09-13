@@ -3677,9 +3677,10 @@ def case_nudge_stalled(tmp):
         "50": {"bucket": "Opus", "at": now, "slot": "Fable", "label": "A", "model": "Opus 5 (1M context)"},
         "61": {"bucket": "Opus", "at": now, "slot": None, "label": "D"}}}
     wp = sn.window_places([60, 61, 62], parents={60: 50, 61: 40, 62: 45}, state=fake_state)
-    check("셸 번호로 적힌 표시(cc) → 그 자리, 제 번호 표시(가로채기) → 공용, 표시 없음 → 빠짐",
-          wp == {60: {"where": "slot:Fable", "model": "Opus 5 (1M context)"},
-                 61: {"where": "shared", "model": None}}, wp)
+    check("셸 번호로 적힌 표시(cc) → 그 자리, 제 번호 표시(가로채기) → 공용, 표시 없음 → 공용(표시 없음)",
+          wp == {60: {"where": "slot:Fable", "model": "Opus 5 (1M context)", "claimed": True},
+                 61: {"where": "shared", "model": None, "claimed": True},
+                 62: {"where": "shared", "model": None, "claimed": False}}, wp)
     # 상태줄이 안 읽힌 창은 대화 기록(거절 전 모델)보다 창 표시의 모델을 먼저 쓴다(2026-09-13 세일즈부스터 창)
     no_status = session_hit[:-1]
     asked9 = []
@@ -3713,7 +3714,8 @@ def case_slot_pool(tmp):
         check("Windows 가 아니면 자리 기능이 꺼진다", not sp.enabled())
         return
     real = (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
-            claude_pool.usage_check, st._pid_alive)
+            claude_pool.usage_check, st._pid_alive, sp._has_window)
+    sp._has_window = lambda keys, procs=None: keys   # 가짜 번호(7001…)는 실제 프로세스 목록에 없다
     sp.POOL_ROOT, sp.STORE_ROOT, sp.LOG_FILE = tmp / "pool", tmp / "creds" / "slots", tmp / "rotator.log"
     sp.CLAUDE_HOME = tmp / "home"
     (sp.CLAUDE_HOME / "projects").mkdir(parents=True)
@@ -3897,9 +3899,29 @@ def case_slot_pool(tmp):
               sp.usable_now("Fable", claude_pool.PREEMPT_PCT, model_bucket="Opus") is False)
         check("claude_pool._usable_now 도 창의 자리 계정을 따른다(Opus 자리 A 가 멀쩡해도)",
               claude_pool._usable_now("Opus 5 (1M context)", "slot:Fable") is False)
+        # (17) 검수 재현: 자리 칸(Fable)이 기록상 모든 계정에서 막혀도 기록이 낡았으면 실제로 읽어 풀어 준다.
+        #      Fable 창 하나만, A 는 실제 Fable 바닥, B 는 기록만 막힘(실제 여유), C 는 실제 바닥.
+        alive.discard("7002")
+        alive.discard("7003")
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["blocked"] = {}
+            s2["scoped_blocked"] = {"B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}}
+            sp.switch(s2, "Fable", "A", "시험")
+            st.save_state(s2)
+        table.update({"A": fable_full, "B": free, "C": fable_full})
+        sp.tend(claude_pool.PREEMPT_PCT)
+        st_now = st.load_state()
+        check("기록만 막힌 B 를 실제로 읽어 풀고 B 로 간다", sp.slot_current(st_now, "Fable") == "B",
+              sp.slot_current(st_now, "Fable"))
+        check("실제 바닥인 C 의 기록은 그대로", st.is_scoped_blocked(st_now, "C", "Fable"))
+        # (18) 유령 표시: 창이 끝난 셸의 표시는 자리 판단에서 뺀다(claude 자체이거나 claude 자식을 둔 셸만)
+        procs = {50: (1, "powershell.exe"), 60: (50, "claude.exe"), 70: (1, "powershell.exe"), 80: (70, "node.exe")}
+        check("claude 창이 딸린 셸·claude 자체만 센다",
+              real[-1](["50", "60", "70", "80"], procs=procs) == ["50", "60"])
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
-         claude_pool.usage_check, st._pid_alive) = real
+         claude_pool.usage_check, st._pid_alive, sp._has_window) = real
         os.environ["AIROTATOR_NO_SLOTS"] = "1"
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         claude_pool.release_session(7001)

@@ -376,6 +376,9 @@ def window_places(pids, parents: dict | None = None, state: dict | None = None) 
     """창 → {"where": 그 창이 쓰는 자격, "model": 창 표시의 모델}. (style-guard:off)
 
     where 는 'slot:<칸>'(모델별 자리 폴더) / 'shared'(공용 자격). model 은 상태줄이 /model 때 갱신한 이름이다.
+    창 표시가 없는 창은 cc 없이 켠 창이라 공용 자격으로 본다(claimed False). 이 PC 에는 가로채기가 없어
+    그런 창에 표시가 적힐 길이 없다. 모델 이름으로 자리를 짐작하면 공용 한도로 멈춘 창을 자리 계정으로
+    판단해 사고와 같은 헛 입력이 난다(2026-09-13 검수 지적).
 
     창 표시(session_claims)는 cc 로 켠 창이면 그 셸 번호로, 가로채기로 켠 창이면 claude 번호로 적힌다.
     그래서 창 번호와 부모 번호를 둘 다 본다. 표시를 못 찾은 창은 결과에서 빠진다(옛 방식으로 짐작).
@@ -392,11 +395,12 @@ def window_places(pids, parents: dict | None = None, state: dict | None = None) 
         parents = {p: pp for p, (pp, _) in _process_table().items()}
     out = {}
     for pid in pids:
+        out[pid] = {"where": "shared", "model": None, "claimed": False}
         for key in (pid, parents.get(pid)):
             item = claims.get(str(key)) if key else None
             if item and st._same_process(key, item.get("started")) is not False:
                 out[pid] = {"where": f"slot:{item['slot']}" if item.get("slot") else "shared",
-                            "model": item.get("model")}
+                            "model": item.get("model"), "claimed": True}
                 break
     return out
 
@@ -606,4 +610,5 @@ if __name__ == "__main__":
             v = parse_screen(g.get("lines") or [])
             print(p, g.get("title", "?"), "멈춤" if v["stalled"] else "-", "일하는중" if v["busy"] else "",
                   "입력칸비어있음" if v["input_empty"] else "입력칸에글자", v["model"],
-                  (where.get(p) or {}).get("where", "표시없음"), v["limit"])
+                  (where.get(p) or {}).get("where", "?")
+                  + ("" if (where.get(p) or {}).get("claimed") else "(표시없음)"), v["limit"])
