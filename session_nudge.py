@@ -373,7 +373,9 @@ def claude_windows(procs: dict | None = None) -> list:
 
 
 def window_places(pids, parents: dict | None = None, state: dict | None = None) -> dict:
-    """창 → 그 창이 쓰는 자격. 'slot:<칸>'(모델별 자리 폴더) / 'shared'(공용 자격). (style-guard:off)
+    """창 → {"where": 그 창이 쓰는 자격, "model": 창 표시의 모델}. (style-guard:off)
+
+    where 는 'slot:<칸>'(모델별 자리 폴더) / 'shared'(공용 자격). model 은 상태줄이 /model 때 갱신한 이름이다.
 
     창 표시(session_claims)는 cc 로 켠 창이면 그 셸 번호로, 가로채기로 켠 창이면 claude 번호로 적힌다.
     그래서 창 번호와 부모 번호를 둘 다 본다. 표시를 못 찾은 창은 결과에서 빠진다(옛 방식으로 짐작).
@@ -393,7 +395,8 @@ def window_places(pids, parents: dict | None = None, state: dict | None = None) 
         for key in (pid, parents.get(pid)):
             item = claims.get(str(key)) if key else None
             if item and st._same_process(key, item.get("started")) is not False:
-                out[pid] = f"slot:{item['slot']}" if item.get("slot") else "shared"
+                out[pid] = {"where": f"slot:{item['slot']}" if item.get("slot") else "shared",
+                            "model": item.get("model")}
                 break
     return out
 
@@ -474,7 +477,8 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
     `usable(model)` 은 지금 계정으로 그 모델을 쓸 수 있으면 True. 못 쓰면 넣어 봐야 또 멈추므로
     넣지 않는다(다음 회차가 계정이 바뀐 뒤 넣는다). 창 표시로 그 창의 자격을 찾았으면
     `usable(model, where)` 로 부른다(where = 'slot:<칸>' / 'shared', window_places).
-    `places(pids)` 는 {창 번호: where}. 안 주면 실제 창에서는 window_places, 시험에서는 빈 값.
+    `places(pids)` 는 {창 번호: {"where", "model"}}(where 문자열만 줘도 된다). 안 주면 실제 창에서는
+    window_places, 시험에서는 빈 값.
     """
     if os.name != "nt" and windows is None:
         return []
@@ -528,7 +532,12 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
             changed = True
         if now - float(seen[skey]) > MAX_AGE:
             continue
-        model = scr["limit_bucket"] or scr["model"]   # 한도 문구에 모델 이름이 있으면 그게 정답
+        pl = place_map.get(pid) or place_map.get(str(pid))
+        where, claim_model = (pl.get("where"), pl.get("model")) if isinstance(pl, dict) else (pl, None)
+        # 모델: 한도 문구 속 이름 → 화면 상태줄 → 창 표시(상태줄이 /model 때 갱신) → 대화 기록 순.
+        # 대화 기록의 모델은 거절 전 마지막 성공 답변이라 /model 로 바꾸기 전 이름일 수 있어 맨 뒤다
+        # (2026-09-13: 상태줄이 안 읽힌 Opus 창을 기록의 Fable 로 판단해 이어가기를 안 넣었다).
+        model = scr["limit_bucket"] or scr["model"] or claim_model
         sess = regs.get(pid)
         if sess and started and abs(int(sess.get("procStart") or 0) - started) > 20_000_000:
             sess = None   # 번호만 같은 옛 창의 등록 파일이다(시작 시각이 2초 넘게 다름)
@@ -551,7 +560,6 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
                 wins[key] = dict(r, capped=True)
                 changed = True
             continue
-        where = place_map.get(pid) or place_map.get(str(pid))
         ck = (where, model)
         if ck not in ok_cache:
             try:
@@ -598,4 +606,4 @@ if __name__ == "__main__":
             v = parse_screen(g.get("lines") or [])
             print(p, g.get("title", "?"), "멈춤" if v["stalled"] else "-", "일하는중" if v["busy"] else "",
                   "입력칸비어있음" if v["input_empty"] else "입력칸에글자", v["model"],
-                  where.get(p, "표시없음"), v["limit"])
+                  (where.get(p) or {}).get("where", "표시없음"), v["limit"])

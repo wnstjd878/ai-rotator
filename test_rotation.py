@@ -3674,11 +3674,22 @@ def case_nudge_stalled(tmp):
     check("창마다 그 창의 자격으로 묻는다", sorted(asked) == ["shared", "slot:Fable"], asked)
     check("막힌 자리의 창엔 안 넣고 쓸 수 있는 창에만 넣는다", got8 == ["공용 창"] and typed8 == [22], (got8, typed8))
     fake_state = {"session_claims": {
-        "50": {"bucket": "Opus", "at": now, "slot": "Fable", "label": "A"},
+        "50": {"bucket": "Opus", "at": now, "slot": "Fable", "label": "A", "model": "Opus 5 (1M context)"},
         "61": {"bucket": "Opus", "at": now, "slot": None, "label": "D"}}}
     wp = sn.window_places([60, 61, 62], parents={60: 50, 61: 40, 62: 45}, state=fake_state)
     check("셸 번호로 적힌 표시(cc) → 그 자리, 제 번호 표시(가로채기) → 공용, 표시 없음 → 빠짐",
-          wp == {60: "slot:Fable", 61: "shared"}, wp)
+          wp == {60: {"where": "slot:Fable", "model": "Opus 5 (1M context)"},
+                 61: {"where": "shared", "model": None}}, wp)
+    # 상태줄이 안 읽힌 창은 대화 기록(거절 전 모델)보다 창 표시의 모델을 먼저 쓴다(2026-09-13 세일즈부스터 창)
+    no_status = session_hit[:-1]
+    asked9 = []
+    sn.nudge_stalled(lambda m, where=None: asked9.append((m, where)) or False, log=lambda *_: None, now=now,
+                     home=home, state_file=Path(tmp) / "n9.json", windows=lambda: [31],
+                     reader=lambda ps: {31: {"title": "상태줄 없는 창", "lines": no_status}},
+                     typer=lambda pid: {"ok": True}, start_of=lambda pid: 1,
+                     places=lambda ps: {31: {"where": "slot:Fable", "model": "Opus 5 (1M context)"}})
+    check("상태줄이 없으면 창 표시의 모델(Opus)로 묻는다",
+          asked9 == [("Opus 5 (1M context)", "slot:Fable")], asked9)
 
 
 
