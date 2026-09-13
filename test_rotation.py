@@ -3657,6 +3657,29 @@ def case_nudge_stalled(tmp):
     run7(now + 60, normal)
     check("멈춤이 풀리면 처음 본 시각을 지운다", json.loads(sf7.read_text(encoding="utf-8"))["seen"] == {})
 
+    # 2026-09-13: 창 표시로 찾은 그 창의 자격을 usable 에 넘긴다. 모델이 같아도 창마다 계정이 다르다
+    # (Fable 자리에서 Opus 로 바꾼 창은 Opus 자리 계정이 아니라 Fable 자리 계정을 쓴다).
+    asked, typed8 = [], []
+
+    def usable8(m, where=None):
+        asked.append(where)
+        return where == "shared"
+
+    got8 = sn.nudge_stalled(usable8, log=lambda *_: None, now=now, home=home, state_file=Path(tmp) / "n8.json",
+                            windows=lambda: [21, 22],
+                            reader=lambda ps: {21: {"title": "Fable 자리 창", "lines": session_hit},
+                                               22: {"title": "공용 창", "lines": session_hit}},
+                            typer=lambda pid: typed8.append(pid) or {"ok": True}, start_of=lambda pid: 1,
+                            places=lambda ps: {21: "slot:Fable", 22: "shared"})
+    check("창마다 그 창의 자격으로 묻는다", sorted(asked) == ["shared", "slot:Fable"], asked)
+    check("막힌 자리의 창엔 안 넣고 쓸 수 있는 창에만 넣는다", got8 == ["공용 창"] and typed8 == [22], (got8, typed8))
+    fake_state = {"session_claims": {
+        "50": {"bucket": "Opus", "at": now, "slot": "Fable", "label": "A"},
+        "61": {"bucket": "Opus", "at": now, "slot": None, "label": "D"}}}
+    wp = sn.window_places([60, 61, 62], parents={60: 50, 61: 40, 62: 45}, state=fake_state)
+    check("셸 번호로 적힌 표시(cc) → 그 자리, 제 번호 표시(가로채기) → 공용, 표시 없음 → 빠짐",
+          wp == {60: "slot:Fable", 61: "shared"}, wp)
+
 
 
 
@@ -3801,6 +3824,68 @@ def case_slot_pool(tmp):
         uc.get_usage = orig_get
         check("지금 계정 B 가 가장 이르면 B 그대로, 다른 계정은 안 읽는다",
               sp.slot_current(st.load_state(), "Opus") == "B" and reads == ["B"], (reads,))
+        # (12) 2026-09-13 실사고: Fable 자리에 Fable 창 하나(7001) + Opus 로 바꾼 창 둘. A 가 5시간 한도,
+        #      B·C 는 Fable 칸만 바닥. 옛 코드는 "Fable 이 남은 계정이 없다" 며 A 에 3시간 넘게 눌러앉았다.
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["blocked"], s2["scoped_blocked"] = {}, {}
+            for l in ("B", "C"):
+                st.mark_scoped_blocked(s2, l, "Fable", now + 48 * 3600)
+            sp.switch(s2, "Fable", "A", "시험")
+            for pid in ("7002", "7003"):
+                alive.add(pid)
+                st.note_session_claim(s2, pid, "Opus", "A", model="Opus 5 (1M context)", slot="Fable")
+            st.save_state(s2)
+        table.update({"A": dict(free, session_pct=100.0, session_reset=now + 2 * 3600),
+                      "B": fable_full, "C": fable_full})
+        check("채울 칸 = 자리 칸 Fable + 그 자리 창들이 쓰는 Opus",
+              sp.slot_buckets(st.load_state(), "Fable") == ("Fable", "Opus"), sp.slot_buckets(st.load_state(), "Fable"))
+        switched = sp.tend(claude_pool.PREEMPT_PCT)
+        got = sp.slot_current(st.load_state(), "Fable")
+        check("A 가 5시간 한도면 Fable 은 어디서도 못 써도 Opus 창을 위해 B·C 로 갈아끼운다",
+              switched == ["Fable"] and got in ("B", "C"), (switched, got))
+        check("자리 자격 파일도 그 계정 저장본",
+              sa._obj_fingerprint(sp._load(sp.live_path("Fable"))) == sa._obj_fingerprint(sp._load(sp.store_path("Fable", got))))
+        check("창이 끝난 뒤 확인(--slot-check)은 3 이 아니다(Fable 창을 --continue 로 되켜지 않게)",
+              sp.prepare("Fable", reclaim=False)[0] == 2)
+        # (13) A 의 5시간이 풀리면 Fable·Opus 둘 다 되는 A 로 돌아오고, 다음 회차엔 그대로(왕복 없음)
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["blocked"] = {}
+            st.save_state(s2)
+        table.update({"A": dict(free, scoped={"Fable": {"pct": 70.0, "reset": now + 48 * 3600},
+                                              "Opus": {"pct": 5.0, "reset": now + 48 * 3600}})})
+        sp.tend(claude_pool.PREEMPT_PCT)
+        check("A 가 풀리면 A 로 돌아온다", sp.slot_current(st.load_state(), "Fable") == "A",
+              sp.slot_current(st.load_state(), "Fable"))
+        again = sp.tend(claude_pool.PREEMPT_PCT)
+        check("다음 회차엔 그대로 A", again == [] and sp.slot_current(st.load_state(), "Fable") == "A", again)
+        # (14) Opus 칸만 A 에서 바닥이고 두 칸을 다 채울 계정이 없으면, 멀쩡한 Fable 창을 밀지 않는다
+        table.update({"A": dict(free, scoped={"Fable": {"pct": 10.0, "reset": now + 48 * 3600},
+                                              "Opus": {"pct": 100.0, "reset": now + 48 * 3600}})})
+        rc, cur = sp.ensure("Fable", threshold=claude_pool.PREEMPT_PCT)
+        check("두 칸 다 채울 계정이 없으면 그대로 A(종료코드 0)", rc == 0 and cur == "A", (rc, cur))
+        check("A 의 Opus 칸은 기록에 막힌다", st.is_scoped_blocked(st.load_state(), "A", "Opus"))
+        # (15) 둘 다 되는 계정이 생기면 옮기되, 자리 칸(Fable)은 멀쩡했으니 종료코드 0.
+        #      C 는 기록을 지워 멀쩡해 보이지만 실제로는 Fable 이 바닥이다(기록 낡음). 그래서 A → C → B 로
+        #      두 번 옮기는데, 두 번째 이동(C 의 Fable 소진)을 3 으로 세면 안 된다. 들어올 때 계정 A 는 멀쩡했다.
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["scoped_blocked"] = {"A": {"Opus": now + 48 * 3600}}
+            st.save_state(s2)
+        table.update({"B": free})
+        rc, _ = sp.prepare("Fable", reclaim=False)
+        check("다른 창의 칸 때문에 B 로 옮겨도 창이 끝난 뒤 확인은 0(닫은 창을 되켜지 않게)",
+              rc == 0 and sp.slot_current(st.load_state(), "Fable") == "B",
+              (rc, sp.slot_current(st.load_state(), "Fable")))
+        # (16) 이어가기 판단: 창 표시로 찾은 자리 계정의 그 창 모델 칸을 본다
+        check("Fable 자리(B)의 Opus 창은 B 의 Opus 로 판단 → 쓸 수 있음",
+              sp.usable_now("Fable", claude_pool.PREEMPT_PCT, model_bucket="Opus") is True)
+        table.update({"B": dict(free, session_pct=100.0)})
+        check("B 가 5시간 한도면 못 씀",
+              sp.usable_now("Fable", claude_pool.PREEMPT_PCT, model_bucket="Opus") is False)
+        check("claude_pool._usable_now 도 창의 자리 계정을 따른다(Opus 자리 A 가 멀쩡해도)",
+              claude_pool._usable_now("Opus 5 (1M context)", "slot:Fable") is False)
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
          claude_pool.usage_check, st._pid_alive) = real

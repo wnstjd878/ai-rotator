@@ -498,6 +498,7 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
     if not stored_labels(bucket):
         return 2, None
     switched = own_switched = own_dead = False
+    entry_hit = None   # 들어올 때 앉아 있던 계정이 자리 칸에서 바닥났나(3 을 낼지는 이것만 본다)
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
         wanted = slot_buckets(state, bucket)
@@ -524,6 +525,10 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
             need = _need(state, bucket, wanted)   # 방금 막은 기록까지 반영해 다시 계산한다
             own_hit = forced or bucket in bad
             own_dead = own_hit and bucket not in need   # 자리 칸이 바닥인데 어느 계정에서도 못 쓴다
+            if entry_hit is None:
+                # 기록이 낡아 잘못 고른 계정을 다시 옮긴 것은 3 으로 안 센다. 그걸 세면 멀쩡히 닫은 창을
+                # cc 가 한도로 보고 되켠다(시험 [58](15) 에서 재현: A 멀쩡 → C(기록 낡음) → B 가 3 으로 나옴).
+                entry_hit = own_hit and not own_dead
             hit = [n for n in need if n in bad]
             if not forced and not hit:
                 break
@@ -547,7 +552,7 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 st.save_state(state)
                 return 1, cur
             cur, switched = nxt, True
-            if own_hit and not own_dead:
+            if entry_hit:
                 own_switched = True
         if own_dead:
             st.save_state(state)
