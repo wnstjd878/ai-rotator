@@ -21,9 +21,15 @@
       계정**이 그 칸을 아직 쓸 수 있으면 그쪽으로 옮긴다. 곧 초기화되는 계정의 남은 양은 안 쓰면
       그냥 사라지므로 그것부터 태운다(공용 자격의 _reclaim_if_better 와 같은 원칙). 켤 때만 한다.
       창이 끝난 뒤 확인(--slot-check)·창 지키기(tend)·한도로 끝난 뒤(--slot-next)에서는 안 한다.
+자리 창의 모델(2026-09-13): 자리 계정은 **자리 칸 + 그 자리 창들이 지금 쓰는 칸**을 다 채워야 한다
+      (slot_buckets). Fable 로 켜서 창 안에서 Opus 로 바꾼 창은 Fable 자리에 남는데, 창 지키기가
+      Fable 칸만 보고 "Fable 이 남은 계정이 없다" 며 A 의 5시간 한도에 막힌 Opus 창 둘을 3시간 넘게
+      그대로 뒀다(D 는 Opus 가 넉넉했다). 어느 계정에서도 못 쓰는 칸은 조건에서 뺀다(_dead,
+      claude_pool._dead_everywhere 와 같은 기준). 종료코드 3 은 **자리 칸이** 바닥나 갈아탔을 때만이다.
 의도적 미구현: 창 안에서 /model 로 모델을 바꾼 경우의 자리 이동(자리는 켤 때 정해진다.
-      바꾼 모델은 그 자리 계정의 그 칸을 쓴다). 자리 폴더 안 history.jsonl 은 사본이라 갈라진다.
-마지막 점검: 2026-09-12
+      바꾼 모델은 그 자리 계정의 그 칸을 쓰고, 자리 계정 고르기가 그 칸도 따진다).
+      자리 폴더 안 history.jsonl 은 사본이라 갈라진다.
+마지막 점검: 2026-09-13
 """
 
 from __future__ import annotations
@@ -201,6 +207,21 @@ def slot_claims(state: dict, bucket: str, now: float | None = None) -> list:
     return out
 
 
+def slot_buckets(state: dict, bucket: str, now: float | None = None) -> tuple:
+    """그 자리 계정이 채워 줘야 하는 모델 칸: 자리 칸 + 그 자리 창들이 지금 쓰는 칸.
+
+    자리는 켤 때 모델로 정해지고 창 안에서 /model 로 바꿔도 안 옮긴다. 그래서 Fable 자리에 Opus 로
+    바꾼 창이 앉아 있을 수 있다. 창의 칸은 상태줄이 /model 변경 때 표시를 갱신해 둔다.
+    """
+    names = [str(bucket)]
+    claims = st._clean_claims(state.get("session_claims"))
+    for key in slot_claims(state, bucket, now):
+        name = (claims.get(key) or {}).get("bucket")
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
 # ── 자격 ─────────────────────────────────────────────────────────────────────
 
 def _load(path: Path):
@@ -289,38 +310,63 @@ def switch(state: dict, bucket: str, label: str, reason: str = "") -> bool:
 
 # ── 고르기·확인 ───────────────────────────────────────────────────────────────
 
-def pick(state: dict, bucket: str, exclude: str | None = None, now: float | None = None) -> str | None:
-    """그 자리에 앉힐 계정. 저장본이 있고, 계정도 그 칸도 안 막힌 것 중 앞순위."""
+def pick(state: dict, bucket: str, exclude: str | None = None, now: float | None = None,
+         need=None) -> str | None:
+    """그 자리에 앉힐 계정. 저장본이 있고, 계정도 `need` 칸(안 주면 자리 칸)도 안 막힌 것 중 앞순위."""
     now = time.time() if now is None else now
+    need = tuple(need or (bucket,))
     cands = [l for l in stored_labels(bucket)
              if l != exclude and not st.is_blocked(state, label=l, now=now)
-             and not st.is_scoped_blocked(state, l, bucket, now)]
+             and not st.is_scoped_blocked(state, l, need, now)]
     order = st.priority_order(state, cands, now)
     return order[0] if order else None
 
 
-def _revive(state: dict, bucket: str, below: float) -> list:
-    """저장본이 있는데 기록상 막힌 계정 중 실제로는 그 칸이 열린 것을 풀어 준다."""
+def _dead(state: dict, bucket: str, names, now: float | None = None) -> set:
+    """그 칸들 중 이 자리 저장본 계정 **전부**에서 기록상 막힌 칸. 조회 없이 기록만 본다.
+
+    그 칸은 어느 계정으로 가도 못 쓰니 고르는 조건에서 뺀다. 빼지 않으면 Fable 이 네 계정 모두
+    바닥난 날 Fable 자리의 Opus 창까지 살릴 계정을 못 찾는다(2026-09-13). 지금 계정만 그 칸을
+    쓸 수 있으면 막힌 게 아니므로 빠지지 않는다. claude_pool._dead_everywhere 와 같은 기준이다.
+    """
+    now = time.time() if now is None else now
+    labels = [l for l in stored_labels(bucket) if not st.is_blocked(state, label=l, now=now)]
+    return {n for n in names if all(st.is_scoped_blocked(state, l, n, now) for l in labels)}
+
+
+def _need(state: dict, bucket: str, wanted) -> tuple:
+    """자리 계정이 채워야 하는 칸 중 어딘가에서는 쓸 수 있는 칸(순서 유지)."""
+    dead = _dead(state, bucket, wanted)
+    return tuple(n for n in wanted if n not in dead)
+
+
+def _revive(state: dict, bucket: str, below: float, need=None) -> list:
+    """저장본이 있는데 기록상 막힌 계정 중 실제로는 `need` 칸(안 주면 자리 칸)이 다 열린 것을 풀어 준다.
+
+    계정마다 사용량은 한 번만 읽는다(조회가 429 로 막히는 날이 잦다).
+    """
     if usage_check is None:
         return []
+    need = tuple(need or (bucket,))
     freed = []
     now = time.time()
     for l in stored_labels(bucket):
-        if not (st.is_blocked(state, label=l, now=now) or st.is_scoped_blocked(state, l, bucket, now)):
+        if not (st.is_blocked(state, label=l, now=now) or st.is_scoped_blocked(state, l, need, now)):
             continue
         u = usage_check.get_usage_for(store_path(bucket, l), is_current=False)
         if not u:
             continue
-        if usage_check.which_limit(u, threshold=below, bucket=bucket) is None:
-            box = dict(state.get("scoped_blocked") or {})
-            if l in box and bucket in (box.get(l) or {}):
-                box[l] = {k: v for k, v in box[l].items() if k != bucket}
-                state["scoped_blocked"] = box
-            blocked = dict(state.get("blocked") or {})
-            blocked.pop(l, None)
-            state["blocked"] = blocked
-            freed.append(l)
-            log(f"자리 {bucket}: '{l}' 는 실제로 열려 있어 막힘을 풉니다")
+        if any(usage_check.which_limit(u, threshold=below, bucket=n) for n in need):
+            continue
+        box = dict(state.get("scoped_blocked") or {})
+        if l in box and any(n in (box.get(l) or {}) for n in need):
+            box[l] = {k: v for k, v in box[l].items() if k not in need}
+            state["scoped_blocked"] = box
+        blocked = dict(state.get("blocked") or {})
+        blocked.pop(l, None)
+        state["blocked"] = blocked
+        freed.append(l)
+        log(f"자리 {bucket}: '{l}' 는 실제로 열려 있어 막힘을 풉니다({', '.join(need)})")
     return freed
 
 
@@ -330,23 +376,28 @@ ENSURE_SWITCHED = 3
 RECLAIM_MAX_PCT = 97.0
 
 
-def _exhausted_kind(state: dict, cur: str, bucket: str, threshold: float):
-    """자리 계정의 사용량을 읽어 그 칸이 바닥났는지. (kind 또는 None, 읽었는지)."""
+def _exhausted_kinds(state: dict, cur: str, bucket: str, threshold: float, names=None) -> tuple:
+    """자리 계정의 사용량을 한 번 읽어 칸마다 바닥났는지. ({칸: 종류}, 읽었는지). 바닥난 칸만 담는다."""
+    names = tuple(names or (bucket,))
     u = usage_check.get_usage_for(store_path(bucket, cur), is_current=False)
     if not u:
         # 못 읽었다. 기록상 막혀 있으면 기록으로 갈아탄다(2026-09-12 사고와 같은 갈래).
-        if st.is_scoped_blocked(state, cur, bucket):
-            return "model:" + bucket, False
         if st.is_blocked(state, cur):
-            return "blocked", False
-        log(f"자리 {bucket}: '{cur}' 사용량을 못 읽어 그대로 둔다"
-            f"(사유={getattr(usage_check, 'last_error', None)})")
-        return None, False
+            return {n: "blocked" for n in names}, False
+        got = {n: "model:" + n for n in names if st.is_scoped_blocked(state, cur, n)}
+        if not got:
+            log(f"자리 {bucket}: '{cur}' 사용량을 못 읽어 그대로 둔다"
+                f"(사유={getattr(usage_check, 'last_error', None)})")
+        return got, False
     st.note_weekly_reset(state, cur, u.get("weekly_reset"))
     st.note_usage(state, cur, u)
-    kind = usage_check.which_limit(u, threshold=threshold, bucket=bucket)
-    _mark_exhausted(state, cur, bucket, kind, u)
-    return kind, True
+    out = {}
+    for n in names:
+        kind = usage_check.which_limit(u, threshold=threshold, bucket=n)
+        if kind:
+            _mark_exhausted(state, cur, n if kind.startswith("model:") else bucket, kind, u)
+            out[n] = kind
+    return out, True
 
 
 def _mark_exhausted(state: dict, label: str, bucket: str, kind, u: dict) -> None:
@@ -364,30 +415,34 @@ def _mark_exhausted(state: dict, label: str, bucket: str, kind, u: dict) -> None
                         f"{'주간' if kind == 'weekly' else '세션(5시간)'} 한도 소진(자리 {bucket})")
 
 
-def _earlier_than(state: dict, bucket: str, cur: str, now: float | None = None) -> list:
+def _earlier_than(state: dict, bucket: str, cur: str, now: float | None = None, need=None) -> list:
     """지금 자리 계정보다 주간 초기화가 이른 계정들(이른 순). 기록상 막힌 것은 뺀다.
 
     순서는 priority_order 한 벌을 그대로 쓴다(초기화가 이른 것부터, 시각을 모르면 뒤로).
     지금 계정이 기록상 막혀 있으면 되돌리기가 아니라 일반 교체가 처리하므로 빈 목록.
+    `need` 는 채울 칸(안 주면 자리 칸). 그 칸 중 하나라도 막힌 계정은 뺀다.
     """
     now = time.time() if now is None else now
+    need = tuple(need or (bucket,))
     cands = [l for l in stored_labels(bucket)
              if not st.is_blocked(state, label=l, now=now)
-             and not st.is_scoped_blocked(state, l, bucket, now)]
+             and not st.is_scoped_blocked(state, l, need, now)]
     order = st.priority_order(state, cands, now)
     if cur not in order:
         return []
     return order[:order.index(cur)]
 
 
-def _reclaim(state: dict, bucket: str, cur: str) -> str | None:
-    """켤 때: 초기화가 이른 계정이 그 칸을 아직 쓸 수 있으면 그쪽으로 옮긴다. 옮긴 라벨 또는 None.
+def _reclaim(state: dict, bucket: str, cur: str, need=None) -> str | None:
+    """켤 때: 초기화가 이른 계정이 채울 칸을 아직 다 쓸 수 있으면 그쪽으로 옮긴다. 옮긴 라벨 또는 None.
 
-    기록만 믿고 옮기지 않는다. 후보의 사용량을 실제로 읽어 그 칸이 RECLAIM_MAX_PCT 미만일 때만
-    옮긴다(막힌 걸 모르고 옮기면 첫 요청부터 거절받고 다시 갈아탄다). 읽은 값이 한도면 기록에
-    막아 두어 다음 켤 때는 안 읽는다. 못 읽은 후보(429 등)는 건너뛰고 그 다음 후보를 본다.
+    기록만 믿고 옮기지 않는다. 후보의 사용량을 실제로 읽어 채울 칸(`need`, 안 주면 자리 칸)이 전부
+    RECLAIM_MAX_PCT 미만일 때만 옮긴다(막힌 걸 모르고 옮기면 첫 요청부터 거절받고 다시 갈아탄다.
+    자리의 다른 창 칸을 빼먹으면 창 지키기가 3분 안에 도로 밀어내 켤 때마다 왕복한다). 읽은 값이
+    한도면 기록에 막아 두어 다음 켤 때는 안 읽는다. 못 읽은 후보(429 등)는 건너뛰고 다음 후보를 본다.
     """
-    for cand in _earlier_than(state, bucket, cur):
+    need = tuple(need or (bucket,))
+    for cand in _earlier_than(state, bucket, cur, need=need):
         u = usage_check.get_usage_for(store_path(bucket, cand), is_current=False)
         if not u:
             log(f"자리 {bucket}: 초기화가 이른 '{cand}' 사용량을 못 읽어 되돌리지 않는다"
@@ -395,9 +450,11 @@ def _reclaim(state: dict, bucket: str, cur: str) -> str | None:
             continue
         st.note_weekly_reset(state, cand, u.get("weekly_reset"))
         st.note_usage(state, cand, u)
-        kind = usage_check.which_limit(u, threshold=RECLAIM_MAX_PCT, bucket=bucket)
-        if kind:
-            _mark_exhausted(state, cand, bucket, kind, u)
+        bad = [(n, k) for n in need
+               for k in [usage_check.which_limit(u, threshold=RECLAIM_MAX_PCT, bucket=n)] if k]
+        if bad:
+            for n, kind in bad:
+                _mark_exhausted(state, cand, n if kind.startswith("model:") else bucket, kind, u)
             continue
         # 방금 읽은 초기화 시각으로 다시 견줘 본다(기록이 낡아 앞섰던 것일 수 있다)
         if st.priority_order(state, [cand, cur])[0] != cand:
@@ -407,15 +464,15 @@ def _reclaim(state: dict, bucket: str, cur: str) -> str | None:
     return None
 
 
-def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: float):
-    nxt = pick(state, bucket, exclude=exclude)
+def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: float, need=None):
+    nxt = pick(state, bucket, exclude=exclude, need=need)
     if nxt is not None:
         return nxt
     box = _slots(state).setdefault(bucket, {})
     if time.time() - float(box.get("revive_at") or 0) >= 1800:
         box["revive_at"] = time.time()
-        if _revive(state, bucket, threshold):
-            nxt = pick(state, bucket, exclude=exclude)
+        if _revive(state, bucket, threshold, need):
+            nxt = pick(state, bucket, exclude=exclude, need=need)
     return nxt
 
 
