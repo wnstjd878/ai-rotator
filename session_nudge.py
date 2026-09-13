@@ -14,6 +14,8 @@
   - 등록 파일은 창 시작 시각(procStart)까지 맞아야 믿고, 믿을 수 있으면 대화 기록도 한도로 끝나 있어야 한다.
   - 넣은 뒤 입력 칸 내용이 넣은 문장과 똑같을 때만 Enter 를 누른다(사람 글자와 섞였으면 안 누른다).
   - 이어가기 문장은 "이미 끝났으면 다시 하지 말라" 는 조건을 달아 잘못 넣어도 작업을 되풀이하지 않게 한다.
+  - "그 창이 쓰는 계정으로 지금 쓸 수 있나" 는 창 표시로 그 창의 자격(모델별 자리 폴더/공용)을 찾아
+    본다(window_places, 2026-09-13). 모델 이름으로 짐작하면 Fable 로 켜서 Opus 로 바꾼 창을 엉뚱한 계정으로 본다.
 의도적 미구현:
   - 창끼리 메시지 통로(~/.claude/sessions 의 messagingSocketPath): 받는 쪽이 보낸 사람이 등록된
     창인지 확인해서, 주기 작업이 보낸 메시지는 전달은 되지만 무시된다(2026-09-10 실측). 게다가
@@ -363,8 +365,41 @@ def _run_helper(args: list, timeout: float = 30):
             pass
 
 
-def claude_windows() -> list:
+def claude_windows(procs: dict | None = None) -> list:
     """이 PC 의 사람 창 claude 프로세스 번호(부모가 셸인 것). 백그라운드 창 관리자·봇은 뺀다."""
+    procs = _process_table() if procs is None else procs
+    return sorted(pid for pid, (ppid, exe) in procs.items()
+                  if exe == "claude.exe" and procs.get(ppid, (0, ""))[1] in SHELLS)
+
+
+def window_places(pids, parents: dict | None = None, state: dict | None = None) -> dict:
+    """창 → 그 창이 쓰는 자격. 'slot:<칸>'(모델별 자리 폴더) / 'shared'(공용 자격). (style-guard:off)
+
+    창 표시(session_claims)는 cc 로 켠 창이면 그 셸 번호로, 가로채기로 켠 창이면 claude 번호로 적힌다.
+    그래서 창 번호와 부모 번호를 둘 다 본다. 표시를 못 찾은 창은 결과에서 빠진다(옛 방식으로 짐작).
+    2026-09-13 실사고: 모델 이름만으로 짐작해 Fable 자리의 Opus 창을 Opus 자리 계정(D)으로 판단했고,
+    A 의 5시간 한도에 막힌 그 창에 이어가기를 넣어 곧바로 또 막혔다.
+    """
+    import pool_state as st
+    try:
+        state = st.load_state() if state is None else state
+        claims = st._clean_claims(state.get("session_claims"))
+    except Exception:
+        return {}
+    if parents is None:
+        parents = {p: pp for p, (pp, _) in _process_table().items()}
+    out = {}
+    for pid in pids:
+        for key in (pid, parents.get(pid)):
+            item = claims.get(str(key)) if key else None
+            if item and st._same_process(key, item.get("started")) is not False:
+                out[pid] = f"slot:{item['slot']}" if item.get("slot") else "shared"
+                break
+    return out
+
+
+def _process_table() -> dict:
+    """이 PC 의 프로세스 {번호: (부모 번호, 실행 파일 이름 소문자)}."""
     import ctypes
     import ctypes.wintypes as wt
 
@@ -390,8 +425,7 @@ def claude_windows() -> list:
             ok = k.Process32NextW(snap, ctypes.byref(e))
     finally:
         k.CloseHandle(snap)
-    return sorted(pid for pid, (ppid, exe) in procs.items()
-                  if exe == "claude.exe" and procs.get(ppid, (0, ""))[1] in SHELLS)
+    return procs
 
 
 def _proc_start(pid: int) -> int:
@@ -434,18 +468,35 @@ def _save(path: Path, data: dict) -> None:
 
 def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = CLAUDE_HOME,
                   state_file: Path = NUDGE_FILE, windows=None, reader=None, typer=None,
-                  start_of=None) -> list:
+                  start_of=None, places=None) -> list:
     """한도로 멈춘 창에 이어가기 줄을 넣는다. 넣은 창 이름 목록.
 
     `usable(model)` 은 지금 계정으로 그 모델을 쓸 수 있으면 True. 못 쓰면 넣어 봐야 또 멈추므로
-    넣지 않는다(다음 회차가 계정이 바뀐 뒤 넣는다).
+    넣지 않는다(다음 회차가 계정이 바뀐 뒤 넣는다). 창 표시로 그 창의 자격을 찾았으면
+    `usable(model, where)` 로 부른다(where = 'slot:<칸>' / 'shared', window_places).
+    `places(pids)` 는 {창 번호: where}. 안 주면 실제 창에서는 window_places, 시험에서는 빈 값.
     """
     if os.name != "nt" and windows is None:
         return []
     now = time.time() if now is None else now
-    pids = windows() if windows else claude_windows()
+    procs = None
+    if windows:
+        pids = windows()
+    else:
+        procs = _process_table()
+        pids = claude_windows(procs)
     if not pids:
         return []
+    if places is None:
+        if procs is not None:
+            parents = {p: pp for p, (pp, _) in procs.items()}
+            places = lambda ps: window_places(ps, parents=parents)   # noqa: E731
+        else:
+            places = lambda ps: {}   # noqa: E731
+    try:
+        place_map = places(pids) or {}
+    except Exception:
+        place_map = {}
     screens = (reader or (lambda ps: _run_helper(["--read", *map(str, ps)])))(pids) or {}
     typer = typer or (lambda pid: _run_helper(["--type", str(pid)], timeout=45)
                       or {"ok": False, "why": "도우미 실패"})
@@ -500,13 +551,15 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
                 wins[key] = dict(r, capped=True)
                 changed = True
             continue
-        if model not in ok_cache:
+        where = place_map.get(pid) or place_map.get(str(pid))
+        ck = (where, model)
+        if ck not in ok_cache:
             try:
-                ok_cache[model] = bool(usable(model))
+                ok_cache[ck] = bool(usable(model) if where is None else usable(model, where))
             except Exception:
-                ok_cache[model] = False
-        if not ok_cache[model]:
-            continue    # 지금 계정도 그 모델 한도가 막혀 있다
+                ok_cache[ck] = False
+        if not ok_cache[ck]:
+            continue    # 그 창이 쓰는 계정도 그 모델 한도가 막혀 있다
         res = typer(pid) or {}
         if not res.get("ok"):
             log(f"이어가기: '{name}' 창에 넣기 실패({res.get('why') or '알 수 없음'})")
@@ -515,7 +568,8 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
         wins[key] = {"times": times, "name": name}
         changed = True
         sent.append(name)
-        log(f"이어가기: 한도로 멈춘 '{name}' 창에 이어서 하라고 넣었다 ({scr['limit']}, 모델 {model or '모름'})")
+        log(f"이어가기: 한도로 멈춘 '{name}' 창에 이어서 하라고 넣었다 ({scr['limit']}, 모델 {model or '모름'}, "
+            f"자격 {where or '표시 없음'})")
     # 처음 본 시각은 멈춤이 풀린 창·닫힌 창 것만 지운다. 나이로 지우면 이틀 넘게 멈춰 둔 창이
     # 새 멈춤처럼 보여 한 번 들어간다(재검수 반영).
     pruned = {k: v for k, v in seen.items() if k.split("|", 1)[0] in keep}
@@ -535,10 +589,13 @@ if __name__ == "__main__":
         raise SystemExit(_helper_main(sys.argv[1:]))
     if len(sys.argv) > 1 and sys.argv[1] == "--scan":
         # 사람이 확인하는 용도: 창마다 판정만 보여 주고 아무것도 넣지 않는다
-        ps = claude_windows()
+        procs = _process_table()
+        ps = claude_windows(procs)
+        where = window_places(ps, parents={p: pp for p, (pp, _) in procs.items()})
         scr = _run_helper(["--read", *map(str, ps)]) or {}
         for p in ps:
             g = scr.get(str(p)) or {}
             v = parse_screen(g.get("lines") or [])
             print(p, g.get("title", "?"), "멈춤" if v["stalled"] else "-", "일하는중" if v["busy"] else "",
-                  "입력칸비어있음" if v["input_empty"] else "입력칸에글자", v["model"], v["limit"])
+                  "입력칸비어있음" if v["input_empty"] else "입력칸에글자", v["model"],
+                  where.get(p, "표시없음"), v["limit"])

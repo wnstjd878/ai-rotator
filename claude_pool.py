@@ -742,14 +742,24 @@ def tend_windows() -> int:
     return rc
 
 
-def _usable_now(model) -> bool:
-    """지금 계정으로 그 모델을 쓸 수 있나(미리 넘기는 문턱 아래인가). 못 읽으면 False."""
+def _usable_now(model, where: str | None = None) -> bool:
+    """지금 계정으로 그 모델을 쓸 수 있나(미리 넘기는 문턱 아래인가). 못 읽으면 False.
+
+    `where` 는 이어가기가 창 표시로 찾은 그 창의 자격이다(session_nudge.window_places). (style-guard:off)
+    'slot:<칸>' 이면 그 자리 계정의 그 모델 칸, 'shared' 면 공용 계정으로 본다. 없으면(표시를 못
+    찾은 창) 모델 이름과 같은 자리로 짐작한다. 2026-09-13 실사고: Fable 자리에서 Opus 로 바꾼 창을
+    Opus 자리 계정(D)으로 판단해, A 의 5시간 한도에 막힌 창에 이어가기를 넣었고 곧바로 또 막혔다.
+    """
     if usage_check is None:
         return False
-    # 그 모델의 자리가 떠 있으면 자리 계정으로 판단한다(그 창들은 공용 자격을 안 쓴다)
-    got = slot_pool.usable_now(usage_check.bucket_for_model(model), PREEMPT_PCT)
-    if got is not None:
-        return got
+    bucket = usage_check.bucket_for_model(model)
+    if where and where.startswith("slot:"):
+        return bool(slot_pool.usable_now(where[len("slot:"):], PREEMPT_PCT, model_bucket=bucket))
+    if where != "shared":
+        # 그 모델의 자리가 떠 있으면 자리 계정으로 판단한다(그 창들은 공용 자격을 안 쓴다)
+        got = slot_pool.usable_now(bucket, PREEMPT_PCT)
+        if got is not None:
+            return got
     try:
         cur = st.load_state().get("current")
     except Exception:

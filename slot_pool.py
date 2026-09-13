@@ -478,60 +478,88 @@ def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: fl
 
 def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
            reclaim: bool = False) -> tuple:
-    """자리의 계정이 그 칸에서 바닥났으면 갈아끼운다. (종료코드, 지금 계정).
+    """자리의 계정이 바닥났으면 갈아끼운다. (종료코드, 지금 계정). (style-guard:off, 자리=slot 코드 용어)
 
-    종료코드: 0 그대로 / 3 갈아탔음 / 2 갈아탈 데 없음 / 1 교체 실패.
+    종료코드: 0 그대로(다른 창의 칸 때문에만 갈아탄 경우 포함) / 3 자리 칸이 바닥나 갈아탔음 /
+    2 자리 칸이 바닥났는데 갈아탈 데 없음 / 1 교체 실패.
     `threshold` 97 은 창 지키기(거절받기 전에 미리), 100 은 켜기 전 확인.
     `force_next` 면 지금 계정을 두고 무조건 다른 계정으로(창이 한도로 끝난 뒤 되켤 때).
-    `reclaim` 이면(켤 때만) 지금 계정이 멀쩡해도 주간 초기화가 더 이른 계정이 그 칸을 쓸 수
-    있으면 그쪽으로 옮긴다(_reclaim). 이때 종료코드는 0 이다. 3 은 "바닥나서 갈아탔음" 이고
-    cc 는 창이 끝난 뒤 3 을 한도로 본다.
+    `reclaim` 이면(켤 때만) 지금 계정이 멀쩡해도 주간 초기화가 더 이른 계정이 채울 칸을 다 쓸 수
+    있으면 그쪽으로 옮긴다(_reclaim). 이때 종료코드는 0 이다.
+    채울 칸 = 자리 칸 + 그 자리 창들이 쓰는 칸(slot_buckets) 중 어딘가에서는 쓸 수 있는 칸(_need).
+    3 을 자리 칸이 바닥났을 때만 내는 이유: cc 는 창이 끝난 뒤(--slot-check) 3 을 **그 창의** 한도로
+    보고 --continue 로 다시 켠다. 다른 창의 칸 때문에 갈아탄 걸 3 으로 알리면 사람이 닫은 창이 되살아난다.
+    다 채울 계정이 없으면 자리 칸이 바닥났을 때만 자리 칸만 보고 고른다. 자리 칸이 멀쩡하면 그대로
+    둔다(자리 칸 창을 밀면 다음 회차가 되밀어 왕복한다. 공용 계정의 strict 와 같은 규율).
     갈아탄 계정도 바닥일 수 있으므로 쓸 만한 계정이 나올 때까지 이어서 본다(--ensure 와 같은 규율).
     """
     if not enabled() or usage_check is None:
         return 0, None
     if not stored_labels(bucket):
         return 2, None
-    switched = False
+    switched = own_switched = own_dead = False
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
+        wanted = slot_buckets(state, bucket)
         cur = slot_current(state, bucket)
         if cur and cur not in stored_labels(bucket):
             cur = None
         if cur is None:
-            nxt = _pick_or_revive(state, bucket, None, threshold)
+            nxt = _pick_or_revive(state, bucket, None, threshold, _need(state, bucket, wanted) or (bucket,))
             if not nxt or not switch(state, bucket, nxt, "자리 처음 앉힘"):
                 st.save_state(state)
                 return (2 if not nxt else 1), None
-            cur, switched = nxt, True
+            cur, switched, own_switched = nxt, True, True
         for _ in range(len(stored_labels(bucket)) + 1):
             note = sync_creds(bucket, cur)
             if "되저장" in note or "밀어 넣음" in note:
                 log(f"자리 {bucket}: {note}")
+            forced, bad = force_next, {}
             if force_next:
-                kind, force_next = "forced", False
+                force_next = False
             else:
-                kind, read = _exhausted_kind(state, cur, bucket, threshold)
+                bad, read = _exhausted_kinds(state, cur, bucket, threshold, wanted)
                 if read:
                     sync_creds(bucket, cur)   # 저장본을 재발급했을 수 있다(401 뒤). 자리로 밀어 넣는다
-            if not kind:
+            need = _need(state, bucket, wanted)   # 방금 막은 기록까지 반영해 다시 계산한다
+            own_hit = forced or bucket in bad
+            own_dead = own_hit and bucket not in need   # 자리 칸이 바닥인데 어느 계정에서도 못 쓴다
+            hit = [n for n in need if n in bad]
+            if not forced and not hit:
                 break
-            nxt = _pick_or_revive(state, bucket, cur, threshold)
+            nxt = _pick_or_revive(state, bucket, cur, threshold, need) if need else None
+            if nxt is None and own_hit and bucket in need and len(need) > 1:
+                nxt = _pick_or_revive(state, bucket, cur, threshold, (bucket,))
+                if nxt:
+                    log(f"자리 {bucket}: 창들이 쓰는 칸({', '.join(need)})을 다 채울 계정이 없어 "
+                        f"{bucket} 칸만 보고 '{nxt}' 로 갑니다")
             if nxt is None:
                 st.save_state(state)
-                log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")
-                return 2, cur
-            why = "미리 넘김" if threshold < 100.0 else ("한도로 끝난 뒤" if kind == "forced" else "켜기 전 확인")
-            if not switch(state, bucket, nxt, f"{bucket} 칸 소진, {why}"):
+                if own_hit:
+                    log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")
+                    return 2, cur
+                log(f"자리 {bucket}: 이 자리 창들이 쓰는 {', '.join(hit)} 칸이 '{cur}' 에서 바닥났지만 "
+                    f"{bucket} 칸까지 채울 계정이 없어 그대로 둔다")
+                return (ENSURE_SWITCHED if own_switched else 0), cur
+            why = "미리 넘김" if threshold < 100.0 else ("한도로 끝난 뒤" if forced else "켜기 전 확인")
+            what = f"{bucket} 칸 소진" if own_hit else f"이 자리 창들이 쓰는 {', '.join(hit)} 칸 소진"
+            if not switch(state, bucket, nxt, f"{what}, {why}"):
                 st.save_state(state)
                 return 1, cur
             cur, switched = nxt, True
+            if own_hit and not own_dead:
+                own_switched = True
+        if own_dead:
+            st.save_state(state)
+            log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")
+            return 2, cur
         if reclaim and not switched and cur:
-            got = _reclaim(state, bucket, cur)
+            need = _need(state, bucket, wanted)
+            got = _reclaim(state, bucket, cur, need) if need else None
             if got:
                 cur = got
         st.save_state(state)
-    return (ENSURE_SWITCHED if switched else 0), cur
+    return (ENSURE_SWITCHED if own_switched else 0), cur
 
 
 def prepare(bucket: str | None, reclaim: bool = True) -> tuple:
@@ -562,14 +590,21 @@ def tend(threshold: float) -> list:
     for b in BUCKETS:
         if not slot_claims(state, b):
             continue
-        rc, _ = ensure(b, threshold=threshold)
-        if rc == ENSURE_SWITCHED:
+        before = slot_current(state, b)
+        rc, cur = ensure(b, threshold=threshold)
+        # 3 은 자리 칸이 바닥났을 때만이라, 다른 창의 칸 때문에 갈아탄 것은 계정이 바뀌었는지로 본다
+        if rc == ENSURE_SWITCHED or (cur and cur != before):
             switched.append(b)
     return switched
 
 
-def usable_now(bucket: str, threshold: float) -> bool | None:
-    """자리의 지금 계정으로 그 칸을 쓸 수 있나. 자리가 없으면 None(공용 판단으로)."""
+def usable_now(bucket: str, threshold: float, model_bucket: str | None = None) -> bool | None:
+    """자리 `bucket` 의 지금 계정으로 쓸 수 있나. 자리가 없으면 None(공용 판단으로).
+
+    `model_bucket` 을 주면 그 창이 이 자리에 앉아 있는 걸 창 표시로 확인한 것이다. 그때는 자리 계정의
+    그 모델 칸을 본다(Fable 자리의 Opus 창). 안 주면 옛 방식으로 짐작한다: 모델 이름과 같은 자리에
+    창이 떠 있으면 그 자리 계정, 없으면 None.
+    """
     if not enabled() or usage_check is None or not bucket:
         return None
     try:
@@ -577,12 +612,14 @@ def usable_now(bucket: str, threshold: float) -> bool | None:
     except Exception:
         return None
     cur = slot_current(state, bucket)
-    if not cur or not slot_claims(state, bucket):
+    if not cur:
+        return None
+    if model_bucket is None and not slot_claims(state, bucket):
         return None
     u = usage_check.get_usage_for(store_path(bucket, cur), is_current=False)
     if not u:
         return False
-    return usage_check.which_limit(u, threshold=threshold, bucket=bucket) is None
+    return usage_check.which_limit(u, threshold=threshold, bucket=model_bucket or bucket) is None
 
 
 def status_lines(state: dict) -> list:
