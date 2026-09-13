@@ -57,7 +57,9 @@ while ($true) {
     # 그래서 사용량 조회(--ensure)를 한 번 더 한다. 종료코드 3 = 그 칸이 바닥나 이미 갈아탔음.
     $switchedAlready = $false
     if (-not $limited) {
-        if ($slotDir) { python $POOL --slot-check @runArgs | Out-Null } else { python $POOL --ensure @runArgs }
+        # --window: 이 창이 마지막으로 쓰던 모델(상태줄이 /model 때 표시를 갱신)로 판단한다. 켤 때 모델로 보면
+        # Fable 로 켜서 Opus 로 바꾼 창을 사람이 닫았는데 되켜거나, Opus 한도로 멈춘 창을 안 되켠다(2026-09-13).
+        if ($slotDir) { python $POOL --slot-check --window $PID @runArgs | Out-Null } else { python $POOL --ensure @runArgs }
         if ($LASTEXITCODE -eq 3) { $limited = $true; $switchedAlready = $true }
     }
 

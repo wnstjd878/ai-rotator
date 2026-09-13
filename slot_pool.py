@@ -497,7 +497,7 @@ def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: fl
 
 
 def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
-           reclaim: bool = False) -> tuple:
+           reclaim: bool = False, window_bucket: str | None = None) -> tuple:
     """자리의 계정이 바닥났으면 갈아끼운다. (종료코드, 지금 계정). (style-guard:off, 자리=slot 코드 용어)
 
     종료코드: 0 그대로(다른 창의 칸 때문에만 갈아탄 경우 포함) / 3 자리 칸이 바닥나 갈아탔음 /
@@ -512,16 +512,22 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
     다 채울 계정이 없으면 자리 칸이 바닥났을 때만 자리 칸만 보고 고른다. 자리 칸이 멀쩡하면 그대로
     둔다(자리 칸 창을 밀면 다음 회차가 되밀어 왕복한다. 공용 계정의 strict 와 같은 규율).
     갈아탄 계정도 바닥일 수 있으므로 쓸 만한 계정이 나올 때까지 이어서 본다(--ensure 와 같은 규율).
+    `window_bucket`(--slot-check): 끝난 창이 마지막으로 쓰던 모델 칸. 주면 3 을 자리 칸 대신 이 칸으로
+    정한다. Fable 로 켜서 Opus 로 바꾼 창을 닫았을 때 Fable 만 보고 되켜거나, Opus 한도로 멈춘 창을
+    안 되켜던 어긋남을 없앤다(2026-09-13 검수 4번).
     """
     if not enabled() or usage_check is None:
         return 0, None
     if not stored_labels(bucket):
         return 2, None
+    judge = window_bucket or bucket   # 3 을 낼지 판단하는 칸
     switched = own_switched = own_dead = False
-    entry_hit = None   # 들어올 때 앉아 있던 계정이 자리 칸에서 바닥났나(3 을 낼지는 이것만 본다)
+    entry_hit = None   # 들어올 때 앉아 있던 계정이 judge 칸에서 바닥났나(3 을 낼지는 이것만 본다)
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
         wanted = slot_buckets(state, bucket)
+        if judge not in wanted:
+            wanted = wanted + (judge,)   # 끝난 창은 claude 가 없어 _has_window 에서 빠졌을 수 있다
         cur = slot_current(state, bucket)
         if cur and cur not in stored_labels(bucket):
             cur = None
@@ -552,7 +558,7 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
             if entry_hit is None:
                 # 기록이 낡아 잘못 고른 계정을 다시 옮긴 것은 3 으로 안 센다. 그걸 세면 멀쩡히 닫은 창을
                 # cc 가 한도로 보고 되켠다(시험 [58](15) 에서 재현: A 멀쩡 → C(기록 낡음) → B 가 3 으로 나옴).
-                entry_hit = own_hit and not own_dead
+                entry_hit = (forced or judge in bad) and judge in need
             hit = [n for n in need if n in bad]
             if not forced and not hit:
                 break
@@ -566,7 +572,8 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 st.save_state(state)
                 if own_hit:
                     log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")
-                    return 2, cur
+                    # 끝난 창의 칸(judge) 때문에 이미 옮겼으면 그 창은 되켜야 한다(3)
+                    return (ENSURE_SWITCHED if own_switched and judge != bucket else 2), cur
                 log(f"자리 {bucket}: 이 자리 창들이 쓰는 {', '.join(hit)} 칸이 '{cur}' 에서 바닥났지만 "
                     f"{bucket} 칸까지 채울 계정이 없어 그대로 둔다")
                 return (ENSURE_SWITCHED if own_switched else 0), cur
@@ -581,7 +588,7 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
         if own_dead:
             st.save_state(state)
             log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")
-            return 2, cur
+            return (ENSURE_SWITCHED if own_switched and judge != bucket else 2), cur
         if reclaim and not switched and cur:
             need = _need(state, bucket, wanted)
             got = _reclaim(state, bucket, cur, need) if need else None
@@ -591,16 +598,16 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
     return (ENSURE_SWITCHED if own_switched else 0), cur
 
 
-def prepare(bucket: str | None, reclaim: bool = True) -> tuple:
+def prepare(bucket: str | None, reclaim: bool = True, window_bucket: str | None = None) -> tuple:
     """cc 가 켜기 직전에 부른다. (종료코드, 자리 폴더 경로 또는 None).
 
-    저장본이 하나도 없는 칸이면 None — cc 는 예전 방식(공용 자격)으로 켠다.
+    저장본이 하나도 없는 칸이면 None, cc 는 예전 방식(공용 자격)으로 켠다.
     `reclaim=False`(--slot-check) 는 창이 끝난 뒤 "바닥났나" 만 보는 길이다. 거기서 되돌리면
-    사람이 창을 닫은 직후에 헛 교체가 생긴다.
+    사람이 창을 닫은 직후에 헛 교체가 생긴다. `window_bucket` 은 끝난 창이 마지막으로 쓰던 모델 칸이다.
     """
     if not enabled() or not bucket or not stored_labels(bucket):
         return 0, None
-    rc, cur = ensure(bucket, threshold=100.0, reclaim=reclaim)
+    rc, cur = ensure(bucket, threshold=100.0, reclaim=reclaim, window_bucket=window_bucket)
     if cur is None:
         return rc, None
     ensure_dir(bucket)

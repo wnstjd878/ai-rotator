@@ -854,6 +854,19 @@ def release_session(pid) -> bool:
     return False
 
 
+def _claimed_bucket(pid) -> str | None:
+    """창 표시에 적힌 그 창의 지금 모델 칸(상태줄이 /model 때 갱신한다). 못 찾으면 None.
+
+    창이 끝난 직후(--slot-check)에 부르므로 claude 창은 이미 없다. 그래서 살아 있는 창만 세는
+    걸러내기(slot_pool._has_window) 없이 표시를 그대로 읽는다. 표시 지우기는 cc 가 그 뒤에 한다.
+    """
+    try:
+        item = st._clean_claims(st.load_state().get("session_claims")).get(str(int(pid)))
+    except Exception:
+        return None
+    return (item or {}).get("bucket")
+
+
 def _wanted_buckets(state: dict, bucket=None) -> tuple:
     """이번 호출이 쓰는 모델 칸 + 지금 떠 있는 창들이 잡고 있는 칸.
 
@@ -2083,7 +2096,13 @@ def main():
         # (--slot-check: 바닥났나만, 되돌리기 없음), 한도로 끝난 뒤 되켤 때(--slot-next) 부른다.
         # 표준출력에는 자리 폴더 경로만 찍는다(cc 가 그 줄을 CLAUDE_CONFIG_DIR 로 쓴다).
         # 저장본이 없는 칸이면 아무것도 안 찍는다 = 예전 방식.
-        bucket = usage_check.bucket_for_model(intended_model(argv[1:])) if usage_check else None
+        rest = list(argv[1:])
+        window_bucket = None
+        if len(rest) >= 2 and rest[0] == "--window":
+            # 끝난 창의 표시 번호. 그 창이 마지막으로 쓰던 모델 칸으로 "한도로 끝났나" 를 본다(--slot-check)
+            window_bucket = _claimed_bucket(rest[1])
+            rest = rest[2:]
+        bucket = usage_check.bucket_for_model(intended_model(rest)) if usage_check else None
         if argv[0] == "--slot-next":
             if not (bucket and slot_pool.enabled() and slot_pool.stored_labels(bucket)):
                 return 0
@@ -2091,7 +2110,7 @@ def main():
             if cur:
                 print(str(slot_pool.slot_dir(bucket)))
             return rc
-        rc, path = slot_pool.prepare(bucket, reclaim=(argv[0] == "--slot-prepare"))
+        rc, path = slot_pool.prepare(bucket, reclaim=(argv[0] == "--slot-prepare"), window_bucket=window_bucket)
         if path:
             print(path)
         return rc

@@ -3919,6 +3919,46 @@ def case_slot_pool(tmp):
         procs = {50: (1, "powershell.exe"), 60: (50, "claude.exe"), 70: (1, "powershell.exe"), 80: (70, "node.exe")}
         check("claude 창이 딸린 셸·claude 자체만 센다",
               real[-1](["50", "60", "70", "80"], procs=procs) == ["50", "60"])
+        # (19) 창이 끝난 뒤 확인(--slot-check): 끝난 창이 마지막으로 쓰던 모델 칸으로 3 을 정한다(검수 4번).
+        #      7005 = Fable 로 켜서 Opus 로 바꾼 창(Fable 자리). 7001 Fable 창도 떠 있다.
+        alive.add("7005")
+
+        def seat_w(label, upd, scoped):
+            with st.with_lock():
+                s2 = st.load_state()
+                s2["blocked"], s2["scoped_blocked"] = {}, scoped
+                sp.switch(s2, "Fable", label, "시험")
+                st.note_session_claim(s2, "7005", "Opus", label, model="Opus 5 (1M context)", slot="Fable")
+                st.save_state(s2)
+            table.update(upd)
+
+        seat_w("C", {"A": free, "C": fable_full}, {"B": {"Fable": now + 48 * 3600}})
+        rc, _ = sp.prepare("Fable", reclaim=False, window_bucket="Opus")
+        check("Opus 로 쓰다 닫은 창은 그 계정 Fable 이 바닥이어도 되켜지 않는다(0)", rc == 0, rc)
+        opus_full = dict(free, scoped={"Fable": {"pct": 5.0, "reset": now + 48 * 3600},
+                                       "Opus": {"pct": 100.0, "reset": now + 48 * 3600}})
+        seat_w("A", {"A": opus_full, "B": free, "C": free}, {})
+        rc, _ = sp.prepare("Fable", reclaim=False)
+        check("옛 방식(켤 때 모델 Fable)으로 보면 Opus 한도로 멈춘 창을 못 알아본다(0)", rc == 0, rc)
+        seat_w("A", {"A": opus_full, "B": free, "C": free}, {})
+        rc, _ = sp.prepare("Fable", reclaim=False, window_bucket="Opus")
+        got = sp.slot_current(st.load_state(), "Fable")
+        check("Opus 한도로 멈춘 창은 3(되켜짐), Opus 가 되는 계정으로 옮김", rc == 3 and got in ("B", "C"), (rc, got))
+        # (20) cc 가 넘기는 --window 번호로 창 표시의 지금 모델 칸을 찾고, 명령으로도 같은 판단을 한다
+        check("창 표시 번호로 모델 칸을 찾는다(없는 번호는 None)",
+              claude_pool._claimed_bucket("7005") == "Opus" and claude_pool._claimed_bucket("99999") is None)
+        seat_w("A", {"A": opus_full, "B": free, "C": free}, {})
+        import contextlib
+        import io
+        import sys as _sys
+        old_argv = _sys.argv
+        _sys.argv = ["claude_pool.py", "--slot-check", "--window", "7005", "--model", "claude-fable-5-1"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = claude_pool.main()
+        finally:
+            _sys.argv = old_argv
+        check("명령 --slot-check --window 도 같은 판단(3)", rc == 3, rc)
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
          claude_pool.usage_check, st._pid_alive, sp._has_window) = real
