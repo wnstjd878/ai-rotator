@@ -2750,7 +2750,8 @@ def main():
                      case_limit_with_split_cred, case_cred_refresh,
                      case_stale_scoped_block, case_stale_account_block,
                      case_push_fail_alert, case_tend_windows,
-                     case_usage_cache_backoff, case_nudge_stalled, case_slot_pool):
+                     case_usage_cache_backoff, case_nudge_stalled,
+                     case_window_limit_from_screen, case_slot_pool):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -3487,6 +3488,104 @@ def case_tend_windows(tmp):
     finally:
         st._pid_alive = real_alive
         claude_pool.release_session(4242)
+
+
+def case_window_limit_from_screen(tmp):
+    """[59] 창 화면의 한도 거절을 그 거절 당시 계정의 칸 막힘으로 적는다 (2026-09-14).
+
+    실사고: 사용량 조회가 하루 종일 429 로 막혀 순환기가 어느 계정의 Fable 이 찼는지
+    기록에 못 적었다. 그 사이 되돌리기가 주간 초기화만 보고 공용을 Fable 여유 계정(D)에서
+    Fable 100% 계정(C)으로 옮겨, 그 위 공용 Fable 창들이 8시간 한도 거절을 받았다.
+    막힘 기록이 없으니 폴백도 못 움직였다. 유일한 신호(창 화면의 거절)를 기록에 넣는다.
+    """
+    print("\n[59] 창 화면의 한도 거절을 기록으로 되먹인다")
+    import usage_check as uc
+    import session_nudge as sn
+
+    setup(tmp, ["A", "B", "C", "D"], "A")
+    now = time.time()
+    real_cached = uc.cached_usage
+    claude_pool.usage_check = uc
+    try:
+        # (A) 귀속: 거절 당시 계정을 교체 기록으로 되짚는다 (지금 계정이 아니라)
+        state = st.load_state()
+        state["history"] = [
+            {"at": now - 500, "label": "D", "kind": "switched", "reason": ""},
+            {"at": now - 300, "label": "C", "kind": "switched", "reason": ""},
+            {"at": now - 100, "label": "A", "kind": "switched", "reason": ""},
+            {"at": now - 250, "label": "C", "kind": "slot:Fable", "reason": ""},
+        ]
+        check("공용: 거절 시각의 계정(C)에 귀속(지금 계정 A 아님)",
+              claude_pool._account_for_where_at(state, "shared", now - 200) == "C")
+        check("공용: 더 이른 거절이면 그때 계정(D)",
+              claude_pool._account_for_where_at(state, "shared", now - 400) == "D")
+        check("기록 이전이면 넘겨짚지 않는다(None)",
+              claude_pool._account_for_where_at(state, "shared", now - 900) is None)
+        check("자리(slot:Fable) 거절은 그 자리 기록으로 귀속",
+              claude_pool._account_for_where_at(state, "slot:Fable", now - 200) == "C")
+
+        # (B) 기록: 거절 당시 계정 C 의 Fable 칸만 막고, 지금 계정 A 는 안 막는다
+        uc.cached_usage = lambda label: None   # 캐시엔 리셋 없음 → 주간 리셋으로 떨어진다
+        state["weekly_reset"] = {"C": now + 3 * 24 * 3600}
+        st.save_state(state)
+        claude_pool._record_window_limit("shared", "Fable", now - 200)
+        state = st.load_state()
+        check("C 의 Fable 칸이 막힘으로 적힌다", st.is_scoped_blocked(state, "C", "Fable"))
+        check("지금 계정 A 는 안 막힌다", not st.is_scoped_blocked(state, "A", "Fable"))
+        check("계정 전체 막힘은 아니다(Opus 는 그대로)", not st.is_scoped_blocked(state, "C", "Opus"))
+
+        # 리셋 시각을 못 구하면 안 적는다(영영 막힘 방지)
+        state["weekly_reset"] = {}
+        state["scoped_blocked"] = {}
+        st.save_state(state)
+        claude_pool._record_window_limit("shared", "Fable", now - 200)
+        check("리셋 시각을 못 구하면 안 적는다",
+              not st.is_scoped_blocked(st.load_state(), "C", "Fable"))
+
+        # (C) 고리가 닫힌다: 창 거절이 기록되면 되돌리기가 그 계정을 자동으로 뺀다.
+        # 실사고의 되돌리기 D→C 는 C 의 Fable 소진이 기록에 없어서 일어났다. Fix B 가
+        # 기록하면 기존 better_candidate 가 그 계정을 후보에서 뺀다(별도 조회 없이).
+        setup(tmp, ["A", "B"], "B")
+        state = st.load_state()
+        state["weekly_reset"] = {"A": now + 1000, "B": now + 5 * 24 * 3600}  # A 가 앞순위
+        state["reclaim_at"] = None
+        st.save_state(state)
+        state = st.load_state()
+        check("기록 전엔 앞순위 A 가 Fable 되돌리기 후보",
+              st.better_candidate(state, "B", bucket=("Fable",)) == "A")
+        st.mark_scoped_blocked(state, "A", "Fable", now + 3 * 24 * 3600)  # 창 거절이 A:Fable 을 적었다고 침
+        check("기록 뒤엔 A 가 Fable 되돌리기 후보에서 빠진다",
+              st.better_candidate(state, "B", bucket=("Fable",)) is None)
+        check("다른 칸(Opus)이면 A 는 여전히 후보(칸만 막았다)",
+              st.better_candidate(state, "B", bucket=("Opus",)) == "A")
+
+        # (D) nudge_stalled 가 Fable 한도 창에만 on_limit 을 부른다(세션 한도는 아님)
+        home = Path(tmp) / "wl_home"
+        (home / "sessions").mkdir(parents=True, exist_ok=True)
+        rule = "─" * 100
+        status = "  X | - | Fable 5.1 | [■□□□□□□□□□] 10%"
+        fable_hit = ["> 해줘",
+                     "  ⎿ \xa0You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+                     "✻ done", rule, ">", rule, status]
+        session_hit = ["● 이어서", "  ⎿  You've hit your session limit · resets 1am (Asia/Seoul)",
+                       rule, ">", rule, status]
+        calls = []
+        sn.nudge_stalled(lambda m, where=None: False, log=lambda *_: None, now=now, home=home,
+                         state_file=Path(tmp) / "wl.json", windows=lambda: [11, 12],
+                         reader=lambda ps: {11: {"title": "공용 Fable 창", "lines": fable_hit},
+                                            12: {"title": "세션 한도 창", "lines": session_hit}},
+                         typer=lambda pid: {"ok": True}, start_of=lambda pid: 1,
+                         places=lambda ps: {11: "shared", 12: "shared"},
+                         on_limit=lambda where, bucket, at: calls.append((where, bucket, at)))
+        check("Fable 한도 창은 on_limit 을 부른다(칸 이름·자격 전달)",
+              (("shared", "Fable") in [(w, b) for w, b, _ in calls]), calls)
+        check("세션(계정 전체) 한도 창은 on_limit 을 안 부른다",
+              all(b == "Fable" for _, b, _ in calls), calls)
+        check("귀속 시각은 멈춤을 처음 본 때다(화면이 바뀐 계정 오귀속 방지)",
+              all(abs(at - now) < 5 for _, _, at in calls), calls)
+    finally:
+        uc.cached_usage = real_cached
+        claude_pool.usage_check = None
 
 
 def case_nudge_stalled(tmp):

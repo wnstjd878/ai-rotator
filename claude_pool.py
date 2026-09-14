@@ -1176,22 +1176,6 @@ def _reclaim_locked(state: dict, bucket: str | None = None):
     nxt = st.better_candidate(state, cur, bucket=_wanted_buckets(state, bucket))
     if nxt is None:
         return None
-    # 되돌리기는 조회를 안 하지만, **이미 읽어둔 값**에서 옮길 계정의 잡힌 칸이 꽉 찬 게
-    # 보이면 안 옮긴다(되돌리기는 아껴 쓰자는 최적화라 미루면 그만이다). 2026-09-14 실사고:
-    # 429 로 C 의 Fable 소진을 기록에 못 적은 채, 되돌리기가 주간 초기화만 보고 공용을 D(Fable
-    # 여유)→C(Fable 100%)로 옮겨 그 위 공용 Fable 창들이 8시간 한도 거절을 받았다.
-    if usage_check is not None:
-        cu = usage_check.cached_usage(nxt)
-        if cu is not None:
-            for nm in _wanted_buckets(state, bucket):
-                pct = usage_check.scoped_pct(cu, nm)
-                if pct is None or pct < PREEMPT_PCT:
-                    continue
-                r = usage_check.scoped_reset(cu, nm)
-                if r and float(r) > time.time():
-                    st.mark_scoped_blocked(state, nxt, nm, float(r))  # 다음 회차가 기록으로 거른다
-                log(f"되돌리기 취소: '{nxt}' 의 {nm} 칸이 이미 읽어둔 값으로 {pct:.0f}% 라 안 옮긴다")
-                return None
     st.note_reclaim(state)  # 교체가 실패해도 기록해 재시도 폭주를 막는다
     if not _switch(nxt, leaving=cur):
         return None
