@@ -773,13 +773,79 @@ def _usable_now(model, where: str | None = None) -> bool:
                                    bucket=usage_check.bucket_for_model(model)) is None
 
 
+def _account_for_where_at(state: dict, where: str | None, at: float) -> str | None:
+    """그 자격(공용/자리)이 `at` 시각에 쓰던 계정. 교체 기록으로 되짚는다. 모르면 None.
+
+    창이 화면에 남긴 한도 거절을 어느 계정 몫으로 적을지 정한다. **지금 계정이 아니라 거절
+    당시 계정**에 귀속시켜야 한다 — 순환기가 이미 멀쩡한 계정으로 옮긴 뒤에도 화면엔 옛 거절
+    문구가 남아 있어서, 지금 계정을 적으면 멀쩡한 계정을 막는다(2026-09-13 자리 오판과 같은 함정).
+    기록이 `at` 이전을 못 덮으면 None 을 돌려준다(지금 계정으로 넘겨짚지 않는다).
+    """
+    if where == "shared" or where is None:
+        kinds = ("switched",)
+    elif where.startswith("slot:"):
+        kinds = (where,)                      # 예: "slot:Fable"
+    else:
+        return None
+    label = None
+    for h in state.get("history") or []:      # 기록은 시간 순으로 쌓인다
+        try:
+            when = float(h.get("at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if h.get("kind") in kinds and when <= at:
+            label = h.get("label")
+    return label
+
+
+def _bucket_reset_for(state: dict, label: str, bucket: str) -> float | None:
+    """그 계정 그 칸이 다시 열리는 시각. 이미 읽어둔 값·주간 리셋만 본다(새 조회 없음)."""
+    if usage_check is not None:
+        try:
+            r = usage_check.scoped_reset(usage_check.cached_usage(label), bucket)
+            if r:
+                return float(r)
+        except Exception:
+            pass
+    r = (state.get("weekly_reset") or {}).get(label)   # Fable 칸은 주간과 같이 리셋된다
+    try:
+        return float(r) if r else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_window_limit(where: str | None, bucket: str, at: float) -> None:
+    """창 화면에 남은 한도 거절을 그 거절 당시 계정의 칸 막힘으로 적는다(session_nudge 콜백).
+
+    429 로 사용량을 못 읽는 동안 순환기가 아는 유일한 신호다. 적어 두면 다음 회차의 켜기 전
+    확인·창 지키기·되돌리기가 기록만 보고 그 계정에서 빠져나간다(새 조회 없이). 이미 적혀
+    있으면 그대로 둔다. 리셋 시각을 못 구하면 안 적는다(영영 막힘 방지 — revive 가 못 풀 값).
+    """
+    if usage_check is None:
+        return
+    try:
+        with st.with_lock(timeout=CLAIM_LOCK_TIMEOUT):
+            state = st.prune_blocked(st.load_state())
+            label = _account_for_where_at(state, where, at)
+            if not label or st.is_scoped_blocked(state, label, bucket):
+                return
+            until = _bucket_reset_for(state, label, bucket)
+            if not until or until <= time.time():
+                return
+            st.mark_scoped_blocked(state, label, bucket, until)
+            st.save_state(state)
+            log(f"창 거절 반영: '{label}' 의 {bucket} 칸을 막힘으로 적었다(창이 한도 거절 화면에 멈춰 있음)")
+    except Exception as e:
+        log(f"창 거절 반영 중 오류({type(e).__name__})")
+
+
 def _nudge_stalled_windows() -> list:
     """한도로 멈춘 창에 이어가라는 줄을 넣는다. 실패해도 창 지키기는 멈추지 않는다."""
     if os.environ.get("AIROTATOR_NO_NUDGE"):
         return []   # 시험 중엔 실제 창을 건드리지 않는다(검수 반영: 시험이 실제 창 목록을 읽었다)
     try:
         import session_nudge
-        return session_nudge.nudge_stalled(_usable_now, log=log)
+        return session_nudge.nudge_stalled(_usable_now, log=log, on_limit=_record_window_limit)
     except Exception as e:
         log(f"이어가기: 확인 중 오류({type(e).__name__})")
         return []
@@ -1110,6 +1176,22 @@ def _reclaim_locked(state: dict, bucket: str | None = None):
     nxt = st.better_candidate(state, cur, bucket=_wanted_buckets(state, bucket))
     if nxt is None:
         return None
+    # 되돌리기는 조회를 안 하지만, **이미 읽어둔 값**에서 옮길 계정의 잡힌 칸이 꽉 찬 게
+    # 보이면 안 옮긴다(되돌리기는 아껴 쓰자는 최적화라 미루면 그만이다). 2026-09-14 실사고:
+    # 429 로 C 의 Fable 소진을 기록에 못 적은 채, 되돌리기가 주간 초기화만 보고 공용을 D(Fable
+    # 여유)→C(Fable 100%)로 옮겨 그 위 공용 Fable 창들이 8시간 한도 거절을 받았다.
+    if usage_check is not None:
+        cu = usage_check.cached_usage(nxt)
+        if cu is not None:
+            for nm in _wanted_buckets(state, bucket):
+                pct = usage_check.scoped_pct(cu, nm)
+                if pct is None or pct < PREEMPT_PCT:
+                    continue
+                r = usage_check.scoped_reset(cu, nm)
+                if r and float(r) > time.time():
+                    st.mark_scoped_blocked(state, nxt, nm, float(r))  # 다음 회차가 기록으로 거른다
+                log(f"되돌리기 취소: '{nxt}' 의 {nm} 칸이 이미 읽어둔 값으로 {pct:.0f}% 라 안 옮긴다")
+                return None
     st.note_reclaim(state)  # 교체가 실패해도 기록해 재시도 폭주를 막는다
     if not _switch(nxt, leaving=cur):
         return None

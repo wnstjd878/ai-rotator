@@ -475,7 +475,7 @@ def _save(path: Path, data: dict) -> None:
 
 def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = CLAUDE_HOME,
                   state_file: Path = NUDGE_FILE, windows=None, reader=None, typer=None,
-                  start_of=None, places=None) -> list:
+                  start_of=None, places=None, on_limit=None) -> list:
     """한도로 멈춘 창에 이어가기 줄을 넣는다. 넣은 창 이름 목록.
 
     `usable(model)` 은 지금 계정으로 그 모델을 쓸 수 있으면 True. 못 쓰면 넣어 봐야 또 멈추므로
@@ -483,6 +483,11 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
     `usable(model, where)` 로 부른다(where = 'slot:<칸>' / 'shared', window_places).
     `places(pids)` 는 {창 번호: {"where", "model"}}(where 문자열만 줘도 된다). 안 주면 실제 창에서는
     window_places, 시험에서는 빈 값.
+    `on_limit(where, bucket, at)` 는 창이 그 모델 칸 한도 거절 화면에 멈춰 있을 때 부른다
+    (있으면). 사용량 조회 창구가 429 로 막혀 순환기가 어느 칸이 찼는지 못 읽는 동안, 창 화면이
+    유일한 신호다. 부르는 쪽이 그 거절 시각(멈춤을 처음 본 때)에 그 자격이 쓰던 계정을 찾아
+    막힘으로 적어, 다음 회차에 그 계정에서 빠져나가게 한다. `at` 은 멈춤을 처음 본 시각이라
+    화면이 이미 바뀐 계정을 잘못 막지 않는다. 계정 전체 세션 한도(칸 이름 없음)는 부르지 않는다.
     """
     if os.name != "nt" and windows is None:
         return []
@@ -538,6 +543,15 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
             continue
         pl = place_map.get(pid) or place_map.get(str(pid))
         where, claim_model = (pl.get("where"), pl.get("model")) if isinstance(pl, dict) else (pl, None)
+        # 창이 그 모델 칸 한도 화면에 멈춰 있으면 부르는 쪽에 알려 막힘으로 적게 한다.
+        # 넣기 여부(usable/간격/하루 한도)와 무관하게, 멈춘 걸 본 순간 신호를 넘긴다 — 넣을
+        # 수 없는 창(그 계정이 막힌 창)이야말로 적어 둬야 다음 회차가 빠져나간다. `at` 은 멈춤을
+        # 처음 본 시각이라, 그 사이 화면이 바뀐 계정이 아니라 거절 당시 계정에 귀속된다.
+        if on_limit is not None and where and scr["limit_bucket"]:
+            try:
+                on_limit(where, scr["limit_bucket"], float(seen[skey]))
+            except Exception:
+                pass
         # 모델: 한도 문구 속 이름 → 화면 상태줄 → 창 표시(상태줄이 /model 때 갱신) → 대화 기록 순.
         # 대화 기록의 모델은 거절 전 마지막 성공 답변이라 /model 로 바꾸기 전 이름일 수 있어 맨 뒤다
         # (2026-09-13: 상태줄이 안 읽힌 Opus 창을 기록의 Fable 로 판단해 이어가기를 안 넣었다).

@@ -115,6 +115,21 @@ def _probe_usage(label: str):
     }
 
 
+def cached_usage(label: str) -> dict | None:
+    """이미 읽어둔 사용량을 **네트워크 없이** 돌려준다. 없으면 None.
+
+    되돌리기·창 거절 반영이 그 계정의 칸 상태를 볼 때 쓴다. 새 조회를 하지 않아
+    429 를 늘리지 않는다(되돌리기는 일부러 조회를 안 하게 설계돼 있다). 상태줄 조회기가
+    적어둔 값(현재 계정)을 먼저 보고, 없으면 순환기 캐시의 마지막 성공값을 본다.
+    """
+    p = _probe_usage(label)
+    if p:
+        return p
+    ent = _cache_load().get(label) or {}
+    u = ent.get("usage")
+    return u if isinstance(u, dict) else None
+
+
 def _iso_to_epoch(text):
     if not text:
         return None
