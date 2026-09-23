@@ -4119,6 +4119,18 @@ def case_slot_pool(tmp):
               sp.slot_current(st.load_state(), "Fable"))
         check("기록의 초기화 시각이 지났으면 100% 로 안 본다",
               not sp.seen_full({"usage_seen": {"A": {"scoped": {"Fable": {"pct": 100.0, "reset": now - 60}}}}}, "A", "Fable"))
+        # 창이 끝난 뒤 확인(--slot-check)의 종료코드(검수 재현)
+        alive.discard("7001")
+        seat_lr("A", {"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)},
+                {"B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}})
+        rc, _ = sp.prepare("Fable", reclaim=False, window_bucket="Fable")
+        check("Fable 한도로 끝난 창(A 100%)은 97~98% 계정으로 옮기고 3(되켜짐)",
+              rc == 3 and sp.slot_current(st.load_state(), "Fable") in ("B", "C"), (rc, sp.slot_current(st.load_state(), "Fable")))
+        seat_lr("A", {"A": fab(50.0), "B": fab(98.0), "C": fab(100.0)},
+                {"B": {"Fable": now + 48 * 3600}})
+        rc, _ = sp.prepare("Fable", reclaim=False, window_bucket="Fable")
+        check("들어올 때 A 가 멀쩡했으면 마지막 수단이 돌아도 3 이 아니다(닫은 창 안 되켬)", rc != 3, rc)
+        alive.add("7001")
         # 전부 100% 면 그대로(2), 빈손이면 10분은 다시 안 읽는다
         seat_lr("A", {"A": fab(100.0), "B": fab(100.0), "C": fab(100.0)},
                 {"B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}})

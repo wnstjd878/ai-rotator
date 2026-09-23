@@ -661,6 +661,7 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
             st.set_current(state, nxt, f"{cur} → {nxt} (켜기 전 확인)")
             log(f"켜기 전 확인: '{cur}' {kind_txt} 소진 → '{nxt}' 로 교체")
             if last_resort:
+                _clear_last_resort_blocks(state, nxt, bucket)
                 break   # 옮긴 계정은 97~99% 일 수 있다. 다시 재면 도로 "바닥" 으로 보고 2 를 낸다
         st.save_state(state)
     if not started_from:
@@ -686,7 +687,9 @@ def _last_resort_shared(state: dict, cur: str, bucket) -> str | None:
     """
     if usage_check is None or not bucket:
         return None
-    if time.time() - float(state.get("last_resort_at") or 0) < LAST_RESORT_GAP:
+    gaps = state.get("last_resort_at")
+    gaps = dict(gaps) if isinstance(gaps, dict) else {}   # 칸마다 따로(Fable 빈손이 Opus 를 막지 않게)
+    if time.time() - float(gaps.get(bucket) or 0) < LAST_RESORT_GAP:
         return None
     wanted = _wanted_buckets(state, bucket)
     dead = _dead_everywhere(state, wanted)
@@ -708,21 +711,30 @@ def _last_resort_shared(state: dict, cur: str, bucket) -> str | None:
         pct = usage_check.scoped_pct(u, bucket)
         cands.append((pct if pct is not None else 0.0, l))
     if not cands:
-        state["last_resort_at"] = time.time()
+        gaps[bucket] = time.time()
+        state["last_resort_at"] = gaps
         return None
     order = st.priority_order(state, [c[1] for c in cands])
     cands.sort(key=lambda c: (c[0], order.index(c[1]) if c[1] in order else 99))
     pct, nxt = cands[0]
-    box = dict(state.get("scoped_blocked") or {})
-    if nxt in box and bucket in (box.get(nxt) or {}):
-        box[nxt] = {k: v for k, v in box[nxt].items() if k != bucket}
-        state["scoped_blocked"] = box
-    blocked = dict(state.get("blocked") or {})
-    blocked.pop(nxt, None)   # 97% 에서 계정째 막힌 기록일 수 있다(방금 실제로 100% 미만을 읽었다)
-    state["blocked"] = blocked
     log(f"'{cur}' 의 {bucket} 칸이 100% 라 97% 기준을 넘은 계정 중 가장 여유 있는 "
         f"'{nxt}'(사용 {pct:.0f}%) 로 갑니다(마지막 수단)")
     return nxt
+
+
+def _clear_last_resort_blocks(state: dict, label: str, bucket) -> None:
+    """마지막 수단으로 **옮긴 뒤** 그 계정의 97% 막힘 기록을 지운다(방금 실제로 100% 미만을 읽었다).
+
+    안 지우면 다음 회차에 조회가 429 일 때 기록만 보고 멀쩡한 계정을 바닥으로 본다.
+    전환 전에 지우면 전환이 실패했을 때 옮기지도 않은 계정의 막힘만 풀린다(검수 반영).
+    """
+    box = dict(state.get("scoped_blocked") or {})
+    if label in box and bucket in (box.get(label) or {}):
+        box[label] = {k: v for k, v in box[label].items() if k != bucket}
+        state["scoped_blocked"] = box
+    blocked = dict(state.get("blocked") or {})
+    blocked.pop(label, None)
+    state["blocked"] = blocked
 
 
 def _kind_txt(kind: str, bucket) -> str:

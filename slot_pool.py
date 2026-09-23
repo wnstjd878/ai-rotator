@@ -555,13 +555,18 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
     order = st.priority_order(state, [c[1] for c in cands])
     cands.sort(key=lambda c: (c[0], order.index(c[1]) if c[1] in order else 99))
     pct, nxt = cands[0]
-    # 막힌 기록(97% 에서 적힌 것)을 지워야 창 표시·다른 판단이 이 계정을 쓸 수 있는 곳으로 본다
+    if not switch(state, bucket, nxt, f"{bucket} 칸 100% 소진, 마지막 수단(남은 {100 - pct:.0f}%)"):
+        _slots(state).setdefault(bucket, {})["last_resort_at"] = time.time()
+        return None
+    # 옮긴 뒤에 막힌 기록(97% 에서 적힌 것)을 지운다. 안 지우면 다음 회차에 조회가 429 일 때
+    # 기록만 보고 멀쩡한 이 계정을 바닥으로 본다. 방금 실제로 100% 미만을 읽었다.
     box2 = dict(state.get("scoped_blocked") or {})
     if nxt in box2 and bucket in (box2.get(nxt) or {}):
         box2[nxt] = {k: v for k, v in box2[nxt].items() if k != bucket}
         state["scoped_blocked"] = box2
-    if not switch(state, bucket, nxt, f"{bucket} 칸 100% 소진, 마지막 수단(남은 {100 - pct:.0f}%)"):
-        return None
+    blocked = dict(state.get("blocked") or {})
+    blocked.pop(nxt, None)
+    state["blocked"] = blocked
     log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 100% 라 97% 기준을 넘은 계정 중 가장 여유 있는 "
         f"'{nxt}'(사용 {pct:.0f}%) 로 갑니다")
     return nxt
@@ -606,6 +611,7 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
     judge = window_bucket or bucket   # 3 을 낼지 판단하는 칸
     switched = own_switched = own_dead = False
     entry_hit = None   # 들어올 때 앉아 있던 계정이 judge 칸에서 바닥났나(3 을 낼지는 이것만 본다)
+    entry_full = None  # 같은 것이되 "어디서도 못 쓰는 칸" 거르기 전. 마지막 수단은 그 칸을 살리므로 이걸 본다
     with st.with_lock():
         state = st.prune_blocked(st.load_state())
         wanted = slot_buckets(state, bucket)
@@ -642,6 +648,7 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 # 기록이 낡아 잘못 고른 계정을 다시 옮긴 것은 3 으로 안 센다. 그걸 세면 멀쩡히 닫은 창을
                 # cc 가 한도로 보고 되켠다(시험 [58](15) 에서 재현: A 멀쩡 → C(기록 낡음) → B 가 3 으로 나옴).
                 entry_hit = (forced or judge in bad) and judge in need
+                entry_full = bool(forced or judge in bad)
             hit = [n for n in need if n in bad]
             if not forced and not hit:
                 break
@@ -655,7 +662,9 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 got = _last_resort(state, bucket, cur, need)
                 if got:
                     cur, switched = got, True
-                    if forced or judge == bucket or judge in bad:
+                    # 3 은 들어올 때 계정이 끝난 창의 칸(judge)에서 바닥났고 그 칸을 살렸을 때만.
+                    # 기록이 낡아 옮겨 간 계정에서 다시 옮긴 것은 0(검수 재현: 닫은 창이 되켜짐)
+                    if entry_full and judge == bucket:
                         own_switched = True
                     own_dead = False
                     break   # 옮긴 계정은 97~99% 일 수 있다. 다시 재면 도로 "바닥" 으로 본다
@@ -680,7 +689,7 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
             got = _last_resort(state, bucket, cur, _need(state, bucket, wanted))
             if got:
                 cur, switched, own_dead = got, True, False
-                if judge == bucket or entry_hit:
+                if entry_full and judge == bucket:
                     own_switched = True
         if own_dead:
             st.save_state(state)
