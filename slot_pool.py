@@ -404,7 +404,8 @@ def _exhausted_kinds(state: dict, cur: str, bucket: str, threshold: float, names
         # 못 읽었다. 기록상 막혀 있으면 기록으로 갈아탄다(2026-09-12 사고와 같은 갈래).
         if st.is_blocked(state, cur):
             return {n: "blocked" for n in names}, False
-        got = {n: "model:" + n for n in names if st.is_scoped_blocked(state, cur, n)}
+        got = {n: "model:" + n for n in names
+               if st.is_scoped_blocked(state, cur, n) or seen_full(state, cur, n)}
         if not got:
             log(f"자리 {bucket}: '{cur}' 사용량을 못 읽어 그대로 둔다"
                 f"(사유={getattr(usage_check, 'last_error', None)})")
@@ -482,6 +483,88 @@ def _reclaim(state: dict, bucket: str, cur: str, need=None) -> str | None:
         if switch(state, bucket, cand, "주간 초기화가 이른 계정으로 되돌림(켜기 전)"):
             return cand
     return None
+
+
+LAST_RESORT_GAP = 600   # 마지막 수단이 빈손이었으면 이만큼(초) 다시 안 읽는다(429 방지)
+
+
+def seen_full(state: dict, label: str, bucket: str, now: float | None = None) -> bool:
+    """마지막으로 읽은 사용량(usage_seen)에서 그 칸이 100% 였고 그 칸 초기화 시각이 아직 안 지났나.
+
+    usage_seen 은 원래 보여주기 전용이지만 이 판단만은 낡아도 맞다: 사용량은 초기화 전까지 줄지
+    않으므로 초기화 전에 읽힌 100% 는 초기화까지 그대로다. 바닥난 계정은 조회가 429 로 막히는 일이
+    잦아(2026-09-23 실측: A 가 30분 넘게 429) 이 기록 없이는 마지막 수단이 영영 안 돈다.
+    """
+    now = time.time() if now is None else now
+    ent = ((state.get("usage_seen") or {}).get(label) or {})
+    sc = (ent.get("scoped") or {}).get(bucket) or {}
+    pct, reset = sc.get("pct"), sc.get("reset")
+    if pct is not None and float(pct) >= 100.0 and reset and float(reset) > now:
+        return True
+    for k, r in (("weekly_pct", "weekly_reset"), ("session_pct", "session_reset")):
+        if ent.get(k) is not None and float(ent[k]) >= 100.0 and ent.get(r) and float(ent[r]) > now:
+            return True
+    return False
+
+
+def _full_now(bucket: str, label: str, forced: bool = False, state: dict | None = None) -> bool:
+    """자리 계정이 그 칸에서 **실제로** 100% 인가(미리 넘기는 97% 가 아니라). 창이 한도로 끝났으면(forced) 참.
+
+    사용량은 2분 캐시가 있어 방금 읽은 값이면 다시 조회하지 않는다. 못 읽으면(429 등) 마지막으로 읽은
+    기록(seen_full)으로 본다. 그것도 없으면 거짓(모르면 안 움직인다).
+    """
+    if forced:
+        return True
+    u = usage_check.get_usage_for(store_path(bucket, label), is_current=False)
+    if u:
+        return usage_check.which_limit(u, threshold=100.0, bucket=bucket) is not None
+    return bool(state) and seen_full(state, label, bucket)
+
+
+def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
+    """지금 계정이 그 칸에서 100% 인데 97% 기준으로는 갈 곳이 없을 때: 100% 미만인 계정 중 가장 여유 있는 곳.
+
+    2026-09-23 실사고: Fable 자리 A 가 100%, B·C·D 는 97~98% 라 미리 넘김 기준(97)에 걸려 전부 막힌
+    기록이었고, "갈아탈 계정이 없다" 로 창이 A 에 멈춰 있었다. 남은 2~3% 를 버린 셈이다.
+    기록은 믿지 않고 실제로 읽는다. 옮겨 간 계정이 97~99% 여도 100% 가 되기 전까지는 다시 안 옮기므로
+    (부르는 쪽이 _full_now 로 거른다) 왕복은 없다. 채울 칸(`need`, 어디서도 못 쓰는 칸은 이미 빠짐)이
+    전부 100% 미만인 계정만 고른다. 옮긴 라벨 또는 None. 전환은 여기서 한다.
+    """
+    box = _slots(state).setdefault(bucket, {})
+    if time.time() - float(box.get("last_resort_at") or 0) < LAST_RESORT_GAP:
+        return None
+    cands = []
+    for l in stored_labels(bucket):
+        if l == cur:
+            continue
+        u = usage_check.get_usage_for(store_path(bucket, l), is_current=False)
+        if not u:
+            continue
+        st.note_weekly_reset(state, l, u.get("weekly_reset"))
+        st.note_usage(state, l, u)
+        if usage_check.which_limit(u, threshold=100.0, bucket=bucket):
+            continue
+        # 이 자리 창들이 쓰는 다른 칸도 100% 미만이어야 한다. 아니면 그 창을 막아 다음 회차가 되밀어 왕복한다
+        if any(usage_check.which_limit(u, threshold=100.0, bucket=n) for n in (need or (bucket,))):
+            continue
+        pct = usage_check.scoped_pct(u, bucket)
+        cands.append((pct if pct is not None else 0.0, l))
+    if not cands:
+        box["last_resort_at"] = time.time()
+        return None
+    order = st.priority_order(state, [c[1] for c in cands])
+    cands.sort(key=lambda c: (c[0], order.index(c[1]) if c[1] in order else 99))
+    pct, nxt = cands[0]
+    # 막힌 기록(97% 에서 적힌 것)을 지워야 창 표시·다른 판단이 이 계정을 쓸 수 있는 곳으로 본다
+    box2 = dict(state.get("scoped_blocked") or {})
+    if nxt in box2 and bucket in (box2.get(nxt) or {}):
+        box2[nxt] = {k: v for k, v in box2[nxt].items() if k != bucket}
+        state["scoped_blocked"] = box2
+    if not switch(state, bucket, nxt, f"{bucket} 칸 100% 소진, 마지막 수단(남은 {100 - pct:.0f}%)"):
+        return None
+    log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 100% 라 97% 기준을 넘은 계정 중 가장 여유 있는 "
+        f"'{nxt}'(사용 {pct:.0f}%) 로 갑니다")
+    return nxt
 
 
 def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: float, need=None):
@@ -568,6 +651,14 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 if nxt:
                     log(f"자리 {bucket}: 창들이 쓰는 칸({', '.join(need)})을 다 채울 계정이 없어 "
                         f"{bucket} 칸만 보고 '{nxt}' 로 갑니다")
+            if nxt is None and own_hit and _full_now(bucket, cur, forced, state):
+                got = _last_resort(state, bucket, cur, need)
+                if got:
+                    cur, switched = got, True
+                    if forced or judge == bucket or judge in bad:
+                        own_switched = True
+                    own_dead = False
+                    break   # 옮긴 계정은 97~99% 일 수 있다. 다시 재면 도로 "바닥" 으로 본다
             if nxt is None:
                 st.save_state(state)
                 if own_hit:
@@ -585,6 +676,12 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
             cur, switched = nxt, True
             if entry_hit:
                 own_switched = True
+        if own_dead and _full_now(bucket, cur, state=state):
+            got = _last_resort(state, bucket, cur, _need(state, bucket, wanted))
+            if got:
+                cur, switched, own_dead = got, True, False
+                if judge == bucket or entry_hit:
+                    own_switched = True
         if own_dead:
             st.save_state(state)
             log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 바닥났지만 갈아탈 계정이 없다")

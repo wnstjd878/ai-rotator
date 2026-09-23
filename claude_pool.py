@@ -556,6 +556,8 @@ ENSURE_SWITCHED = 3   # ensure_usable 종료코드: 갈아탔다(0 은 그대로
 # 100%(거절 기반)다. 낡은 막힘을 푸는 쪽도 이 문턱을 같이 써야 한다 — 97% 에서 막은 계정을
 # "100% 아니니 열렸다" 로 풀면 되돌림이 도로 끌고 와 3분마다 왕복한다.
 PREEMPT_PCT = 97.0
+# 멈춘 창에 이어가라고 넣을지 판단하는 문턱. 실제 거절 기준(100)이다.
+NUDGE_PCT = 100.0
 # 창 지키기가 이미 막힌 계정에 앉아 있을 때 다른 계정의 낡은 막힘을 확인하는 최소 간격(초).
 # 매 회차 하면 3분마다 전 계정 조회, 아예 안 하면 낡은 칸 막힘이 안 풀려 창이 멈춘다(재검수 2026-09-10).
 TEND_REVIVE_GAP = 1800
@@ -595,6 +597,7 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
         # 되돌린 계정이 아직 다 찬 상태면 바로 아래 확인이 다시 넘겨준다.
         reclaimed = _reclaim_locked(state, bucket)
         # 다음 계정도 이미 소진돼 있을 수 있다. 쓸 만한 계정이 나올 때까지 이어서 건너뛴다.
+        last_resort = False
         for _ in range(len(st.account_labels()) + 1):
             cur = state.get("current")
             if not cur or cur not in st.saved_labels():
@@ -622,6 +625,10 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                     state["tend_revive_at"] = time.time()
                     nxt = _pick_or_revive(state, exclude=cur, bucket=bucket, strict=keep_windows,
                                           below=threshold)
+                if nxt is None and bucket and slot_pool.seen_full(state, cur, bucket):
+                    # 바닥난 계정은 조회가 429 로 막히기 쉽다. 마지막 기록이 100% 면 실제 소진으로 본다
+                    nxt = _last_resort_shared(state, cur, bucket)
+                    last_resort = nxt is not None
                 if nxt is None:
                     st.save_state(state)
                     return 2
@@ -635,6 +642,9 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
                 kind_txt = _kind_txt(kind, bucket)
                 nxt = _next_for_exhausted(state, cur, u, kind, bucket=bucket,
                                           keep_windows=keep_windows, threshold=threshold)
+                if nxt is None and usage_check.which_limit(u, threshold=100.0, bucket=bucket):
+                    nxt = _last_resort_shared(state, cur, bucket)
+                    last_resort = nxt is not None
                 if nxt is None:
                     st.save_state(state)
                     reset_at = st.earliest_reset(state, bucket=bucket)
@@ -650,6 +660,8 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
             landed = nxt
             st.set_current(state, nxt, f"{cur} → {nxt} (켜기 전 확인)")
             log(f"켜기 전 확인: '{cur}' {kind_txt} 소진 → '{nxt}' 로 교체")
+            if last_resort:
+                break   # 옮긴 계정은 97~99% 일 수 있다. 다시 재면 도로 "바닥" 으로 보고 2 를 낸다
         st.save_state(state)
     if not started_from:
         if reclaimed:
@@ -658,6 +670,59 @@ def ensure_usable(model: str | None = None, *, bucket: str | None = None,
     print(f"[켜기 전 확인] '{started_from}' {first_kind} 한도 소진 → '{landed}' 계정으로 바꿔서 켭니다.")
     _notify_switch(started_from, landed, "limit", state, bucket)  # 전송은 잠금 밖에서
     return ENSURE_SWITCHED
+
+
+LAST_RESORT_GAP = 600   # 마지막 수단이 빈손이었으면 이만큼(초) 다시 안 읽는다(429 방지)
+
+
+def _last_resort_shared(state: dict, cur: str, bucket) -> str | None:
+    """지금 계정이 그 칸에서 **실제로 100%** 인데 97% 기준으로는 갈 곳이 없을 때: 100% 미만 중 가장 여유 있는 계정.
+
+    2026-09-23 실사고: Fable 이 A 100%, B·C·D 97~98% 라 창 지키기(97)가 전부 막힌 기록으로 보고
+    "갈아탈 계정이 없다" 만 되풀이했다. 남은 2~3% 를 버리고 창은 멈춰 있었다. 기록은 믿지 않고
+    실제로 읽는다. 떠 있는 창의 칸(_wanted_buckets, 어디서도 못 쓰는 칸은 뺌)이 전부 100% 미만인 계정만 고른다.
+    옮겨 간 계정이 97~99% 여도 100% 가 되기 전엔 다시 안 옮긴다(부르는 쪽이 지금 계정 100% 일 때만 부른다).
+    전환은 부르는 쪽이 한다. 라벨 또는 None.
+    """
+    if usage_check is None or not bucket:
+        return None
+    if time.time() - float(state.get("last_resort_at") or 0) < LAST_RESORT_GAP:
+        return None
+    wanted = _wanted_buckets(state, bucket)
+    dead = _dead_everywhere(state, wanted)
+    others = [n for n in st.bucket_names(wanted) if n != bucket and n not in dead]
+    cands = []
+    for l in st.usable_labels():
+        if l == cur:
+            continue
+        u = usage_check.get_usage_for(BASE / "creds" / f"{l}.json", is_current=False)
+        if not u:
+            continue
+        st.note_weekly_reset(state, l, u.get("weekly_reset"))
+        st.note_usage(state, l, u)
+        if usage_check.which_limit(u, threshold=100.0, bucket=bucket):
+            continue
+        # 떠 있는 다른 창의 칸도 100% 미만이어야 한다. 아니면 그 창의 회차가 되밀어 왕복한다(시험 [56])
+        if any(usage_check.which_limit(u, threshold=100.0, bucket=n) for n in others):
+            continue
+        pct = usage_check.scoped_pct(u, bucket)
+        cands.append((pct if pct is not None else 0.0, l))
+    if not cands:
+        state["last_resort_at"] = time.time()
+        return None
+    order = st.priority_order(state, [c[1] for c in cands])
+    cands.sort(key=lambda c: (c[0], order.index(c[1]) if c[1] in order else 99))
+    pct, nxt = cands[0]
+    box = dict(state.get("scoped_blocked") or {})
+    if nxt in box and bucket in (box.get(nxt) or {}):
+        box[nxt] = {k: v for k, v in box[nxt].items() if k != bucket}
+        state["scoped_blocked"] = box
+    blocked = dict(state.get("blocked") or {})
+    blocked.pop(nxt, None)   # 97% 에서 계정째 막힌 기록일 수 있다(방금 실제로 100% 미만을 읽었다)
+    state["blocked"] = blocked
+    log(f"'{cur}' 의 {bucket} 칸이 100% 라 97% 기준을 넘은 계정 중 가장 여유 있는 "
+        f"'{nxt}'(사용 {pct:.0f}%) 로 갑니다(마지막 수단)")
+    return nxt
 
 
 def _kind_txt(kind: str, bucket) -> str:
@@ -743,7 +808,7 @@ def tend_windows() -> int:
 
 
 def _usable_now(model, where: str | None = None) -> bool:
-    """지금 계정으로 그 모델을 쓸 수 있나(미리 넘기는 문턱 아래인가). 못 읽으면 False.
+    """지금 계정으로 그 모델을 쓸 수 있나(100% 미만인가). 못 읽으면 False.
 
     `where` 는 이어가기가 창 표시로 찾은 그 창의 자격이다(session_nudge.window_places). (style-guard:off)
     'slot:<칸>' 이면 그 자리 계정의 그 모델 칸, 'shared' 면 공용 계정으로 본다. 없으면(표시를 못
@@ -753,11 +818,13 @@ def _usable_now(model, where: str | None = None) -> bool:
     if usage_check is None:
         return False
     bucket = usage_check.bucket_for_model(model)
+    # 기준은 100%(실제로 거절받는가). 97% 로 보면 마지막 수단으로 97~99% 계정에 옮긴 뒤에도
+    # 멈춘 창에 이어가기를 안 넣는다(2026-09-23). 미리 넘기는 판단은 창 지키기가 따로 한다.
     if where and where.startswith("slot:"):
-        return bool(slot_pool.usable_now(where[len("slot:"):], PREEMPT_PCT, model_bucket=bucket))
+        return bool(slot_pool.usable_now(where[len("slot:"):], NUDGE_PCT, model_bucket=bucket))
     if where != "shared":
         # 그 모델의 자리가 떠 있으면 자리 계정으로 판단한다(그 창들은 공용 자격을 안 쓴다)
-        got = slot_pool.usable_now(bucket, PREEMPT_PCT)
+        got = slot_pool.usable_now(bucket, NUDGE_PCT)
         if got is not None:
             return got
     try:
@@ -769,7 +836,7 @@ def _usable_now(model, where: str | None = None) -> bool:
     u = usage_check.get_usage_for(BASE / "creds" / f"{cur}.json", is_current=True)
     if not u:
         return False
-    return usage_check.which_limit(u, threshold=PREEMPT_PCT,
+    return usage_check.which_limit(u, threshold=NUDGE_PCT,
                                    bucket=usage_check.bucket_for_model(model)) is None
 
 

@@ -2751,7 +2751,8 @@ def main():
                      case_stale_scoped_block, case_stale_account_block,
                      case_push_fail_alert, case_tend_windows,
                      case_usage_cache_backoff, case_nudge_stalled,
-                     case_window_limit_from_screen, case_slot_pool):
+                     case_window_limit_from_screen, case_slot_pool,
+                     case_last_resort_shared):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -4058,12 +4059,162 @@ def case_slot_pool(tmp):
         finally:
             _sys.argv = old_argv
         check("명령 --slot-check --window 도 같은 판단(3)", rc == 3, rc)
+        # (21) 2026-09-23 실사고: Fable 자리 A 가 100%, B 98%·C 97% 는 97% 기준에 걸려 막힌 기록.
+        #      옛 코드는 "갈아탈 계정이 없다" 로 A 에 눌러앉았다. 100% 미만 중 가장 여유 있는 C 로 가야 한다.
+        alive.discard("7005")
+
+        def seat_lr(label, upd, scoped):
+            with st.with_lock():
+                s2 = st.load_state()
+                s2["blocked"], s2["scoped_blocked"] = {}, scoped
+                sp._slots(s2).setdefault("Fable", {}).pop("last_resort_at", None)
+                sp.switch(s2, "Fable", label, "시험")
+                st.save_state(s2)
+            table.update(upd)
+
+        def fab(pct):
+            return dict(free, scoped={"Fable": {"pct": pct, "reset": now + 48 * 3600},
+                                      "Opus": {"pct": 5.0, "reset": now + 48 * 3600}})
+
+        seat_lr("A", {"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)},
+                {"B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}})
+        switched = sp.tend(claude_pool.PREEMPT_PCT)
+        st_now = st.load_state()
+        check("A 100% 면 97~98% 계정 중 가장 여유 있는 C 로 간다(마지막 수단)",
+              switched == ["Fable"] and sp.slot_current(st_now, "Fable") == "C",
+              (switched, sp.slot_current(st_now, "Fable")))
+        check("자리 자격 파일이 C 것",
+              sa._obj_fingerprint(sp._load(sp.live_path("Fable"))) == sa._obj_fingerprint(sp._load(sp.store_path("Fable", "C"))))
+        again = sp.tend(claude_pool.PREEMPT_PCT)
+        check("C 가 97% 여도 100% 전엔 다시 안 옮긴다(왕복 없음)",
+              again == [] and sp.slot_current(st.load_state(), "Fable") == "C", again)
+        check("이어가기 판단은 100% 기준: C 97% 면 쓸 수 있음",
+              claude_pool._usable_now("claude-fable-5-1", "slot:Fable") is True)
+        table.update({"C": fab(100.0)})
+        with st.with_lock():
+            s2 = st.load_state()
+            sp._slots(s2).setdefault("Fable", {}).pop("last_resort_at", None)
+            st.save_state(s2)
+        switched = sp.tend(claude_pool.PREEMPT_PCT)
+        check("C 도 100% 가 되면 남은 B(98%) 로", sp.slot_current(st.load_state(), "Fable") == "B",
+              sp.slot_current(st.load_state(), "Fable"))
+        # 지금 계정 조회가 429 로 막혀도 마지막 기록이 100% 면 마지막 수단을 쓴다(2026-09-23 실측)
+        seat_lr("A", {"A": None, "B": fab(98.0), "C": fab(97.0)},
+                {"B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}})
+        with st.with_lock():
+            s2 = st.load_state()
+            st.note_usage(s2, "A", fab(100.0))
+            st.save_state(s2)
+        sp.tend(claude_pool.PREEMPT_PCT)
+        check("지금 계정을 못 읽어도 기록이 100% 면 C 로", sp.slot_current(st.load_state(), "Fable") == "C",
+              sp.slot_current(st.load_state(), "Fable"))
+        seat_lr("A", {"A": None, "B": fab(98.0), "C": fab(97.0)},
+                {"A": {"Fable": now + 48 * 3600}, "B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}})
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["usage_seen"] = {}
+            st.save_state(s2)
+        sp.tend(claude_pool.PREEMPT_PCT)
+        check("못 읽고 기록도 없으면 그대로 A(모르면 안 움직인다)", sp.slot_current(st.load_state(), "Fable") == "A",
+              sp.slot_current(st.load_state(), "Fable"))
+        check("기록의 초기화 시각이 지났으면 100% 로 안 본다",
+              not sp.seen_full({"usage_seen": {"A": {"scoped": {"Fable": {"pct": 100.0, "reset": now - 60}}}}}, "A", "Fable"))
+        # 전부 100% 면 그대로(2), 빈손이면 10분은 다시 안 읽는다
+        seat_lr("A", {"A": fab(100.0), "B": fab(100.0), "C": fab(100.0)},
+                {"B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}})
+        rc, cur = sp.ensure("Fable", threshold=claude_pool.PREEMPT_PCT)
+        check("전부 100% 면 그대로 A(2)", rc == 2 and cur == "A", (rc, cur))
+        reads = []
+        orig_get = uc.get_usage
+        uc.get_usage = lambda path: (reads.append(Path(path).stem), orig_get(path))[1]
+        sp.ensure("Fable", threshold=claude_pool.PREEMPT_PCT)
+        uc.get_usage = orig_get
+        check("빈손 직후엔 다른 계정을 다시 안 읽는다", not ({"B", "C"} & set(reads)), reads)
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
          claude_pool.usage_check, st._pid_alive, sp._has_window) = real
         os.environ["AIROTATOR_NO_SLOTS"] = "1"
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         claude_pool.release_session(7001)
+
+
+def case_last_resort_shared(tmp):
+    """[59] 공용 계정: 지금 계정이 그 칸 100% 인데 다른 계정이 97~99% 면 그중 가장 여유 있는 곳으로 (2026-09-23)."""
+    print()
+    print("[59] 공용 계정 마지막 수단: 97~99% 계정이라도 쓴다")
+    import usage_check as uc
+
+    now = time.time()
+
+    def fab(pct):
+        return {"weekly_pct": 50.0, "session_pct": 5.0, "weekly_reset": now + 48 * 3600,
+                "session_reset": now + 3600, "scoped": {"Fable": {"pct": pct, "reset": now + 48 * 3600}}}
+
+    real_alive = st._pid_alive
+    st._pid_alive = lambda pid: str(pid) == "4343"
+
+    def run(table, current, scoped=None):
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B", "C"], current)
+        s = st.load_state()
+        s["reclaim_at"] = None
+        s["scoped_blocked"] = scoped or {}
+        st.save_state(s)
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B", "C")}))
+        claude_pool.usage_check = uc
+        uc.last_status = None
+        uc.get_usage = lambda path: table.get(Path(path).stem)
+        try:
+            claude_pool.claim_session(4343, model="claude-fable-5-1")
+            rc1 = claude_pool.tend_windows()
+            c1 = st.load_state().get("current")
+            rc2 = claude_pool.tend_windows()
+            return rc1, c1, rc2, st.load_state().get("current")
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+
+    try:
+        blk = {"B": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}}
+        rc1, c1, rc2, c2 = run({"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)}, "A", blk)
+        check("A 100%, B 98%·C 97%(막힌 기록) → C 로 간다(3)", rc1 == claude_pool.ENSURE_SWITCHED and c1 == "C",
+              (rc1, c1))
+        check("다음 회차엔 C 그대로(왕복 없음)", rc2 == 0 and c2 == "C", (rc2, c2))
+        rc1, c1, _, _ = run({"A": fab(99.0), "B": fab(98.0), "C": fab(97.0)}, "A", blk)
+        check("지금 계정이 99% 면 마지막 수단을 안 쓴다(그대로 A)", c1 == "A", (rc1, c1))
+        rc1, c1, _, _ = run({"A": fab(100.0), "B": fab(100.0), "C": fab(100.0)}, "A", blk)
+        check("전부 100% 면 그대로 A", c1 == "A", (rc1, c1))
+        # 지금 계정 조회가 429 여도 마지막 기록이 100% 면 마지막 수단
+        real_note = st.note_usage
+        def run_seen():
+            if st.STATE_FILE.exists():
+                st.STATE_FILE.unlink()
+            setup(tmp, ["A", "B", "C"], "A")
+            s = st.load_state()
+            s["reclaim_at"] = None
+            s["scoped_blocked"] = dict(blk, A={"Fable": now + 48 * 3600})
+            real_note(s, "A", fab(100.0))
+            st.save_state(s)
+        run_seen()
+        table = {"A": None, "B": fab(98.0), "C": fab(97.0)}
+        real_get, real_status = uc.get_usage, uc.last_status
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B", "C")}))
+        claude_pool.usage_check = uc
+        uc.get_usage = lambda path: table.get(Path(path).stem)
+        try:
+            claude_pool.claim_session(4343, model="claude-fable-5-1")
+            s = st.load_state(); s["tend_revive_at"] = time.time(); st.save_state(s)
+            claude_pool.tend_windows()
+        finally:
+            uc.get_usage, uc.last_status = real_get, real_status
+            claude_pool.usage_check = None
+        check("공용: 지금 계정을 못 읽어도 기록이 100% 면 C 로", st.load_state().get("current") == "C",
+              st.load_state().get("current"))
+    finally:
+        st._pid_alive = real_alive
+        claude_pool.release_session(4343)
 
 if __name__ == "__main__":
     raise SystemExit(main())
