@@ -8,6 +8,14 @@ $fails = 0
 # 첫 실행은 사용자가 준 인자 그대로. 한도로 갈아탄 뒤 다시 켤 때만 --continue 를 붙여
 # 직전 대화를 이어받는다. (처음부터 --continue 를 박으면 새 대화를 못 연다)
 $runArgs = @($args)
+# 켤 모델(2026-10-02): 사람이 창에서 마지막으로 고른 모델을 `--model` 로 직접 넘긴다.
+# settings.json 에 맡기면 홈 폴더에서 켤 때 ~/.claude/settings.json 이 프로젝트 설정으로도 읽혀
+# 자리 폴더에 저장된 /model 선택을 덮는다(창에서 Fable 을 골라도 새 창이 늘 opus[1m] 로 켜졌다).
+# 사람이 cc 에 --model 을 직접 줬으면 그대로 쓰고 그 모델을 기억한다.
+$userModel = $false
+foreach ($a in $runArgs) { if ("$a" -eq "--model" -or "$a".StartsWith("--model=")) { $userModel = $true } }
+if ($userModel) { python $POOL --remember-model @runArgs | Out-Null }
+$launchModel = $null   # cc 가 넣은 --model 값(사람이 준 게 아닐 때만)
 # 사용량 화면 색을 켠다. PowerShell 이 파이썬 출력을 가로채면 파이썬 쪽 판정이
 # 거짓이 되어 막대 색이 통째로 빠진다(2026-09-04).
 $env:AIROTATOR_COLOR = "1"
@@ -23,6 +31,26 @@ $prevConfigDir = $env:CLAUDE_CONFIG_DIR
 $slotDir = $null
 try {
 while ($true) {
+    if (-not $userModel) {
+        # 켤 때마다 다시 고른다. 한도로 끝나 되켤 때 Fable 이 계정 전부 바닥났으면 opus[1m] 로 바뀐다.
+        $m = (python $POOL --launch-model | Out-String).Trim()
+        if ($m -and $m -ne $launchModel) {
+            if ($null -ne $launchModel) {
+                # 모델이 바뀌었다 = 자리도 바뀐다. 넣어 둔 --model 두 칸을 빼고 자리를 다시 고른다.
+                # (되켤 때 --continue 가 앞에 붙으므로 자리로 빼지 않고 찾아서 뺀다. 사람이 준 --model 은 없다)
+                $kept = @(); $skip = $false
+                foreach ($a in $runArgs) {
+                    if ($skip) { $skip = $false; continue }
+                    if ("$a" -eq "--model") { $skip = $true; continue }
+                    $kept += $a
+                }
+                $runArgs = $kept
+                $slotDir = $null
+            }
+            $runArgs = @("--model", $m) + $runArgs
+            $launchModel = $m
+        }
+    }
     if ($null -eq $slotDir) {
         $slotOut = (python $POOL --slot-prepare @runArgs | Out-String).Trim()
         if ($slotOut) { $slotDir = $slotOut.Split("`n")[-1].Trim() }
@@ -38,7 +66,8 @@ while ($true) {
     }
     # 계정이 정해진 뒤에 이 창의 모델 칸을 표시한다(같은 번호로 다시 부르면 갱신된다).
     # CLAUDE_CONFIG_DIR 이 자리 폴더면 표시에 자리 이름도 같이 적힌다.
-    python $POOL --claim $PID @runArgs
+    # --launch: 켜면서 하는 표시라 마지막 모델 기억을 건드리지 않는다(Fable 바닥으로 opus 로 켠 창이 기억을 덮지 않게).
+    python $POOL --claim $PID --launch @runArgs
     # 켜기 직전 계정별 사용량을 화면에 먼저 보여준다(사용자 요구 2026-07-29).
     # claude 안에서는 이 값을 볼 수 없어서, 감싸는 코드가 뜨기 전에 찍는 자리가 유일하다.
     Write-Host ""

@@ -22,6 +22,8 @@ codex_alert_state.json
 rotator.log
 nudge_state.json
 nudge_state.tmp
+last_model.json
+last_model.tmp
 claude_shim.sh
 codex_shim.sh
 
