@@ -15,6 +15,8 @@
       python claude_pool.py --sweep           낡은 계정 막힘 걷어내기(주기 작업용, 30분 간격 제한)
       python claude_pool.py --tend            떠 있는 창의 칸이 바닥났으면 갈아끼우기(주기 작업용)
       python claude_pool.py --claim <번호>     그 프로세스가 쓰는 창이 이 모델 칸을 잡았다고 표시
+      python claude_pool.py --launch-model    cc 가 켤 모델(마지막으로 고른 모델, Fable 이 계정 전부 바닥이면 opus[1m])
+      python claude_pool.py --remember-model --model <이름>   사람이 cc 에 직접 준 모델을 기억
       python claude_pool.py --unclaim <번호>   창이 닫혔다고 표시(프로세스가 죽으면 자동 정리)
       python claude_pool.py -- -p "안녕"       claude 를 순환 보호 아래서 실행
 호출: from claude_pool import run;  proc = run([claude_bin, "--print", ...], timeout=240)
@@ -549,6 +551,78 @@ def intended_model(argv=None) -> str | None:
     return None
 
 
+# cc 가 켤 모델(2026-10-02). 사람이 창에서 마지막으로 고른 모델을 여기 적어 두고, cc 는 켤 때
+# `--model` 로 직접 넘긴다. settings.json 에만 맡기면 안 되는 이유: 홈 폴더에서 켜면
+# ~/.claude/settings.json 이 "프로젝트 설정" 으로도 읽혀 자리 폴더 설정(/model 이 저장되는 곳)보다
+# 우선한다. 그래서 창에서 Fable 을 골라도 새 창은 늘 원본의 opus[1m] 로 켜졌다(2026-10-02 실측:
+# 같은 Opus 자리에서 홈은 claude-opus-5-5[1m], 다른 폴더는 claude-fable-5-1). --model 은 그보다 우선한다.
+LAST_MODEL_FILE = BASE / "last_model.json"
+LAUNCH_FALLBACK_MODEL = "opus[1m]"   # Fable 이 계정 전부 바닥일 때만 이걸로 켠다
+
+
+def model_alias(name) -> str | None:
+    """화면 이름·판 이름("Opus 5.5 (1M context)", "claude-fable-5-1", "fable") → `--model` 에 줄 별칭.
+
+    정확한 판 이름이 아니라 별칭으로 적는다. 판을 박으면 새 판이 나와도 옛 판에 갇힌다.
+    """
+    if usage_check is None or not name:
+        return None
+    bucket = usage_check.bucket_for_model(name)
+    if not bucket:
+        return None
+    low = str(name).lower()
+    alias = bucket.lower()
+    if "[1m]" in low or "1m context" in low:
+        alias += "[1m]"
+    return alias
+
+
+def remember_model(name) -> str | None:
+    """사람이 고른 모델을 기억한다. 다음 cc 가 이 모델로 켜진다."""
+    alias = model_alias(name)
+    if not alias:
+        return None
+    try:
+        tmp = LAST_MODEL_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"model": alias, "at": time.time(), "from": str(name)},
+                                  ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, LAST_MODEL_FILE)
+    except OSError as e:
+        log(f"마지막 모델 기억 실패({alias}): {e}")
+        return None
+    log(f"마지막 모델 기억: {alias} (본 이름 {name})")
+    return alias
+
+
+def remembered_model() -> str | None:
+    try:
+        got = json.loads(LAST_MODEL_FILE.read_text(encoding="utf-8")).get("model")
+    except Exception:
+        return None
+    return got.strip() if isinstance(got, str) and got.strip() else None
+
+
+def launch_model() -> str | None:
+    """cc 가 켤 모델. 기억한 게 없으면 None(그러면 cc 는 예전처럼 인자 없이 켠다).
+
+    Fable 을 기억했는데 Fable 이 이 컴퓨터의 계정 전부에서 막혀 있으면 opus[1m] 로 켠다.
+    그대로 Fable 로 켜면 첫 질문부터 한도 문구가 뜬다. 판단은 기록만 본다(조회 없음 — 켜기를 늦추지 않게).
+    이렇게 켠 창은 기억을 바꾸지 않는다(claim_session 의 launch 갈래). 그래서 Fable 이 풀리면
+    다음 cc 는 다시 Fable 로 켜진다.
+    """
+    alias = remembered_model()
+    if not alias:
+        return None
+    if usage_check is not None and usage_check.bucket_for_model(alias) == "Fable":
+        try:
+            if "Fable" in _dead_everywhere(st.load_state(), "Fable"):
+                log(f"켜기 모델: Fable 이 계정 전부 막혀 {LAUNCH_FALLBACK_MODEL} 로 켠다")
+                return LAUNCH_FALLBACK_MODEL
+        except Exception:
+            pass
+    return alias
+
+
 ENSURE_SWITCHED = 3   # ensure_usable 종료코드: 갈아탔다(0 은 그대로, 2 는 갈아탈 데 없음)
 
 # 떠 있는 창을 미리 넘기는 문턱(%). 창은 한도 거절을 받으면 하던 작업이 멈추고 사람 입력을
@@ -949,13 +1023,16 @@ def _tend_claimed(buckets) -> int:
     return ENSURE_SWITCHED if switched else 0
 
 
-def claim_session(pid, model: str | None = None, argv=None) -> str | None:
+def claim_session(pid, model: str | None = None, argv=None, launch: bool = False) -> str | None:
     """사람이 쓰는 창이 이 모델 칸을 잡았다고 적어둔다. 잡은 칸 이름을 돌려준다.
 
     창이 살아 있는 동안 봇 호출이 그 칸 막힌 계정으로 갈아끼우지 못하게 하는 표시다.
     모델을 못 알아내면 아무것도 안 적는다 — 그때는 계정 단위 판단이라 표시해도 달라질 게 없다.
     잠금은 짧게만 기다린다. 창 켜기를 늦추느니 표시를 포기하는 편이 낫다.
     같은 프로세스 번호로 다시 부르면 칸만 갱신한다(창 안에서 모델을 바꾼 경우).
+    그렇게 모델이 바뀌었으면 다음 cc 가 그 모델로 켜지도록 기억한다(remember_model).
+    `launch` 는 cc 가 켜면서 부른 표시다. 그때는 기억하지 않는다 — Fable 바닥으로 opus 로
+    켠 창이 기억을 opus 로 덮으면 Fable 이 풀린 뒤에도 계속 opus 로 켜진다.
     """
     if usage_check is None:
         return None
@@ -972,10 +1049,18 @@ def claim_session(pid, model: str | None = None, argv=None) -> str | None:
             state = st.load_state()
             st.prune_claims(state)
             label = slot_pool.slot_current(state, slot) if slot else state.get("current")
+            try:
+                prev = st._clean_claims(state.get("session_claims")).get(str(int(pid))) or {}
+            except (TypeError, ValueError):
+                prev = {}
             st.note_session_claim(state, pid, bucket, label, model=want, slot=slot)
             st.save_state(state)
     except Exception:
         return None
+    # 창 안에서 /model 로 바꾼 경우만 기억한다(상태줄이 바뀐 모델로 부른다). 처음 켤 때의 표시나
+    # 같은 모델의 시각 갱신은 기억을 건드리지 않는다.
+    if not launch and prev.get("model") and model_alias(prev.get("model")) != model_alias(want):
+        remember_model(want)
     return bucket
 
 
@@ -2273,12 +2358,28 @@ def main():
         if len(argv) < 2:
             print("사용법: python claude_pool.py --claim <프로세스번호> [claude 인자...]")
             return 1
-        got = claim_session(argv[1], argv=argv[2:])
+        rest = list(argv[2:])
+        launch = bool(rest) and rest[0] == "--launch"   # cc 가 켜면서 부른 표시(기억 안 함)
+        if launch:
+            rest = rest[1:]
+        got = claim_session(argv[1], argv=rest, launch=launch)
         if got:
             # 단정하지 않는다 — 갈아탈 계정이 하나도 없으면 이번 호출을 살리려고
             # 이 칸을 포기하는 갈래가 있다(_pick_account 의 폴백).
             print(f"[창 표시] 이 창이 {got} 칸을 씁니다. 봇 호출은 되도록 이 칸이 막힌 "
                   f"계정으로 안 넘어갑니다(다른 계정이 하나도 없으면 밀릴 수 있습니다).")
+        return 0
+    if argv[0] == "--launch-model":
+        # cc 가 켤 모델 별칭 한 줄. 기억한 게 없으면 아무것도 안 찍는다(= 예전처럼 인자 없이 켬).
+        got = launch_model()
+        if got:
+            print(got)
+        return 0
+    if argv[0] == "--remember-model":
+        # 사람이 cc 에 직접 `--model` 을 줬을 때. 그 모델을 다음 켜기의 기본으로 삼는다.
+        got = remember_model(intended_model(argv[1:]))
+        if got:
+            print(got)
         return 0
     if argv[0] == "--unclaim":
         if len(argv) < 2:
