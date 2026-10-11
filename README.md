@@ -34,7 +34,7 @@ A가 주간한도로 오래 막히면 다 같이 B로 넘어간다. 5시간 한�
 
 | 머신 | claude 쓰는 것 | 순환 방법 |
 |---|---|---|
-| winserver (192.168.0.3) | viral-radar 전체 (작업 스케줄러) | `install_shim.ps1` 로 가로채기 |
+| winserver | viral-radar 전체 (작업 스케줄러) | `install_shim.ps1` 로 가로채기 |
 | Mac mini | makwangsu-chat, mkt-agent, content-layer (launchd) | `install_shim.sh` 로 가로채기 |
 | Windows 본체 | 대화형 claude code | `cc`(ccauto.ps1) + 작업 스케줄러 `ai-rotator-tend-windows`(3분, `--tend`) |
 

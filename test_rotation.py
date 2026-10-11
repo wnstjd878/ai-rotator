@@ -815,6 +815,7 @@ def case_live_label_source(tmp):
     import switch_account as sa
 
     real_creds, real_live, real_mail = sa.CREDS_DIR, sa.LIVE, sa.cred_email
+    real_lbl = sa.label_of_email
     root = Path(tmp) / "labelsrc"
     (root / "creds").mkdir(parents=True, exist_ok=True)
     (root / "home").mkdir(parents=True, exist_ok=True)
@@ -832,7 +833,8 @@ def case_live_label_source(tmp):
 
         # 서버가 D 라고 답하면 지문이 안 맞아도 D 로 알아낸다.
         # 이게 핵심이다: 갱신된 자격은 지문 대조만으로는 절대 못 알아낸다.
-        sa.cred_email = lambda path=None: "REDACTED@example.com"
+        sa.cred_email = lambda path=None: "d@test"
+        sa.label_of_email = lambda e: "D" if e == "d@test" else None
         check("갱신돼도 서버 답으로 알아냄", sa.live_label() == "D", sa.live_label())
 
         # 조회가 안 되면(연결 실패) 지문 대조로 떨어진다
@@ -847,6 +849,7 @@ def case_live_label_source(tmp):
         check("모르는 계정은 None", sa.live_label() is None, sa.live_label())
     finally:
         sa.CREDS_DIR, sa.LIVE, sa.cred_email = real_creds, real_live, real_mail
+        sa.label_of_email = real_lbl
 
 
 def case_switch_passes_leaving(tmp):
