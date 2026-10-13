@@ -2724,6 +2724,7 @@ def main():
     # 건드렸다(2026-09-12 실측: 시험 한 번에 Opus 자리 자격이 B 로 바뀐 채 기록과 엇갈렸다).
     os.environ["AIROTATOR_NO_SLOTS"] = "1"
     os.environ["AIROTATOR_NO_NUDGE"] = "1"   # 창 지키기가 실제 창에 이어가기 줄을 넣지 않게
+    os.environ["AIROTATOR_NO_ALERT"] = "1"   # 자리 로그인 알림(slot_pool._login_alert)이 진짜 알림·표시를 안 건드리게
     real_run = subprocess.run
     real_switch = claude_pool._switch
     real_notify = claude_pool.notify

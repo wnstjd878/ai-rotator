@@ -396,10 +396,50 @@ ENSURE_SWITCHED = 3
 RECLAIM_MAX_PCT = 97.0
 
 
+# 재발급이 거절돼 다시 로그인해야만 풀리는 사유(cred_refresh.last_error 의 종류). "다른 곳에서 갱신 중"과
+# 통신 오류는 잠깐이라 뺀다.
+_LOGIN_DEAD = ("재발급 열쇠 없음 또는 만료", "갱신 거절(HTTP 4", "다시 로그인해야")
+
+
+def _login_alert(bucket: str, label: str, why) -> None:
+    """자리에 앉은 계정의 자리용 로그인이 죽었으면 바로 알리고, 읽히면 표시를 지운다(why=None).
+    2026-10-13: Fable 자리가 D 로 넘어갔는데 D 자리용 로그인이 이틀 전에 죽어 있었다. 기록에는
+    "못 읽어 그대로 둔다" 한 줄뿐이고 그 자리 창 4개가 Login expired 로 멈춘 뒤에야 사람이 알았다.
+    auto_relogin 은 30일 만료만 보고, cred_watch 는 공용 저장본 이름만 봐서 둘 다 못 잡는다."""
+    if os.environ.get("AIROTATOR_NO_ALERT"):
+        return
+    try:
+        ops = str(Path.home() / ".claude" / "ops")
+        if ops not in sys.path:
+            sys.path.insert(0, ops)
+        import stuck_alert
+        key = f"ai-rotator-slot-login-{bucket}-{label}"
+        if why is None:
+            stuck_alert.clear_stuck(key)
+            return
+        if "갱신도 실패" not in why or not any(w in why for w in _LOGIN_DEAD):
+            # 다시 로그인한 직후엔 사용량 조회가 429 로 한동안 막힌다. 접근 열쇠가 아직 살아 있으면 복구로 본다.
+            o = (_load(store_path(bucket, label)) or {}).get("claudeAiOauth") or {}
+            if int(o.get("expiresAt") or 0) / 1000 > time.time():
+                stuck_alert.clear_stuck(key)
+            return
+        stuck_alert.report_stuck(
+            key, f"클로드 {bucket} 창의 '{label}' 계정 로그인",
+            f"{bucket} 창들이 쓰는 '{label}' 계정 로그인이 만료됐고 갱신도 거절됩니다",
+            hours=0, repeat_hours=6, last_ok="",
+            headline=f"{bucket} 로 켠 클로드 창들이 Login expired 로 멈춥니다. '{label}' 계정 로그인이 죽었습니다.",
+            howto=("할 일: 본체 PowerShell 에서 아래 두 줄을 실행하고, 계정 창이 뜨면 그 계정을 한 번 누릅니다. "
+                   "3분 안에 창들이 다시 됩니다.\n  cd C:\\Users\\JUNSEONG\\ai-rotator\n"
+                   f"  python relogin.py --slot {bucket} {label}"))
+    except Exception as e:
+        log(f"자리 {bucket}: '{label}' 로그인 알림 중 오류({type(e).__name__})")
+
+
 def _exhausted_kinds(state: dict, cur: str, bucket: str, threshold: float, names=None) -> tuple:
     """자리 계정의 사용량을 한 번 읽어 칸마다 바닥났는지. ({칸: 종류}, 읽었는지). 바닥난 칸만 담는다."""
     names = tuple(names or (bucket,))
     u = usage_check.get_usage_for(store_path(bucket, cur), is_current=False)
+    _login_alert(bucket, cur, None if u else str(getattr(usage_check, "last_error", None) or ""))
     if not u:
         # 못 읽었다. 기록상 막혀 있으면 기록으로 갈아탄다(2026-09-12 사고와 같은 갈래).
         if st.is_blocked(state, cur):

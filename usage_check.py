@@ -16,7 +16,10 @@
       사용량 경고와 계정 전환 알림이 같은 표기를 쓰게 하려는 것이다.
 자격 취급: accessToken 은 파일에서 읽어 헤더에만 싣는다. 값은 화면·기록에 안 남긴다.
           돌려주는 건 사용률 %(자격 아님)뿐.
-마지막 점검: 2026-07-27
+조회 횟수: 계정별 파일 캐시(~/.claude/.rotator-usage-cache.json). 성공값 120초, 429 는 90초 쉼,
+          그 밖의 실패도 60초 기억(2026-10-13 Mac TIME_WAIT 사고 뒤 추가 — 접속이 막힌 동안
+          부름마다 새 접속을 열던 구멍). 부르는 쪽(claude_pool 켜기 전 확인)은 그대로 두고 여기서 막는다.
+마지막 점검: 2026-10-13
 """
 
 from __future__ import annotations
@@ -44,6 +47,10 @@ last_status = None  # 마지막 조회의 서버 응답 번호. 401(자격 만�
 # 캐시는 계정 라벨별로 마지막 성공값과 429 쉬는 시각만 담는다(자격 값은 절대 안 담는다).
 _CACHE_TTL = 120      # 이 초 안에 읽어둔 성공값이 있으면 다시 조회하지 않는다
 _BACKOFF_429 = 90     # 429 를 받으면 이 초 동안 그 계정을 다시 두드리지 않는다
+# 2026-10-13 Mac TIME_WAIT 사고: 바깥 접속이 막힌 동안 성공값이 없으니 claude 를 부를 때마다 이 조회가
+# 새 TLS 접속을 열었다(현재 계정은 .credentials 로 한 번 더). 실패도 이 초 동안 기억해 같은 계정을
+# 다시 두드리지 않는다. 자격 만료(401)도 같은 기억을 쓰므로 재발급 시도도 이 간격으로 묶인다.
+_FAIL_MEMO = 60
 _CACHE_FILE = Path.home() / ".claude" / ".rotator-usage-cache.json"
 
 
@@ -130,6 +137,12 @@ def cached_usage(label: str) -> dict | None:
     return u if isinstance(u, dict) else None
 
 
+def _remember_fail(ent: dict, now: float, why: str) -> None:
+    """실패를 _FAIL_MEMO 초 동안 기억한다(이전 성공값은 남겨둔다). why 는 종류·응답 번호만 — 자격 값 금지."""
+    ent["fail_until"] = now + _FAIL_MEMO
+    ent["fail_why"] = str(why)[:40]
+
+
 def _iso_to_epoch(text):
     if not text:
         return None
@@ -162,6 +175,11 @@ def get_usage(cred_path) -> dict | None:
         last_status = 429
         last_error = "조회 제한(429). 잠시 뒤 다시"
         return None  # 쉬는 중: 통신하지 않는다(멀쩡한 계정을 막지 않게 값도 지어내지 않는다)
+    if float(ent.get("fail_until") or 0) > now:
+        # 방금 실패한 조회를 부름마다 되풀이하지 않는다(2026-10-13: 접속이 막힌 동안 부름마다 새 접속).
+        # last_status 는 비워 둔다 — 401 을 그대로 두면 부르는 쪽이 재발급을 또 시도해 접속이 늘어난다.
+        last_error = f"직전 조회 실패({ent.get('fail_why') or '사유 모름'}). {_FAIL_MEMO}초 안에는 다시 묻지 않음"
+        return None
 
     # 상태줄 조회기가 방금 이 계정을 조회해 뒀으면 그 값을 재사용한다(제 조회를 안 해 429 를 피한다).
     pu = _probe_usage(label)
@@ -192,11 +210,16 @@ def get_usage(cred_path) -> dict | None:
         last_error = "조회 제한(429). 잠시 뒤 다시" if e.code == 429 else f"HTTP {e.code}"
         if e.code == 429:
             ent["backoff_until"] = now + _BACKOFF_429  # 그 계정을 잠시 쉬게 한다(이전 성공값은 남겨둔다)
-            cache[label] = ent
-            _cache_save(cache)
+        else:
+            _remember_fail(ent, now, f"HTTP {e.code}")
+        cache[label] = ent
+        _cache_save(cache)
         return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
         last_error = type(e).__name__
+        _remember_fail(ent, now, type(e).__name__)  # 접속 자체가 안 되는 동안 부름마다 새 접속을 열지 않게
+        cache[label] = ent
+        _cache_save(cache)
         return None
     fh = j.get("five_hour") or {}
     sd = j.get("seven_day") or {}
@@ -292,11 +315,14 @@ def get_usage_for(cred_path, *, is_current: bool = False,
             return None
         # 지금 계정이 429 로 쉬는 중이면 살아있는 자격도 두드리지 않는다. 안 그러면 저장 자격이
         # 쉬는 동안 이 갈래가 .credentials 라는 딴 키로 한 번 더 두드려 폭주가 반만 잡힌다(2026-09-06).
+        # 접속 실패 직후(_FAIL_MEMO)도 같다 — 안 되는 접속을 두 번 열 이유가 없다(2026-10-13).
         ent = _cache_load().get(_label_of(cred_path)) or {}
         if float(ent.get("backoff_until") or 0) > time.time():
             globals()["last_status"] = 429
             globals()["last_error"] = "조회 제한(429). 잠시 뒤 다시"
             return None
+        if float(ent.get("fail_until") or 0) > time.time():
+            return None  # last_error 는 get_usage 가 이미 "직전 조회 실패" 로 채웠다
         return get_usage(live)
     if allow_refresh and last_status == 401:
         why = None
