@@ -3648,6 +3648,21 @@ def case_nudge_stalled(tmp):
     check("'continuing automatically' 대기 표시가 붙어도 멈춤", vw["stalled"] and vw["input_empty"], vw)
     normal = ["● 끝났습니다", "✻ Worked for 3m · done", rule, "❯", rule, status_o]
     check("평소 끝난 창은 멈춤 아님", not sn.parse_screen(normal)["stalled"])
+    # 2026-10-14 실측 화면: 계정을 갈아끼우다 열쇠가 겹쳐 로그인 만료로 멈춘 창(4개)
+    auth = ["  Ran 1 shell command", "", "● Login expired · Please run /login", "",
+            "✻ Churned for 1m 5s · done 오전 8:24", rule, ">", rule, status_o]
+    va = sn.parse_screen(auth)
+    check("로그인 만료 화면 = 멈춤(모델 칸 한도 아님)",
+          va["stalled"] and va["input_empty"] and va["limit_bucket"] is None, va)
+    check("로그인 만료 뒤 이어가기를 넣었으면 멈춤 아님",
+          not sn.parse_screen(auth[:3] + ["> " + sn.NUDGE_LINE, rule, ">", rule, status_o])["stalled"])
+    quoted = ["● 화면에 Login expired · Please run /login 이 떴다고 하셨는데", rule, ">", rule, status_o]
+    check("답변 속에 인용된 로그인 만료 문구는 멈춤 아님", not sn.parse_screen(quoted)["stalled"])
+    check("기록이 로그인 만료(authentication_failed)로 끝나도 멈춤",
+          sn.stall_info([{"type": "assistant", "message": {"model": "claude-opus-5-5"}},
+                         {"type": "assistant", "isApiErrorMessage": True, "error": "authentication_failed",
+                          "uuid": "u1", "timestamp": "2026-10-13T23:24:49Z",
+                          "message": {"model": "<synthetic>"}}]) is not None)
 
     # 판단 흐름(화면 읽기·입력 넣기를 가짜로 바꿔 끼운다)
     home = Path(tmp) / "nudge_home"
