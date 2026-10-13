@@ -54,6 +54,10 @@ NUDGE_LINE = ("[계정 순환기 자동 이어가기] 한도 오류로 끊긴 �
 
 # 실측 문구 두 가지(세션 한도 / 모델 한도). 오류는 '⎿' 로 시작하는 줄에 찍힌다.
 LIMIT_LINE_RE = re.compile(r"^\s*⎿\s+(You've (?:hit|reached) your\b.{0,60}?\blimit)")
+# 2026-10-14: 계정을 갈아끼우다 열쇠가 겹쳐 창이 "● Login expired · Please run /login" 에 멈췄다(4개 창).
+# 순환기가 자격을 살려 놓아도 창은 사람이 다시 칠 때까지 서 있으므로 이것도 이어가기 대상이다.
+# 넣기 전에 usable 이 그 창 계정의 사용량을 실제로 읽어 보므로, 로그인이 아직 죽어 있으면 넣지 않는다.
+AUTH_LINE_RE = re.compile(r"^\s*[⎿●]\s+(Login expired\b.{0,40}|OAuth token has expired\b.{0,40})")
 LIMIT_BUCKET_RE = re.compile(r"your (Fable|Opus|Sonnet|Haiku)\b")
 BUSY_RE = re.compile(r"…\s*\(|esc to interrupt", re.I)          # 일하는 중 표시(돌아가는 동사…(초))
 RULE_RE = re.compile(r"^─{20,}")
@@ -100,11 +104,11 @@ def parse_screen(lines: list) -> dict:
     res["busy"] = any(BUSY_RE.search(l) for l in history[-8:])
     last = None
     for i, l in enumerate(history):
-        if LIMIT_LINE_RE.match(l):
+        if LIMIT_LINE_RE.match(l) or AUTH_LINE_RE.match(l):
             last = i
     if last is None:
         return res
-    res["limit"] = LIMIT_LINE_RE.match(history[last]).group(1)
+    res["limit"] = (LIMIT_LINE_RE.match(history[last]) or AUTH_LINE_RE.match(history[last])).group(1)
     b = LIMIT_BUCKET_RE.search(res["limit"])
     res["limit_bucket"] = b.group(1) if b else None
     # 멈춤 서명은 한도 문구만으로 만든다. 앞뒤 줄을 섞으면 창 크기가 바뀌어 줄이 다시 접힐 때마다
@@ -168,6 +172,9 @@ def _epoch(ts) -> float | None:
         return None
 
 
+STALL_ERRORS = ("rate_limit", "authentication_failed")   # 한도 거절, 로그인 만료(2026-10-14)
+
+
 def stall_info(records: list) -> dict | None:
     """마지막 답변 줄이 한도 거절(isApiErrorMessage, error=rate_limit)이면 그 정보, 아니면 None."""
     last, model = None, None
@@ -181,7 +188,7 @@ def stall_info(records: list) -> dict | None:
         if m and m != "<synthetic>":
             model = m
             break
-    if not last or not last.get("isApiErrorMessage") or last.get("error") != "rate_limit":
+    if not last or not last.get("isApiErrorMessage") or last.get("error") not in STALL_ERRORS:
         return None
     return {"uuid": last.get("uuid"), "at": _epoch(last.get("timestamp")), "model": model}
 
@@ -594,7 +601,7 @@ def nudge_stalled(usable, *, log=print, now: float | None = None, home: Path = C
         wins[key] = {"times": times, "name": name}
         changed = True
         sent.append(name)
-        log(f"이어가기: 한도로 멈춘 '{name}' 창에 이어서 하라고 넣었다 ({scr['limit']}, 모델 {model or '모름'}, "
+        log(f"이어가기: 멈춘 '{name}' 창에 이어서 하라고 넣었다 ({scr['limit']}, 모델 {model or '모름'}, "
             f"자격 {where or '표시 없음'})")
     # 처음 본 시각은 멈춤이 풀린 창·닫힌 창 것만 지운다. 나이로 지우면 이틀 넘게 멈춰 둔 창이
     # 새 멈춤처럼 보여 한 번 들어간다(재검수 반영).
