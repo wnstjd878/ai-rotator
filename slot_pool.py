@@ -429,7 +429,7 @@ def _login_alert(bucket: str, label: str, why) -> None:
             hours=0, repeat_hours=6, last_ok="",
             headline=f"{bucket} 로 켠 클로드 창들이 Login expired 로 멈춥니다. '{label}' 계정 로그인이 죽었습니다.",
             howto=("할 일: 본체 PowerShell 에서 아래 두 줄을 실행하고, 계정 창이 뜨면 그 계정을 한 번 누릅니다. "
-                   "3분 안에 창들이 다시 됩니다.\n  cd C:\\Users\\JUNSEONG\\ai-rotator\n"
+                   f"3분 안에 창들이 다시 됩니다.\n  cd {BASE}\n"
                    f"  python relogin.py --slot {bucket} {label}"))
     except Exception as e:
         log(f"자리 {bucket}: '{label}' 로그인 알림 중 오류({type(e).__name__})")
