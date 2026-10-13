@@ -50,7 +50,8 @@ CREDS_DIR = BASE / "creds"
 ACCOUNTS = BASE / "accounts.json"
 BASE_PORT = 9250                       # 9240대는 백도씨·아임웹 크롬(9241)과 겹쳐 9250대로 옮김(2026-09-06)
 CALLBACK_HOST = "platform.claude.com"
-LOGIN_TIMEOUT = 900                    # 사람이 로그인해야 할 때 기다리는 시간(초)
+WARM_URL = "https://claude.ai/new"     # 갱신 전에 자동화 연결 없이 먼저 띄우는 화면
+LOGIN_TIMEOUT = 900                   # 사람이 로그인해야 할 때 기다리는 시간(초)
 
 # 원격 머신: 이름 → (그쪽 작업 폴더, 파이썬 명령, 그쪽 기본 셸). ssh 설정에 그 이름이 있어야 한다.
 # 셸을 따로 적는 이유: 명령 이어붙이는 문자가 다르다(PowerShell 은 ';', 나머지는 '&&').
@@ -189,7 +190,10 @@ def launch_chrome(label, open_login=False):
          f"--window-position={80 * idx},{60 * idx}",
          "--window-size=1150,900"]
         # 첫 탭은 항상 "이 창은 A 계정" 안내 쪽 — 창이 여러 개 떠도 어느 계정인지 보이게(2026-09-12 사용자 요청)
-        + [guide_page(label)] + ([login_url] if open_login else []),
+        # 갱신 때도 claude.ai 를 자동화 연결 없이 먼저 한 번 띄운다. 창을 띄우자마자
+        # Playwright 가 붙은 채로 첫 로그인을 하면 claude.ai 가 "브라우저를 확인할 수
+        # 없습니다" 로 막는다(2026-10-13 A·B 에서 겪음, 먼저 띄운 뒤 붙이니 A~D 전부 통과).
+        + [guide_page(label)] + [login_url if open_login else WARM_URL],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(30):
@@ -197,10 +201,37 @@ def launch_chrome(label, open_login=False):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2)
             print(f"[relogin] '{label}' 전용 크롬을 띄웠습니다(포트 {port}).")
+            if not open_login:
+                wait_warm(port)
             return port
         except (urllib.error.URLError, OSError):
             continue
     raise RuntimeError(f"전용 크롬이 포트 {port} 로 안 떴습니다.")
+
+
+def wait_warm(port, limit=25):
+    """먼저 띄운 claude.ai 탭이 다 뜰 때까지 자동화 연결 없이 기다린다(탭 목록 조회만)."""
+    import urllib.error
+    import urllib.request
+
+    settled = 0
+    deadline = time.time() + limit
+    while time.time() < deadline:
+        time.sleep(1)
+        try:
+            raw = urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3).read()
+            pages = [t for t in json.loads(raw.decode("utf-8")) if t.get("type") == "page"]
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+        # 제목이 생기면 화면이 뜬 것이다(로그인돼 있으면 /new, 아니면 /login 으로 간다).
+        if any("claude.ai" in t.get("url", "") and "Claude" in t.get("title", "") for t in pages):
+            settled += 1
+            if settled >= 4:  # 뜬 뒤 몇 초 더 둔다(확인 절차가 끝날 시간)
+                return True
+        else:
+            settled = 0
+    print("[relogin] claude.ai 첫 화면이 제때 안 떴습니다. 그대로 이어갑니다.")
+    return False
 
 
 def claude_bin():
