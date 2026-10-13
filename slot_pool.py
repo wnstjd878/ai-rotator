@@ -251,6 +251,19 @@ def _load(path: Path):
         return None
 
 
+def _read_usage(bucket: str, label: str):
+    """자리 저장본으로 사용량을 읽는다. 그 저장본이 지금 자리에 꽂힌 자격과 같으면 재발급하지 않는다.
+
+    꽂힌 자격은 창(claude)이 스스로 갱신한다. 여기서 같은 재발급 열쇠로 먼저 갱신하면 창이 든 열쇠가
+    폐기돼 창이 Login expired 로 멈춘다(2026-07-31 Mac 봇, 2026-10-14 Opus 자리). 공용 계정은
+    get_usage_for(is_current=True) 로 같은 규칙을 지키는데 자리 쪽은 이 구분이 없었다.
+    """
+    store = store_path(bucket, label)
+    lv = _load(live_path(bucket))
+    in_use = lv is not None and sa._obj_fingerprint(lv) == sa._obj_fingerprint(_load(store))
+    return usage_check.get_usage_for(store, is_current=False, allow_refresh=not in_use)
+
+
 def sync_creds(bucket: str, label: str | None) -> str:
     """자리의 살아있는 자격과 저장본을 같은 값(더 새 것)으로 맞춘다. 기록용 한 줄.
 
@@ -309,6 +322,9 @@ def _patch_account(bucket: str, label: str) -> None:
         pass
 
 
+FRESH_BEFORE_SWITCH = 1800   # 접근 열쇠가 이 초보다 덜 남은 저장본은 끼우기 전에 갱신한다
+
+
 def switch(state: dict, bucket: str, label: str, reason: str = "") -> bool:
     """자리의 계정을 바꾼다(잠금 안에서 부른다). 성공하면 True."""
     src = store_path(bucket, label)
@@ -316,6 +332,20 @@ def switch(state: dict, bucket: str, label: str, reason: str = "") -> bool:
     if not isinstance(obj, dict) or not (obj.get("claudeAiOauth") or {}).get("refreshToken"):
         log(f"자리 {bucket}: '{label}' 저장본이 없거나 깨져 갈아끼우지 못함")
         return False
+    # 접근 열쇠가 곧 끝나는 저장본을 그대로 끼우면 창(claude)과 순환기가 같은 재발급 열쇠로 동시에
+    # 갱신한다. 열쇠는 쓸 때마다 바뀌므로 진 쪽은 폐기된 열쇠를 들게 되고, 창이 지면 Login expired 로
+    # 멈춘다(2026-10-14 08:24 Opus 자리 B → A). 아직 아무도 안 쓰는 저장본일 때 여기서 먼저 갱신한다.
+    exp = int((obj.get("claudeAiOauth") or {}).get("expiresAt") or 0) / 1000
+    if exp - time.time() < FRESH_BEFORE_SWITCH:
+        import cred_refresh
+        if cred_refresh.refresh_file(src):
+            obj = _load(src)
+            log(f"자리 {bucket}: '{label}' 저장본 열쇠가 낡아 끼우기 전에 갱신")
+        elif exp <= time.time():
+            why = cred_refresh.last_error
+            log(f"자리 {bucket}: '{label}' 저장본 열쇠가 끝났고 갱신도 실패({why}). 끼우지 않음")
+            _login_alert(bucket, label, f"자격 만료, 갱신도 실패({why})")
+            return False
     leaving = slot_current(state, bucket)
     if leaving and leaving != label:
         log(f"자리 {bucket}: [save-back] {sync_creds(bucket, leaving)}")
@@ -331,12 +361,12 @@ def switch(state: dict, bucket: str, label: str, reason: str = "") -> bool:
 # ── 고르기·확인 ───────────────────────────────────────────────────────────────
 
 def pick(state: dict, bucket: str, exclude: str | None = None, now: float | None = None,
-         need=None) -> str | None:
+         need=None, skip=()) -> str | None:
     """그 자리에 앉힐 계정. 저장본이 있고, 계정도 `need` 칸(안 주면 자리 칸)도 안 막힌 것 중 앞순위."""
     now = time.time() if now is None else now
     need = tuple(need or (bucket,))
     cands = [l for l in stored_labels(bucket)
-             if l != exclude and not st.is_blocked(state, label=l, now=now)
+             if l != exclude and l not in skip and not st.is_blocked(state, label=l, now=now)
              and not st.is_scoped_blocked(state, l, need, now)]
     order = st.priority_order(state, cands, now)
     return order[0] if order else None
@@ -373,7 +403,7 @@ def _revive(state: dict, bucket: str, below: float, need=None) -> list:
     for l in stored_labels(bucket):
         if not (st.is_blocked(state, label=l, now=now) or st.is_scoped_blocked(state, l, need, now)):
             continue
-        u = usage_check.get_usage_for(store_path(bucket, l), is_current=False)
+        u = _read_usage(bucket, l)
         if not u:
             continue
         if any(usage_check.which_limit(u, threshold=below, bucket=n) for n in need):
@@ -438,7 +468,7 @@ def _login_alert(bucket: str, label: str, why) -> None:
 def _exhausted_kinds(state: dict, cur: str, bucket: str, threshold: float, names=None) -> tuple:
     """자리 계정의 사용량을 한 번 읽어 칸마다 바닥났는지. ({칸: 종류}, 읽었는지). 바닥난 칸만 담는다."""
     names = tuple(names or (bucket,))
-    u = usage_check.get_usage_for(store_path(bucket, cur), is_current=False)
+    u = _read_usage(bucket, cur)
     _login_alert(bucket, cur, None if u else str(getattr(usage_check, "last_error", None) or ""))
     if not u:
         # 못 읽었다. 기록상 막혀 있으면 기록으로 갈아탄다(2026-09-12 사고와 같은 갈래).
@@ -504,7 +534,7 @@ def _reclaim(state: dict, bucket: str, cur: str, need=None) -> str | None:
     """
     need = tuple(need or (bucket,))
     for cand in _earlier_than(state, bucket, cur, need=need):
-        u = usage_check.get_usage_for(store_path(bucket, cand), is_current=False)
+        u = _read_usage(bucket, cand)
         if not u:
             log(f"자리 {bucket}: 초기화가 이른 '{cand}' 사용량을 못 읽어 되돌리지 않는다"
                 f"(사유={getattr(usage_check, 'last_error', None)})")
@@ -555,7 +585,7 @@ def _full_now(bucket: str, label: str, forced: bool = False, state: dict | None 
     """
     if forced:
         return True
-    u = usage_check.get_usage_for(store_path(bucket, label), is_current=False)
+    u = _read_usage(bucket, label)
     if u:
         return usage_check.which_limit(u, threshold=100.0, bucket=bucket) is not None
     return bool(state) and seen_full(state, label, bucket)
@@ -577,7 +607,7 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
     for l in stored_labels(bucket):
         if l == cur:
             continue
-        u = usage_check.get_usage_for(store_path(bucket, l), is_current=False)
+        u = _read_usage(bucket, l)
         if not u:
             continue
         st.note_weekly_reset(state, l, u.get("weekly_reset"))
@@ -612,15 +642,15 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
     return nxt
 
 
-def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: float, need=None):
-    nxt = pick(state, bucket, exclude=exclude, need=need)
+def _pick_or_revive(state: dict, bucket: str, exclude: str | None, threshold: float, need=None, skip=()):
+    nxt = pick(state, bucket, exclude=exclude, need=need, skip=skip)
     if nxt is not None:
         return nxt
     box = _slots(state).setdefault(bucket, {})
     if time.time() - float(box.get("revive_at") or 0) >= 1800:
         box["revive_at"] = time.time()
         if _revive(state, bucket, threshold, need):
-            nxt = pick(state, bucket, exclude=exclude, need=need)
+            nxt = pick(state, bucket, exclude=exclude, need=need, skip=skip)
     return nxt
 
 
@@ -666,7 +696,8 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 st.save_state(state)
                 return (2 if not nxt else 1), None
             cur, switched, own_switched = nxt, True, True
-        for _ in range(len(stored_labels(bucket)) + 1):
+        skip = set()   # 저장본 열쇠가 죽어 끼우지 못한 계정. 이번 회차엔 다시 고르지 않고 다음 계정으로 간다
+        for _ in range(2 * len(stored_labels(bucket)) + 1):
             note = sync_creds(bucket, cur)
             if "되저장" in note or "밀어 넣음" in note:
                 log(f"자리 {bucket}: {note}")
@@ -675,8 +706,9 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 force_next = False
             else:
                 bad, read = _exhausted_kinds(state, cur, bucket, threshold, wanted)
-                if read:
-                    sync_creds(bucket, cur)   # 저장본을 재발급했을 수 있다(401 뒤). 자리로 밀어 넣는다
+                # 저장본을 재발급했을 수 있다(401 뒤). 다시 읽기가 429 등으로 실패해도 갱신은 됐을 수 있으니
+                # 읽었는지와 상관없이 맞춘다(바뀐 게 없으면 아무것도 안 한다)
+                sync_creds(bucket, cur)
             need = _need(state, bucket, wanted)   # 방금 막은 기록까지 반영해 다시 계산한다
             own_hit = forced or bucket in bad
             if own_hit and bucket not in need and _pick_or_revive(state, bucket, cur, threshold, (bucket,)):
@@ -692,9 +724,9 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
             hit = [n for n in need if n in bad]
             if not forced and not hit:
                 break
-            nxt = _pick_or_revive(state, bucket, cur, threshold, need) if need else None
+            nxt = _pick_or_revive(state, bucket, cur, threshold, need, skip) if need else None
             if nxt is None and own_hit and bucket in need and len(need) > 1:
-                nxt = _pick_or_revive(state, bucket, cur, threshold, (bucket,))
+                nxt = _pick_or_revive(state, bucket, cur, threshold, (bucket,), skip)
                 if nxt:
                     log(f"자리 {bucket}: 창들이 쓰는 칸({', '.join(need)})을 다 채울 계정이 없어 "
                         f"{bucket} 칸만 보고 '{nxt}' 로 갑니다")
@@ -720,8 +752,8 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
             why = "미리 넘김" if threshold < 100.0 else ("한도로 끝난 뒤" if forced else "켜기 전 확인")
             what = f"{bucket} 칸 소진" if own_hit else f"이 자리 창들이 쓰는 {', '.join(hit)} 칸 소진"
             if not switch(state, bucket, nxt, f"{what}, {why}"):
-                st.save_state(state)
-                return 1, cur
+                skip.add(nxt)   # 열쇠가 죽은 계정을 끼우면 창이 Login expired 로 멈춘다. 다음 계정을 본다
+                continue
             cur, switched = nxt, True
             if entry_hit:
                 own_switched = True
@@ -798,7 +830,7 @@ def usable_now(bucket: str, threshold: float, model_bucket: str | None = None) -
         return None
     if model_bucket is None and not slot_claims(state, bucket):
         return None
-    u = usage_check.get_usage_for(store_path(bucket, cur), is_current=False)
+    u = _read_usage(bucket, cur)
     if not u:
         return False
     return usage_check.which_limit(u, threshold=threshold, bucket=model_bucket or bucket) is None

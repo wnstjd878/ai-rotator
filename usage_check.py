@@ -330,6 +330,15 @@ def get_usage_for(cred_path, *, is_current: bool = False,
             import cred_refresh
 
             if cred_refresh.refresh_file(cred_path):
+                # 방금 받은 401 이 실패 기억(_FAIL_MEMO)에 남아 있어 그대로 다시 읽으면 통신 없이 실패로
+                # 돌아온다. 그러면 부르는 쪽은 "못 읽음"으로 보고 새 자격을 자리로 바로 밀어 넣지 않는다
+                # (2026-10-14 08:24, 창이 3분간 폐기된 열쇠를 든 채 Login expired). 새 열쇠라 기억을 지운다.
+                cache = _cache_load()
+                ent = cache.get(_label_of(cred_path)) or {}
+                if ent.pop("fail_until", None) is not None:
+                    ent.pop("fail_why", None)
+                    cache[_label_of(cred_path)] = ent
+                    _cache_save(cache)
                 return get_usage(cred_path)
             why = cred_refresh.last_error
         except Exception as e:

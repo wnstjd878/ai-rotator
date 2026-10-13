@@ -2755,7 +2755,7 @@ def main():
                      case_stale_scoped_block, case_stale_account_block,
                      case_push_fail_alert, case_tend_windows,
                      case_usage_cache_backoff, case_nudge_stalled,
-                     case_window_limit_from_screen, case_slot_pool,
+                     case_window_limit_from_screen, case_slot_pool, case_slot_fresh_switch,
                      case_last_resort_shared):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
@@ -4152,6 +4152,129 @@ def case_slot_pool(tmp):
         os.environ["AIROTATOR_NO_SLOTS"] = "1"
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         claude_pool.release_session(7001)
+
+
+def case_slot_fresh_switch(tmp):
+    """[60] 자리 교체 때 열쇠 경합 (2026-10-14 08:24 Opus 자리 B → A, 창이 Login expired).
+
+    접근 열쇠가 끝난 저장본을 그대로 끼우면 창과 순환기가 같은 재발급 열쇠로 동시에 갱신해 창이 진다.
+    끼우기 전에 저장본을 갱신하고, 꽂힌 자격은 순환기가 갱신하지 않으며, 열쇠가 죽은 계정은 건너뛴다.
+    """
+    print()
+    print("[60] 자리 교체 때 열쇠 경합")
+    import slot_pool as sp
+    import usage_check as uc
+    import cred_refresh as cr
+
+    tmp = Path(tmp)
+    setup(tmp, ["A", "B", "C"], "A")
+    os.environ.pop("AIROTATOR_NO_SLOTS", None)
+    if os.name != "nt":
+        os.environ["AIROTATOR_NO_SLOTS"] = "1"
+        return
+    real = (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
+            uc._CACHE_FILE, cr.refresh_file, st._pid_alive, sp._has_window)
+    sp._has_window = lambda keys, procs=None: keys
+    sp.POOL_ROOT, sp.STORE_ROOT, sp.LOG_FILE = tmp / "pool", tmp / "creds" / "slots", tmp / "rotator.log"
+    sp.CLAUDE_HOME = tmp / "home"
+    (sp.CLAUDE_HOME / "projects").mkdir(parents=True)
+    (sp.CLAUDE_HOME / "settings.json").write_text('{"model":"opus"}', encoding="utf-8")
+    uc._CACHE_FILE = tmp / "usage-cache.json"
+    st._pid_alive = lambda pid: False
+    now = time.time()
+
+    def cred(rt, hours):
+        return {"claudeAiOauth": {"accessToken": "x", "refreshToken": rt,
+                                  "expiresAt": int((now + hours * 3600) * 1000)}}
+
+    refreshed = []
+    dead = set()
+
+    def fake_refresh(path):
+        label = Path(path).stem
+        refreshed.append(label)
+        if label in dead:
+            cr.last_error = "갱신 거절(HTTP 400)"
+            return False
+        sa._write_owner_only(Path(path), cred(f"rt-{label}-new", 8))
+        return True
+
+    cr.refresh_file = fake_refresh
+    free = {"weekly_pct": 10.0, "session_pct": 5.0, "weekly_reset": now + 48 * 3600, "session_reset": now + 3600,
+            "scoped": {"Fable": {"pct": 5.0, "reset": now + 48 * 3600}, "Opus": {"pct": 5.0, "reset": now + 48 * 3600}}}
+    full = dict(free, scoped={"Fable": {"pct": 5.0, "reset": now + 48 * 3600},
+                              "Opus": {"pct": 100.0, "reset": now + 48 * 3600}})
+    table = {}
+
+    def fake_get(path):
+        u = table.get(Path(path).stem)
+        uc.last_status = None if u else 401
+        return u
+
+    uc.get_usage = fake_get
+
+    def seat(label):
+        with st.with_lock():
+            s2 = st.load_state()
+            sp.switch(s2, "Opus", label, "시험")
+            st.save_state(s2)
+
+    try:
+        sa._write_owner_only(sp.store_path("Opus", "A"), cred("rt-A", 6))
+        sa._write_owner_only(sp.store_path("Opus", "B"), cred("rt-B", -12))   # 열쇠가 12시간 전에 끝난 저장본
+        sa._write_owner_only(sp.store_path("Opus", "C"), cred("rt-C", 6))
+        seat("A")
+        refreshed.clear()
+        # (1) A 가 바닥 → B 로 갈 때 B 저장본을 끼우기 전에 갱신한다(낡은 열쇠가 창에 들어가지 않는다)
+        table.update({"A": full, "B": free, "C": free})
+        rc, cur = sp.ensure("Opus", threshold=claude_pool.PREEMPT_PCT)
+        live = sp._load(sp.live_path("Opus"))
+        check("바닥난 A 에서 B 로 간다", cur == "B", (rc, cur))
+        check("끼우기 전에 B 저장본을 갱신했다", refreshed[:1] == ["B"], refreshed)
+        check("창에 꽂힌 자격은 갱신된 열쇠(옛 열쇠 아님)",
+              (live or {}).get("claudeAiOauth", {}).get("refreshToken") == "rt-B-new")
+        # (2) 꽂힌 계정(B)은 401 이어도 순환기가 갱신하지 않는다. 안 꽂힌 계정(C)은 갱신한다
+        refreshed.clear()
+        table.pop("B"); table.pop("C")
+        sp._read_usage("Opus", "B")
+        check("꽂힌 계정은 401 이어도 순환기가 갱신하지 않는다", "B" not in refreshed, refreshed)
+        sa._write_owner_only(sp.store_path("Opus", "C"), cred("rt-C", -1))
+        sp._read_usage("Opus", "C")
+        check("안 꽂힌 계정은 401 이면 갱신한다", "C" in refreshed, refreshed)
+        # (3) 갱신 직후 다시 읽기가 실패 기억에 막히지 않는다(10/13 실패 기억이 막아 3분간 폐기된 열쇠가 남았다)
+        uc._cache_save({"C": {"fail_until": time.time() + 60, "fail_why": "HTTP 401"}})
+        real_get = uc.get_usage
+        calls = []
+
+        def once_401(path):
+            calls.append(1)
+            if len(calls) == 1:
+                uc.last_status = 401
+                uc._cache_save({"C": {"fail_until": time.time() + 60, "fail_why": "HTTP 401"}})
+                return None
+            return real_get.__wrapped__(path) if hasattr(real_get, "__wrapped__") else free
+
+        uc.get_usage = once_401
+        sa._write_owner_only(sp.store_path("Opus", "C"), cred("rt-C", -1))
+        got = uc.get_usage_for(sp.store_path("Opus", "C"), is_current=False)
+        uc.get_usage = fake_get
+        check("갱신 뒤 실패 기억을 지워 바로 다시 읽는다",
+              got is not None and "fail_until" not in (uc._cache_load().get("C") or {}), got)
+        # (4) 열쇠가 죽은 B 는 건너뛰고 C 로 간다(끼우면 창이 Login expired)
+        seat("A")   # 떠나는 B 의 꽂힌 자격이 B 저장본으로 되저장되므로 저장본은 앉힌 뒤에 낡게 만든다
+        sa._write_owner_only(sp.store_path("Opus", "B"), cred("rt-B", -12))
+        sa._write_owner_only(sp.store_path("Opus", "C"), cred("rt-C", 6))
+        dead.add("B")
+        refreshed.clear()
+        table.update({"A": full, "B": free, "C": free})
+        rc, cur = sp.ensure("Opus", threshold=claude_pool.PREEMPT_PCT)
+        live = sp._load(sp.live_path("Opus"))
+        check("열쇠가 죽은 B 는 건너뛰고 C 로 간다", cur == "C" and "B" in refreshed, (rc, cur, refreshed))
+        check("창에 꽂힌 자격은 C 것", (live or {}).get("claudeAiOauth", {}).get("refreshToken") == "rt-C")
+    finally:
+        (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
+         uc._CACHE_FILE, cr.refresh_file, st._pid_alive, sp._has_window) = real
+        os.environ["AIROTATOR_NO_SLOTS"] = "1"
 
 
 def case_last_resort_shared(tmp):
