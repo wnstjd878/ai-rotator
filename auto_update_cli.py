@@ -47,6 +47,7 @@ _MAC_CODEX_REAL = "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"
 _NPM_DIR = Path.home() / "AppData" / "Roaming" / "npm"
 # 본체 codex: 가로채기를 씌웠으면 진짜는 codex-real.cmd, 아니면 codex.cmd 가 진짜다.
 _WIN_CODEX = str(_NPM_DIR / ("codex-real.cmd" if (_NPM_DIR / "codex-real.cmd").exists() else "codex.cmd"))
+_WIN_CODEX_SHIM = str(BASE / "install_codex_shim.ps1")
 
 # 가로채기 상태 판정은 **영문 부분으로만** 한다. winserver 의 한글 출력은 이 통로를 지나며
 # 글자가 깨져 오기 때문이다(아침 점검 봇도 같은 이유로 True/False 줄만 읽는다).
@@ -82,7 +83,7 @@ MACHINES = [
     },
     # codex CLI (2026-10-15 추가). 낡은 codex 는 새 모델을 못 본다. 0.144.1 에 갇힌 Mac 에서
     # gpt-5.5 가 은퇴하자 검수가 거절됐고, 새 판 모델(gpt-6-*)은 "requires a newer version" 로 막혔다.
-    # winserver 에는 codex 가 없다. 본체는 가로채기 없이 갱신만 한다(지금 안 씌워져 있음).
+    # winserver 에는 codex 가 없다. 본체도 2026-10-15 에 가로채기를 다시 씌웠다(npm 갱신이 벗긴다).
     {
         "name": "Mac codex",
         "tool": "codex",
@@ -102,8 +103,10 @@ MACHINES = [
         "tool": "codex",
         "version": [_WIN_CODEX, "--version"],
         "update": ["npm.cmd", "install", "-g", "@openai/codex@latest"],
-        "shim_install": None,
-        "shim_status": None,
+        "shim_install": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                         "-File", _WIN_CODEX_SHIM],
+        "shim_status": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-File", _WIN_CODEX_SHIM, "-Status"],
     },
 ]
 
@@ -142,6 +145,9 @@ def as_text(ver) -> str:
 
 def judge_shim(name: str, out: str) -> bool:
     """상태 출력 글에서 가로채기가 제자리인지 가린다(통신 없이 글자만 본다 — 시험용)."""
+    if name == "본체 codex":
+        return ("codex.cmd : shim installed" in out and "codex(sh) : shim installed" in out
+                and "codex.ps1 : present" not in out)
     if name == "Mac codex":
         return "codex_shim.sh" in out and "안 덮임" not in out
     if name == "Mac":
