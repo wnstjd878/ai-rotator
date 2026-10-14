@@ -1,6 +1,6 @@
 """
 == 운영 맥락 ==
-용도: 3대(본체·Mac·winserver)의 claude CLI 를 최신 판으로 유지한다. 가로채기(shim)가
+용도: 3대(본체·Mac·winserver)의 claude CLI 와 본체·Mac 의 codex CLI 를 최신 판으로 유지한다. 가로채기(shim)가
       깔린 기계는 스스로 갱신되지 못한다 — 설치 자리(claude.exe / PATH 의 claude)를
       가로채기가 차지하고 있어서, 갱신본이 엉뚱한 자리에 깔리거나 다음 재설치 때 지워진다.
       그래서 여기서 대신 갱신하고, 갱신 뒤에는 반드시 가로채기를 다시 씌운다.
@@ -43,6 +43,10 @@ _WIN_CLAUDE = str(Path.home() / ".local" / "bin" / "claude.exe")
 _MAC_REAL = "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 _WS_REAL = r"& $env:USERPROFILE\.local\bin\claude-real.exe"
 _WS_SHIM = r"C:\Users\pc\projects\ai-rotator\install_shim.ps1"
+_MAC_CODEX_REAL = "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"
+_NPM_DIR = Path.home() / "AppData" / "Roaming" / "npm"
+# 본체 codex: 가로채기를 씌웠으면 진짜는 codex-real.cmd, 아니면 codex.cmd 가 진짜다.
+_WIN_CODEX = str(_NPM_DIR / ("codex-real.cmd" if (_NPM_DIR / "codex-real.cmd").exists() else "codex.cmd"))
 
 # 가로채기 상태 판정은 **영문 부분으로만** 한다. winserver 의 한글 출력은 이 통로를 지나며
 # 글자가 깨져 오기 때문이다(아침 점검 봇도 같은 이유로 True/False 줄만 읽는다).
@@ -75,6 +79,31 @@ MACHINES = [
                          f"powershell -NoProfile -ExecutionPolicy Bypass -File {_WS_SHIM}"],
         "shim_status": ["ssh", "winserver",
                         f"powershell -NoProfile -ExecutionPolicy Bypass -File {_WS_SHIM} -Status"],
+    },
+    # codex CLI (2026-10-15 추가). 낡은 codex 는 새 모델을 못 본다. 0.144.1 에 갇힌 Mac 에서
+    # gpt-5.5 가 은퇴하자 검수가 거절됐고, 새 판 모델(gpt-6-*)은 "requires a newer version" 로 막혔다.
+    # winserver 에는 codex 가 없다. 본체는 가로채기 없이 갱신만 한다(지금 안 씌워져 있음).
+    {
+        "name": "Mac codex",
+        "tool": "codex",
+        "version": ["ssh", "macmini",
+                    f"export PATH=/opt/homebrew/bin:$PATH; node {_MAC_CODEX_REAL} --version"],
+        "update": ["ssh", "macmini",
+                   "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; "
+                   "npm install -g @openai/codex@latest"],
+        # npm 갱신이 /opt/homebrew/bin/codex 의 순환 가로채기를 덮어쓴다(2026-10-15 실측).
+        "shim_install": ["ssh", "macmini",
+                         "export PATH=/opt/homebrew/bin:$PATH; "
+                         "bash ~/projects/ai-rotator/install_codex_shim.sh"],
+        "shim_status": ["ssh", "macmini", "bash ~/projects/ai-rotator/install_codex_shim.sh --status"],
+    },
+    {
+        "name": "본체 codex",
+        "tool": "codex",
+        "version": [_WIN_CODEX, "--version"],
+        "update": ["npm.cmd", "install", "-g", "@openai/codex@latest"],
+        "shim_install": None,
+        "shim_status": None,
     },
 ]
 
@@ -113,6 +142,8 @@ def as_text(ver) -> str:
 
 def judge_shim(name: str, out: str) -> bool:
     """상태 출력 글에서 가로채기가 제자리인지 가린다(통신 없이 글자만 본다 — 시험용)."""
+    if name == "Mac codex":
+        return "codex_shim.sh" in out and "안 덮임" not in out
     if name == "Mac":
         # 연결이 가로채기 파일을 가리켜야 하고, nvm 쪽에 '안 덮임' 이 하나도 없어야 한다.
         return "claude_shim.sh" in out and "안 덮임" not in out
@@ -195,30 +226,58 @@ def handle(machine, dry: bool):
     return name, after, ok, verdict(after, ok, install_failed)
 
 
+# codex 모델 줄을 "원래 등급의 최신 판"으로 맞춘다(2026-10-15). CLI 가 올라가면 새 판 모델이
+# 목록에 보이므로 갱신 뒤에 돈다. 부품은 ~/.claude/hooks/codex_model.py(설정 동기화로 양쪽 같음).
+CODEX_MODEL_APPLY = [
+    ("본체", [sys.executable, str(Path.home() / ".claude" / "hooks" / "codex_model.py"), "--apply"]),
+    ("Mac", ["ssh", "macmini", "python3 ~/.claude/hooks/codex_model.py --apply"]),
+]
+
+
+def apply_codex_models(dry: bool) -> list[str]:
+    problems = []
+    for name, cmd in CODEX_MODEL_APPLY:
+        r = run(cmd + (["--dry-run"] if dry else []), SHORT_TIMEOUT)
+        if r is None or r.returncode != 0:
+            problems.append(f"{name}: 코덱스 모델 줄 맞추기가 실패했습니다")
+            continue
+        for line in (r.stdout or "").splitlines():
+            if line.strip():
+                log(f"{name} 코덱스 모델: {line.strip()}")
+    return problems
+
+
 def main() -> int:
     dry = "--dry-run" in sys.argv[1:]
     results = [handle(m, dry) for m in MACHINES]
+    model_problems = apply_codex_models(dry)
 
-    newest = max((v for _, v, _, _ in results if v), default=None)
+    # claude 와 codex 는 판 번호 체계가 달라 도구별로 가장 높은 판을 따로 본다.
+    tools = [m.get("tool", "claude") for m in MACHINES]
+    newest_by = {t: max((r[1] for r, tt in zip(results, tools) if tt == t and r[1]), default=None)
+                 for t in set(tools)}
     problems = []
-    for name, ver, _ok, reason in results:
+    for (name, ver, _ok, reason), tool in zip(results, tools):
+        newest = newest_by.get(tool)
         if reason:
             problems.append(f"{name}: {reason}")
         elif newest and ver and ver < newest:
             problems.append(f"{name}: {as_text(ver)} 로 뒤처졌습니다"
                             f"(가장 높은 판 {as_text(newest)})")
 
+    problems += model_problems
     for p in problems:  # 개수만 적으면 기록만 보고는 뭐가 걸렸는지 알 수 없다
         log(f"  문제: {p}")
-    log(f"끝. 가장 높은 판 {as_text(newest)}, 문제 {len(problems)}건")
+    log("끝. 가장 높은 판 " + ", ".join(f"{t} {as_text(v)}" for t, v in sorted(newest_by.items()))
+        + f", 문제 {len(problems)}건")
 
     if problems and not dry:
         # 낡은 CLI 는 모델 별칭을 낡게 풀어 엉뚱한 판이 잡힌다. 받은 사람이 바로 할 수 있는
         # 일을 적는다(12.2). 알림은 문제가 있을 때만 — 매일 잘 되는 걸 알릴 필요는 없다.
         notify.send(
-            "클로드 명령도구 자동 갱신에서 걸린 게 있습니다.\n"
+            "클로드·코덱스 명령도구 자동 갱신에서 걸린 게 있습니다.\n"
             + "\n".join(problems)
-            + "\n낡은 채로 두면 모델을 'opus' 로 지정해도 옛 판(Opus 4.8)이 잡힙니다.\n"
+            + "\n낡은 채로 두면 클로드는 'opus' 가 옛 판으로 잡히고, 코덱스는 새 모델을 못 씁니다.\n"
               "본체에서 `python auto_update_cli.py` 를 한 번 실행해 보시고, "
               "그래도 같으면 개발 봇에 '고쳐줘' 라고 답장해 주세요.")
     return 0
