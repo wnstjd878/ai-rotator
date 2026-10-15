@@ -148,7 +148,7 @@ def main():
     try:
         proc = codex_pool.run(
             [REAL_CODEX, *argv], input=stdin_data, env=env,
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
     except codex_pool.AllAccountsExhausted as e:
         sys.stderr.write(f"[shim] {e}\n")
@@ -159,7 +159,7 @@ def main():
         import subprocess
 
         proc = subprocess.run([REAL_CODEX, *argv], input=stdin_data,
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     sys.stdout.write(proc.stdout or "")
     sys.stdout.flush()
@@ -169,4 +169,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # 한글 윈도우 기본 글자판(cp949)엔 긴 줄표(—) 같은 글자가 없어 출력하다 죽었다. 검수가 통째로 실패해 올리기가 막힘 (2026-10-15)
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())
