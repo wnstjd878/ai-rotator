@@ -2913,7 +2913,8 @@ def case_usage_cache_backoff(tmp):
               u8 is not None and u8["weekly_pct"] == 40.0, (u8, uc.last_error))
         c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
         check("401 기억은 기본 저장본 칸에만 남는다",
-              c.get("D", {}).get("fail_why") is None and "D@Fable" not in c, c)
+              c.get("D@main", {}).get("fail_why") == "HTTP 401" and "D@Fable" not in c
+              and not c.get("D", {}).get("fail_until"), c)
     finally:
         _ur.urlopen = real_open
         uc._CACHE_FILE = real_cache

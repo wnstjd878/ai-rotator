@@ -63,7 +63,8 @@ def _label_of(cred_path) -> str:
 
 
 def _fail_key(cred_path) -> str:
-    """자격 거절(401 등)을 기억하는 칸. 자리 저장본(creds/slots/<칸>/<라벨>.json)은 '<라벨>@<칸>' 으로 따로 둔다.
+    """자격 거절(401 등)을 기억하는 칸. 자리 저장본(creds/slots/<칸>/<라벨>.json)은 '<라벨>@<칸>',
+    그 밖의 파일(creds/<라벨>.json, .credentials)은 '<라벨>@main' 으로 계정 칸과 따로 둔다.
 
     한 계정의 저장본이 기본·Fable 자리·Opus 자리 셋인데 접근 열쇠 수명은 파일마다 다르다. 거절을 라벨 한 칸에
     적으면 낡은 기본 저장본 하나가 401 을 받는 순간 멀쩡한 자리 저장본까지 60초 동안 "직전 조회 실패"로
@@ -73,7 +74,7 @@ def _fail_key(cred_path) -> str:
     p = Path(cred_path)
     if p.parent.parent.name == "slots":
         return f"{p.stem}@{p.parent.name}"
-    return _label_of(cred_path)
+    return f"{_label_of(cred_path)}@main"
 
 
 def _cache_load() -> dict:
@@ -184,7 +185,7 @@ def get_usage(cred_path) -> dict | None:
     now = time.time()
     cache = _cache_load()
     ent = cache.get(label) or {}
-    fent = ent if fkey == label else (cache.get(fkey) or {})
+    fent = cache.get(fkey) or {}
     if ent.get("usage") and (now - float(ent.get("at") or 0)) < _CACHE_TTL:
         return copy.deepcopy(ent["usage"])
     if float(ent.get("backoff_until") or 0) > now:
@@ -249,8 +250,7 @@ def get_usage(cred_path) -> dict | None:
         "scoped": _scoped(j),
     }
     cache[label] = {"at": now, "usage": usage}  # 성공하면 백오프도 지운다
-    if fkey != label:
-        cache.pop(fkey, None)
+    cache.pop(fkey, None)
     _cache_save(cache)
     return usage
 
