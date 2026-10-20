@@ -2883,6 +2883,37 @@ def case_usage_cache_backoff(tmp):
         check("조회기 캐시가 신선하면 통신 없이 그 값을 쓴다",
               up is not None and up["session_pct"] == 22.0 and up["weekly_pct"] == 33.0
               and calls["n"] == before, (up, before, calls["n"]))
+
+        # 2026-10-21: 낡은 기본 저장본(creds/D.json)의 401 이 같은 계정의 멀쩡한 자리 저장본까지 막았다.
+        # 거절은 파일 칸('D', 'D@Fable')에 따로 적혀 자리 저장본은 그대로 읽혀야 한다.
+        uc._PROBE_CACHE = _P(tmp) / ".no-probe.json"
+        dmain = _P(tmp) / "D.json"
+        dmain.write_text(_json.dumps({"claudeAiOauth": {"accessToken": "old"}}), encoding="utf-8")
+        dslot = _P(tmp) / "slots" / "Fable" / "D.json"
+        dslot.parent.mkdir(parents=True, exist_ok=True)
+        dslot.write_text(_json.dumps({"claudeAiOauth": {"accessToken": "new"}}), encoding="utf-8")
+        c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
+        c.pop("D", None)
+        uc._CACHE_FILE.write_text(_json.dumps(c), encoding="utf-8")
+        mode["raise"] = "401"
+        real_fake = _ur.urlopen
+
+        def by_token(req, timeout=None):
+            if req.get_header("Authorization") == "Bearer old":
+                calls["n"] += 1
+                raise _ue.HTTPError(uc.USAGE_URL, 401, "Unauthorized", {}, _io.BytesIO(b""))
+            mode["raise"] = None
+            return real_fake(req, timeout)
+
+        _ur.urlopen = by_token
+        u7 = uc.get_usage(dmain)
+        check("낡은 기본 저장본은 401 로 None", u7 is None and uc.last_status == 401, uc.last_status)
+        u8 = uc.get_usage(dslot)
+        check("같은 계정 자리 저장본은 기본 저장본의 401 에 안 묶인다",
+              u8 is not None and u8["weekly_pct"] == 40.0, (u8, uc.last_error))
+        c = _json.loads(uc._CACHE_FILE.read_text(encoding="utf-8"))
+        check("401 기억은 기본 저장본 칸에만 남는다",
+              c.get("D", {}).get("fail_why") is None and "D@Fable" not in c, c)
     finally:
         _ur.urlopen = real_open
         uc._CACHE_FILE = real_cache
@@ -4257,7 +4288,7 @@ def case_slot_fresh_switch(tmp):
         sp._read_usage("Opus", "C")
         check("안 꽂힌 계정은 401 이면 갱신한다", "C" in refreshed, refreshed)
         # (3) 갱신 직후 다시 읽기가 실패 기억에 막히지 않는다(10/13 실패 기억이 막아 3분간 폐기된 열쇠가 남았다)
-        uc._cache_save({"C": {"fail_until": time.time() + 60, "fail_why": "HTTP 401"}})
+        uc._cache_save({"C@Opus": {"fail_until": time.time() + 60, "fail_why": "HTTP 401"}})
         real_get = uc.get_usage
         calls = []
 
@@ -4265,7 +4296,7 @@ def case_slot_fresh_switch(tmp):
             calls.append(1)
             if len(calls) == 1:
                 uc.last_status = 401
-                uc._cache_save({"C": {"fail_until": time.time() + 60, "fail_why": "HTTP 401"}})
+                uc._cache_save({"C@Opus": {"fail_until": time.time() + 60, "fail_why": "HTTP 401"}})
                 return None
             return real_get.__wrapped__(path) if hasattr(real_get, "__wrapped__") else free
 
@@ -4274,7 +4305,7 @@ def case_slot_fresh_switch(tmp):
         got = uc.get_usage_for(sp.store_path("Opus", "C"), is_current=False)
         uc.get_usage = fake_get
         check("갱신 뒤 실패 기억을 지워 바로 다시 읽는다",
-              got is not None and "fail_until" not in (uc._cache_load().get("C") or {}), got)
+              got is not None and "fail_until" not in (uc._cache_load().get("C@Opus") or {}), got)
         # (4) 열쇠가 죽은 B 는 건너뛰고 C 로 간다(끼우면 창이 Login expired)
         seat("A")   # 떠나는 B 의 꽂힌 자격이 B 저장본으로 되저장되므로 저장본은 앉힌 뒤에 낡게 만든다
         sa._write_owner_only(sp.store_path("Opus", "B"), cred("rt-B", -12))

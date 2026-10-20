@@ -62,6 +62,20 @@ def _label_of(cred_path) -> str:
         return str(cred_path)
 
 
+def _fail_key(cred_path) -> str:
+    """자격 거절(401 등)을 기억하는 칸. 자리 저장본(creds/slots/<칸>/<라벨>.json)은 '<라벨>@<칸>' 으로 따로 둔다.
+
+    한 계정의 저장본이 기본·Fable 자리·Opus 자리 셋인데 접근 열쇠 수명은 파일마다 다르다. 거절을 라벨 한 칸에
+    적으면 낡은 기본 저장본 하나가 401 을 받는 순간 멀쩡한 자리 저장본까지 60초 동안 "직전 조회 실패"로
+    묶여, Fable 이 남은 계정을 못 읽음으로 빼 버렸다(2026-10-21 B·D). 성공값·429 쉼·접속 실패는 계정 단위라
+    라벨 칸에 그대로 둔다.
+    """
+    p = Path(cred_path)
+    if p.parent.parent.name == "slots":
+        return f"{p.stem}@{p.parent.name}"
+    return _label_of(cred_path)
+
+
 def _cache_load() -> dict:
     try:
         return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
@@ -166,20 +180,23 @@ def get_usage(cred_path) -> dict | None:
     # 방금 429 를 받았으면 쉬는 동안 다시 두드리지 않는다. 판단은 실제 거절로도 잡히므로
     # 최대 _CACHE_TTL 초 낡은 값으로 결정해도 안전하다(상태줄 조회기와 같은 규율).
     label = _label_of(cred_path)
+    fkey = _fail_key(cred_path)
     now = time.time()
     cache = _cache_load()
     ent = cache.get(label) or {}
+    fent = ent if fkey == label else (cache.get(fkey) or {})
     if ent.get("usage") and (now - float(ent.get("at") or 0)) < _CACHE_TTL:
         return copy.deepcopy(ent["usage"])
     if float(ent.get("backoff_until") or 0) > now:
         last_status = 429
         last_error = "조회 제한(429). 잠시 뒤 다시"
         return None  # 쉬는 중: 통신하지 않는다(멀쩡한 계정을 막지 않게 값도 지어내지 않는다)
-    if float(ent.get("fail_until") or 0) > now:
-        # 방금 실패한 조회를 부름마다 되풀이하지 않는다(2026-10-13: 접속이 막힌 동안 부름마다 새 접속).
-        # last_status 는 비워 둔다 — 401 을 그대로 두면 부르는 쪽이 재발급을 또 시도해 접속이 늘어난다.
-        last_error = f"직전 조회 실패({ent.get('fail_why') or '사유 모름'}). {_FAIL_MEMO}초 안에는 다시 묻지 않음"
-        return None
+    for memo in (ent, fent):
+        if float(memo.get("fail_until") or 0) > now:
+            # 방금 실패한 조회를 부름마다 되풀이하지 않는다(2026-10-13: 접속이 막힌 동안 부름마다 새 접속).
+            # last_status 는 비워 둔다 — 401 을 그대로 두면 부르는 쪽이 재발급을 또 시도해 접속이 늘어난다.
+            last_error = f"직전 조회 실패({memo.get('fail_why') or '사유 모름'}). {_FAIL_MEMO}초 안에는 다시 묻지 않음"
+            return None
 
     # 상태줄 조회기가 방금 이 계정을 조회해 뒀으면 그 값을 재사용한다(제 조회를 안 해 429 를 피한다).
     pu = _probe_usage(label)
@@ -210,9 +227,10 @@ def get_usage(cred_path) -> dict | None:
         last_error = "조회 제한(429). 잠시 뒤 다시" if e.code == 429 else f"HTTP {e.code}"
         if e.code == 429:
             ent["backoff_until"] = now + _BACKOFF_429  # 그 계정을 잠시 쉬게 한다(이전 성공값은 남겨둔다)
+            cache[label] = ent
         else:
-            _remember_fail(ent, now, f"HTTP {e.code}")
-        cache[label] = ent
+            _remember_fail(fent, now, f"HTTP {e.code}")  # 거절은 이 파일 열쇠 탓이라 이 파일 칸에만 적는다
+            cache[fkey] = fent
         _cache_save(cache)
         return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
@@ -231,6 +249,8 @@ def get_usage(cred_path) -> dict | None:
         "scoped": _scoped(j),
     }
     cache[label] = {"at": now, "usage": usage}  # 성공하면 백오프도 지운다
+    if fkey != label:
+        cache.pop(fkey, None)
     _cache_save(cache)
     return usage
 
@@ -334,10 +354,11 @@ def get_usage_for(cred_path, *, is_current: bool = False,
                 # 돌아온다. 그러면 부르는 쪽은 "못 읽음"으로 보고 새 자격을 자리로 바로 밀어 넣지 않는다
                 # (2026-10-14 08:24, 창이 3분간 폐기된 열쇠를 든 채 Login expired). 새 열쇠라 기억을 지운다.
                 cache = _cache_load()
-                ent = cache.get(_label_of(cred_path)) or {}
+                fkey = _fail_key(cred_path)
+                ent = cache.get(fkey) or {}
                 if ent.pop("fail_until", None) is not None:
                     ent.pop("fail_why", None)
-                    cache[_label_of(cred_path)] = ent
+                    cache[fkey] = ent
                     _cache_save(cache)
                 return get_usage(cred_path)
             why = cred_refresh.last_error
