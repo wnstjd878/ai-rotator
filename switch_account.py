@@ -479,14 +479,23 @@ def freshen_before_install(src: Path, live_file_too: bool = False) -> tuple:
         return "", ""
     fp = _obj_fingerprint(obj)
     on_live_file = bool(fp) and fp == _fingerprint(LIVE)
-    if not fp or (on_live_file and not live_file_too) or fp == _obj_fingerprint(read_keychain_value()):
+    if not fp or (on_live_file and not live_file_too):
+        return "", ""
+    kc = read_keychain_value()
+    if kc is None and sys.platform == "darwin" and keychain_account():
+        # 항목은 있는데 값을 못 읽는 자리(원격 접속·화면 잠금)다. 봇들이 쓰는 열쇠꾸러미 값이
+        # 이 저장본과 같은지 알 수 없으니 갱신하지 않는다. 같은 값이면 갱신이 봇 자격을
+        # 폐기시킨다(코덱스·검수 2026-10-22: 원격에서 A→B→A 를 예약만 걸고 돌 때).
+        return "", ""
+    if fp == _obj_fingerprint(kc):
         return "", ""
     try:
         import cred_refresh
     except Exception:
         return "", ""
     left = int(exp - time.time())
-    if cred_refresh.refresh_file(src):
+    # 잠금을 잡은 뒤 다른 쪽이 이미 새로 받았으면 또 회전시키지 않는다(min_left).
+    if cred_refresh.refresh_file(src, min_left=FRESH_BEFORE_INSTALL):
         if on_live_file:
             try:
                 _write_owner_only(LIVE, json.loads(src.read_text(encoding="utf-8")))
@@ -517,6 +526,15 @@ def switch_file(src: Path, leaving=None, label=None) -> bool:
     LIVE.parent.mkdir(parents=True, exist_ok=True)
     print(f"[save-back] {save_back(leaving)}")
     if (label or src.stem) != leaving:
+        if sys.platform == "darwin":
+            # 열쇠꾸러미에 이 계정의 더 새 값이 있으면 먼저 저장본으로 건진다. 안 그러면
+            # 이미 회전된 옛 열쇠로 갱신을 부르게 된다(switch_keychain 이 다시 불러도 같은 값이면 할 일 없음).
+            try:
+                rescue = _rescue_keychain_value(src)
+                if rescue:
+                    print(f"[keychain] {rescue}")
+            except Exception:
+                pass
         _code, fresh = freshen_before_install(src)
         if fresh:
             print(f"[fresh] {fresh}")

@@ -4476,7 +4476,7 @@ def case_fresh_before_install(tmp):
     creds = st.CREDS_DIR
     live = tmp / "live.json"
     real = (sw.LIVE, sw.CREDS_DIR, sw.read_keychain_value, cr.refresh_file, cm.LIVE, cm.LOG,
-            sw.switch_keychain, sw.PENDING)
+            sw.switch_keychain, sw.PENDING, sw.keychain_account, cm.time.sleep, sys.platform)
     now = time.time()
 
     def cred(rt, minutes):
@@ -4488,13 +4488,15 @@ def case_fresh_before_install(tmp):
     calls = []
     busy = {"on": False}
 
-    def fake_refresh(path):
+    def fake_refresh(path, min_left=None):
         calls.append(Path(path).stem)
         if busy["on"]:
             cr.last_error = "다른 곳에서 갱신 중"
             return False
         p = Path(path)
         obj = json.loads(p.read_text(encoding="utf-8"))
+        if min_left is not None and obj["claudeAiOauth"]["expiresAt"] / 1000 - time.time() >= min_left:
+            return True  # 진짜 refresh_file 처럼 잠금 뒤 다시 보고 이미 새것이면 안 돌린다
         obj["claudeAiOauth"]["refreshToken"] += "-새"
         obj["claudeAiOauth"]["expiresAt"] = int((time.time() + 8 * 3600) * 1000)
         p.write_text(json.dumps(obj), encoding="utf-8")
@@ -4505,6 +4507,8 @@ def case_fresh_before_install(tmp):
         sw.LIVE, sw.CREDS_DIR, cm.LIVE, cm.LOG = live, creds, live, tmp / "rotator.log"
         sw.PENDING = creds / ".pending-switch"
         sw.read_keychain_value = lambda: keychain["v"]
+        sw.keychain_account = lambda: None
+        cm.time.sleep = lambda sec: None
         cr.refresh_file = fake_refresh
         a = creds / "A.json"
 
@@ -4555,6 +4559,30 @@ def case_fresh_before_install(tmp):
         check("갱신 뒤 꽂고 예약을 지운다", res == "done" and len(put) == 1 and a_rt == "a4-새"
               and not (creds / ".pending-switch").exists(), f"{res} {put} {a_rt}")
 
+        # (8) 맥에서 열쇠꾸러미 항목은 있는데 값을 못 읽는 자리(원격 접속)면 갱신하지 않는다.
+        #     봇들이 쓰는 값이 이 저장본과 같을 수 있어서다(검수 2026-10-22).
+        calls.clear()
+        a.write_text(json.dumps(cred("a6", 5)), encoding="utf-8")
+        live.write_text(json.dumps(cred("b6", 300)), encoding="utf-8")
+        sw.keychain_account = lambda: "kwon"
+        sys.platform = "darwin"
+        try:
+            code, _ = sw.freshen_before_install(a)
+            code2, _ = sw.freshen_before_install(a, live_file_too=True)
+        finally:
+            sys.platform = real[-1]
+            sw.keychain_account = lambda: None
+        check("열쇠꾸러미를 못 읽는 자리에선 갱신 안 함", code == "" and code2 == "" and calls == [],
+              f"{code} {code2} {calls}")
+
+        # (9) 잇달아 두 번 불러도 한 번만 회전한다(앞쪽이 이미 새로 받았으면 그대로 둔다)
+        calls.clear()
+        a.write_text(json.dumps(cred("a7", 5)), encoding="utf-8")
+        sw.freshen_before_install(a)
+        sw.freshen_before_install(a)
+        a_rt = json.loads(a.read_text(encoding="utf-8"))["claudeAiOauth"]["refreshToken"]
+        check("두 번 불러도 한 번만 회전", a_rt == "a7-새", a_rt)
+
         # (7) 일반 교체(switch_file)도 끼우기 전에 갱신한 값을 깐다
         calls.clear()
         a.write_text(json.dumps(cred("a5", 5)), encoding="utf-8")
@@ -4567,7 +4595,7 @@ def case_fresh_before_install(tmp):
               f"{calls} {live_rt}")
     finally:
         (sw.LIVE, sw.CREDS_DIR, sw.read_keychain_value, cr.refresh_file, cm.LIVE, cm.LOG,
-         sw.switch_keychain, sw.PENDING) = real
+         sw.switch_keychain, sw.PENDING, sw.keychain_account, cm.time.sleep, sys.platform) = real
 
 
 if __name__ == "__main__":

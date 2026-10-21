@@ -376,10 +376,17 @@ def apply_pending() -> str:
         # 예약을 건 뒤 시간이 지나 저장본 출입증이 곧 끝날 수 있다. 그대로 꽂으면 봇들이
         # 한꺼번에 갱신하다 부딪친다(2026-10-22 04:47: 13초 남은 A 를 꽂아 3분 거절).
         code, fresh = sw.freshen_before_install(src, live_file_too=True)
+        # 다른 곳이 막 새로 받는 중이면 끝날 때까지 잠깐 기다린다(갱신 요청은 15초 안에 끝난다).
+        # 바로 "blocked" 로 물러나면 순환기가 이 거절을 지금 계정 탓으로 찍는다(검수 2026-10-22).
+        for _ in range(20):
+            if code != "busy":
+                break
+            time.sleep(1)
+            code, fresh = sw.freshen_before_install(src, live_file_too=True)
         if fresh:
             log(fresh)
         if code == "busy":
-            return "blocked"   # 다른 곳이 막 새로 받는 중이다. 옛 값을 꽂지 않고 다음 회차에 한다.
+            return "blocked"   # 그래도 안 끝났다. 옛 값을 꽂지 않고 다음 회차에 한다.
         note = sw.switch_keychain(src)
     except Exception:
         return "blocked"

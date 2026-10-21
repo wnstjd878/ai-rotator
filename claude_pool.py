@@ -174,7 +174,7 @@ def _switch(label: str, leaving: str | None = None) -> bool:
         log(f"자격 교체 실패({label}): {(ret.stderr or ret.stdout).strip()[:200]}")
         return False
     for line in (ret.stdout or "").splitlines():
-        if line.startswith("[save-back]") or line.startswith("[keychain]"):
+        if line.startswith(("[save-back]", "[keychain]", "[fresh]")):
             # 되저장·열쇠꾸러미 반영 결과는 남긴다(유실이 다시 생기면 여기서 보인다)
             log(line.strip())
     return True

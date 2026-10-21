@@ -157,7 +157,7 @@ def _post(refresh_token: str) -> dict | None:
     return None
 
 
-def refresh_file(cred_path) -> bool:
+def refresh_file(cred_path, min_left: float | None = None) -> bool:
     """creds/<라벨>.json 의 접근 열쇠를 새로 받아 그 파일을 갱신한다. 성공하면 True.
 
     부르기 전에 **현재 쓰는 계정이 아닌지** 확인할 것(파일 맨 위 안전 규칙).
@@ -187,6 +187,12 @@ def refresh_file(cred_path) -> bool:
             last_error = "자격 파일 못 읽음"
             return False
         o = obj.get("claudeAiOauth") or {}
+        if min_left is not None:
+            # 잠금을 기다리는 사이 다른 쪽이 이미 새로 받았으면 그걸로 됐다. 또 부르면
+            # 방금 끼운 새 열쇠까지 회전시켜 폐기한다(2026-10-22 검수).
+            exp = _ms(o.get("expiresAt"))
+            if exp and exp - time.time() >= min_left:
+                return True
         data = _post(o.get("refreshToken") or "")
         if not data:
             return False
