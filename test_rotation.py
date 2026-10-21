@@ -2722,8 +2722,7 @@ def case_revive_clears_shared(tmp):
     상태만 지워, 다음 병합(prune_blocked)이 공유 칠판의 막힘을 도로 살렸다. 그래서 Opus 자리가
     Opus·Fable 둘 다 되는 D 를 못 고르고 Fable 100% 인 A 로 가 Fable 창이 멈췄다.
     """
-    print("
-[61] 되살린 칸 막힘이 병합에서 되살아나지 않는다")
+    print("\n[61] 되살린 칸 막힘이 병합에서 되살아나지 않는다")
     import slot_pool as sp
     import usage_check as uc
     setup(tmp, ["A", "B", "C", "D"], "A")
