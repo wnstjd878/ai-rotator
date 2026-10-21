@@ -4466,7 +4466,7 @@ def case_fresh_before_install(tmp):
     한꺼번에 갱신하다 3분간 거절받았다. 끼우기 전에 한 번만 갱신하고, 꽂혀 쓰이는 자격은
     건드리지 않으며, 다른 곳이 갱신 중이면 예약 마무리를 미룬다.
     """
-    print("\n[61] 공용 계정 끼우기 전 출입증 미리 받기")
+    print("\n[62] 공용 계정 끼우기 전 출입증 미리 받기")
     import switch_account as sw
     import cred_mirror as cm
     import cred_refresh as cr
@@ -4482,7 +4482,8 @@ def case_fresh_before_install(tmp):
     def cred(rt, minutes):
         return {"claudeAiOauth": {"accessToken": "x", "refreshToken": rt,
                                   "expiresAt": int((now + minutes * 60) * 1000),
-                                  "refreshTokenExpiresAt": int((now + 30 * 86400) * 1000)}}
+                                  # 계정마다 다르게 둔다. 같으면 되저장(save_back)이 누구 것인지 헷갈린다.
+                                  "refreshTokenExpiresAt": int((now + 30 * 86400 + ord(rt[0])) * 1000)}}
 
     calls = []
     busy = {"on": False}
