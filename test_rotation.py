@@ -2792,7 +2792,8 @@ def main():
                      case_push_fail_alert, case_tend_windows,
                      case_usage_cache_backoff, case_nudge_stalled,
                      case_window_limit_from_screen, case_slot_pool, case_slot_fresh_switch,
-                     case_last_resort_shared, case_revive_clears_shared):
+                     case_last_resort_shared, case_revive_clears_shared,
+                     case_fresh_before_install):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -4457,6 +4458,116 @@ def case_last_resort_shared(tmp):
     finally:
         st._pid_alive = real_alive
         claude_pool.release_session(4343)
+
+def case_fresh_before_install(tmp):
+    """[62] 공용 계정을 끼우기 전 곧 끝나는 출입증 미리 받기 (2026-10-22 04:47 Mac).
+
+    예약 전환 마무리가 출입증이 13초 남은 A 를 열쇠꾸러미에 꽂아, 봇들이 같은 재발급 열쇠로
+    한꺼번에 갱신하다 3분간 거절받았다. 끼우기 전에 한 번만 갱신하고, 꽂혀 쓰이는 자격은
+    건드리지 않으며, 다른 곳이 갱신 중이면 예약 마무리를 미룬다.
+    """
+    print("\n[61] 공용 계정 끼우기 전 출입증 미리 받기")
+    import switch_account as sw
+    import cred_mirror as cm
+    import cred_refresh as cr
+
+    tmp = Path(tmp)
+    setup(tmp, ["A", "B"], "B")
+    creds = st.CREDS_DIR
+    live = tmp / "live.json"
+    real = (sw.LIVE, sw.CREDS_DIR, sw.read_keychain_value, cr.refresh_file, cm.LIVE, cm.LOG,
+            sw.switch_keychain, sw.PENDING)
+    now = time.time()
+
+    def cred(rt, minutes):
+        return {"claudeAiOauth": {"accessToken": "x", "refreshToken": rt,
+                                  "expiresAt": int((now + minutes * 60) * 1000),
+                                  "refreshTokenExpiresAt": int((now + 30 * 86400) * 1000)}}
+
+    calls = []
+    busy = {"on": False}
+
+    def fake_refresh(path):
+        calls.append(Path(path).stem)
+        if busy["on"]:
+            cr.last_error = "다른 곳에서 갱신 중"
+            return False
+        p = Path(path)
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        obj["claudeAiOauth"]["refreshToken"] += "-새"
+        obj["claudeAiOauth"]["expiresAt"] = int((time.time() + 8 * 3600) * 1000)
+        p.write_text(json.dumps(obj), encoding="utf-8")
+        return True
+
+    keychain = {"v": None}
+    try:
+        sw.LIVE, sw.CREDS_DIR, cm.LIVE, cm.LOG = live, creds, live, tmp / "rotator.log"
+        sw.PENDING = creds / ".pending-switch"
+        sw.read_keychain_value = lambda: keychain["v"]
+        cr.refresh_file = fake_refresh
+        a = creds / "A.json"
+
+        # (1) 곧 끝나고 아무도 안 쓰는 저장본 → 갱신
+        a.write_text(json.dumps(cred("a1", 5)), encoding="utf-8")
+        live.write_text(json.dumps(cred("b1", 300)), encoding="utf-8")
+        code, msg = sw.freshen_before_install(a)
+        check("곧 끝나는 저장본은 끼우기 전에 갱신", code == "fresh" and calls == ["A"], f"{code} {calls}")
+
+        # (2) 넉넉히 남았으면 안 부른다
+        calls.clear()
+        a.write_text(json.dumps(cred("a2", 120)), encoding="utf-8")
+        code, _ = sw.freshen_before_install(a)
+        check("출입증이 넉넉하면 안 부른다", code == "" and calls == [], f"{code} {calls}")
+
+        # (3) 열쇠꾸러미에 꽂혀 쓰이는 값이면 안 부른다
+        a.write_text(json.dumps(cred("a3", 5)), encoding="utf-8")
+        keychain["v"] = cred("a3", 5)
+        code, _ = sw.freshen_before_install(a)
+        check("열쇠꾸러미에 꽂힌 자격은 안 건드린다", code == "" and calls == [], f"{code} {calls}")
+        keychain["v"] = None
+
+        # (4) 자격 파일에 깔린 값은 일반 교체에선 안 건드리고, 예약 마무리에선 갱신해 파일에도 넣는다
+        live.write_text(json.dumps(cred("a3", 5)), encoding="utf-8")
+        code, _ = sw.freshen_before_install(a)
+        check("자격 파일에 깔린 값은 일반 교체에선 안 건드린다", code == "" and calls == [], f"{code} {calls}")
+        code, _ = sw.freshen_before_install(a, live_file_too=True)
+        live_rt = json.loads(live.read_text(encoding="utf-8"))["claudeAiOauth"]["refreshToken"]
+        check("예약 마무리에선 갱신하고 자격 파일에도 새 값", code == "fresh" and live_rt == "a3-새",
+              f"{code} {live_rt}")
+
+        # (5) 예약 마무리: 다른 곳이 갱신 중이면 꽂지 않고 미룬다
+        calls.clear()
+        a.write_text(json.dumps(cred("a4", 5)), encoding="utf-8")
+        live.write_text(json.dumps(cred("a4", 5)), encoding="utf-8")
+        (creds / ".pending-switch").write_text("A", encoding="utf-8")
+        put = []
+        sw.switch_keychain = lambda src: put.append(src) or "열쇠꾸러미도 같은 계정으로 맞췄습니다"
+        busy["on"] = True
+        res = cm.apply_pending()
+        check("갱신 중이면 예약 마무리를 미룬다", res == "blocked" and put == []
+              and (creds / ".pending-switch").exists(), f"{res} {put}")
+
+        # (6) 갱신되면 새 값을 꽂고 예약을 지운다
+        busy["on"] = False
+        res = cm.apply_pending()
+        a_rt = json.loads(a.read_text(encoding="utf-8"))["claudeAiOauth"]["refreshToken"]
+        check("갱신 뒤 꽂고 예약을 지운다", res == "done" and len(put) == 1 and a_rt == "a4-새"
+              and not (creds / ".pending-switch").exists(), f"{res} {put} {a_rt}")
+
+        # (7) 일반 교체(switch_file)도 끼우기 전에 갱신한 값을 깐다
+        calls.clear()
+        a.write_text(json.dumps(cred("a5", 5)), encoding="utf-8")
+        live.write_text(json.dumps(cred("b5", 300)), encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            sw.switch_file(a, leaving="B", label="A")
+        live_rt = json.loads(live.read_text(encoding="utf-8"))["claudeAiOauth"]["refreshToken"]
+        check("교체도 갱신한 값을 자격 파일에 깐다", calls == ["A"] and live_rt == "a5-새",
+              f"{calls} {live_rt}")
+    finally:
+        (sw.LIVE, sw.CREDS_DIR, sw.read_keychain_value, cr.refresh_file, cm.LIVE, cm.LOG,
+         sw.switch_keychain, sw.PENDING) = real
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
