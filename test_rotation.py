@@ -2715,6 +2715,43 @@ def case_pid_alive():
           f"남은 것={state['session_claims']}")
 
 
+def case_revive_clears_shared(tmp):
+    """[61] 실제로 열린 칸을 풀 때 공유 칠판까지 지운다 (2026-10-21).
+
+    실사고: 자리 되살리기가 "D 는 실제로 열려 있어 막힘을 풉니다" 를 두 번 찍고도 이 머신
+    상태만 지워, 다음 병합(prune_blocked)이 공유 칠판의 막힘을 도로 살렸다. 그래서 Opus 자리가
+    Opus·Fable 둘 다 되는 D 를 못 고르고 Fable 100% 인 A 로 가 Fable 창이 멈췄다.
+    """
+    print("
+[61] 되살린 칸 막힘이 병합에서 되살아나지 않는다")
+    import slot_pool as sp
+    import usage_check as uc
+    setup(tmp, ["A", "B", "C", "D"], "A")
+    now = time.time()
+    fake = FakeShared()
+    real = (st.shared_state, sp.stored_labels, sp._read_usage, sp.usage_check)
+    st.shared_state = fake
+    sp.usage_check = uc
+    sp.stored_labels = lambda b: ["A", "D"]
+    usage = {"A": {"weekly_pct": 90, "session_pct": 10, "scoped": {"Fable": {"pct": 100.0}}},
+             "D": {"weekly_pct": 4, "session_pct": 10, "scoped": {"Fable": {"pct": 8.0}}}}
+    sp._read_usage = lambda b, l: usage.get(l)
+    try:
+        state = st.load_state()
+        st.mark_scoped_blocked(state, "A", "Fable", now + 3 * 86400)
+        st.mark_scoped_blocked(state, "D", "Fable", now + 5 * 86400)
+        st.save_state(state)
+        freed = sp._revive(state, "Opus", 97, ("Fable",))
+        st.save_state(state)
+        check("열린 D 만 푼다", freed == ["D"], freed)
+        check("공유 칠판에서도 D 가 지워진다", not (fake.scoped.get("D") or {}).get("Fable"), fake.scoped)
+        merged = st.prune_blocked(st.load_state())
+        check("병합 뒤에도 D 는 안 막혀 있다", not st.is_scoped_blocked(merged, "D", "Fable"))
+        check("바닥인 A 는 그대로 막혀 있다", st.is_scoped_blocked(merged, "A", "Fable"))
+    finally:
+        st.shared_state, sp.stored_labels, sp._read_usage, sp.usage_check = real
+
+
 def main():
     # 자리(slot) 창 안에서 돌리면 CLAUDE_CONFIG_DIR 이 살아 있어 claim_session 이 모든 표시에
     # slot 을 붙인다. 그러면 공용 계정 선택 시험 18건이 통째로 깨진다(2026-09-12 실측).
@@ -2756,7 +2793,7 @@ def main():
                      case_push_fail_alert, case_tend_windows,
                      case_usage_cache_backoff, case_nudge_stalled,
                      case_window_limit_from_screen, case_slot_pool, case_slot_fresh_switch,
-                     case_last_resort_shared):
+                     case_last_resort_shared, case_revive_clears_shared):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -3570,6 +3607,26 @@ def case_window_limit_from_screen(tmp):
         check("C 의 Fable 칸이 막힘으로 적힌다", st.is_scoped_blocked(state, "C", "Fable"))
         check("지금 계정 A 는 안 막힌다", not st.is_scoped_blocked(state, "A", "Fable"))
         check("계정 전체 막힘은 아니다(Opus 는 그대로)", not st.is_scoped_blocked(state, "C", "Opus"))
+
+        # 거절 뒤에 읽은 사용량이 남아 있으면 그 계정은 바닥이 아니었다 → 안 적는다 (2026-10-21)
+        # 실사고: 멈춤을 처음 본 시각엔 자리가 이미 D 로 바뀌어 있어, Fable 7% 인 D 가 일주일 막혔다.
+        state = st.load_state()
+        state["scoped_blocked"] = {}
+        state["usage_seen"] = {"C": {"at": now - 100, "scoped": {"Fable": {"pct": 8.0}}}}
+        st.save_state(state)
+        claude_pool._record_window_limit("shared", "Fable", now - 200)
+        check("거절 뒤 읽은 값이 8% 면 안 막는다",
+              not st.is_scoped_blocked(st.load_state(), "C", "Fable"))
+        state = st.load_state()
+        state["usage_seen"] = {"C": {"at": now - 300, "scoped": {"Fable": {"pct": 8.0}}}}
+        st.save_state(state)
+        claude_pool._record_window_limit("shared", "Fable", now - 200)
+        check("거절 전에 읽은 값이면 근거가 안 돼 그대로 막는다",
+              st.is_scoped_blocked(st.load_state(), "C", "Fable"))
+        state = st.load_state()
+        state["usage_seen"] = {}
+        state["scoped_blocked"] = {}
+        st.save_state(state)
 
         # 리셋 시각을 못 구하면 안 적는다(영영 막힘 방지)
         state["weekly_reset"] = {}
