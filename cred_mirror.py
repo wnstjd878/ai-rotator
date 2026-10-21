@@ -373,6 +373,11 @@ def apply_pending() -> str:
     try:
         import switch_account as sw
 
+        # 예약을 건 뒤 시간이 지나 저장본 출입증이 곧 끝날 수 있다. 그대로 꽂으면 봇들이
+        # 한꺼번에 갱신하다 부딪친다(2026-10-22 04:47: 13초 남은 A 를 꽂아 3분 거절).
+        fresh = sw.freshen_before_install(src, live_file_too=True)
+        if fresh:
+            log(fresh)
         note = sw.switch_keychain(src)
     except Exception:
         return "blocked"

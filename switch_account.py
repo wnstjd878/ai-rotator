@@ -444,6 +444,56 @@ def switch_keychain(src: Path) -> str:
     return "열쇠꾸러미도 같은 계정으로 맞췄습니다"
 
 
+FRESH_BEFORE_INSTALL = 1800  # 출입증이 이 초보다 덜 남은 저장본은 끼우기 전에 갱신한다(slot_pool 과 같은 값)
+
+
+def freshen_before_install(src: Path, live_file_too: bool = False) -> str:
+    """끼울 저장본의 출입증이 곧 끝나면 끼우기 전에 새로 받는다. 한 일을 한 줄로 돌려준다(없으면 "").
+
+    곧 끝나는 저장본을 그대로 끼우면 그 뒤 처음 켜지는 claude 들이 같은 재발급 열쇠로 한꺼번에
+    갱신하러 간다. 열쇠는 한 번 쓰면 바뀌므로 진 쪽은 폐기된 열쇠를 들고 거절받는다
+    (2026-10-22 04:47 Mac: 예약 전환이 13초 남은 A 를 끼워 3분간 거절이 몰렸다).
+    아직 아무도 안 쓰는 저장본일 때 여기서 한 번만 갱신하면 그 다툼이 없다.
+
+    **지금 쓰이는 자격이면 손대지 않는다**(cred_refresh 안전 규칙). 자격 파일이나 열쇠꾸러미에
+    같은 값이 꽂혀 있으면 claude 가 들고 있을 수 있어서다.
+
+    `live_file_too` 는 예약 전환 마무리(cred_mirror.apply_pending)용이다. 예약이 걸린 동안엔
+    자격 파일에 이미 그 계정이 깔려 있지만 쓰는 쪽은 원격 접속 자리 몇 개뿐이고, 곧 열쇠꾸러미로
+    옮겨 봇 전부가 쓰게 된다. 그때는 갱신하고 새 값을 자격 파일에도 바로 넣는다.
+    """
+    try:
+        obj = json.loads(src.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    o = (obj or {}).get("claudeAiOauth") or {}
+    try:
+        exp = float(o.get("expiresAt") or 0)
+    except (TypeError, ValueError):
+        return ""
+    exp = exp / 1000 if exp > 1e11 else exp
+    if not exp or exp - time.time() >= FRESH_BEFORE_INSTALL:
+        return ""
+    fp = _obj_fingerprint(obj)
+    on_live_file = bool(fp) and fp == _fingerprint(LIVE)
+    if not fp or (on_live_file and not live_file_too) or fp == _obj_fingerprint(read_keychain_value()):
+        return ""
+    try:
+        import cred_refresh
+    except Exception:
+        return ""
+    left = int(exp - time.time())
+    if cred_refresh.refresh_file(src):
+        if on_live_file:
+            try:
+                _write_owner_only(LIVE, json.loads(src.read_text(encoding="utf-8")))
+            except Exception:
+                return (f"'{src.stem}' 저장본 출입증을 새로 받았는데 자격 파일에는 못 넣었습니다"
+                        "(되비추기가 다음 회차에 맞춥니다)")
+        return f"'{src.stem}' 저장본 출입증이 {max(left, 0) // 60}분 남아 끼우기 전에 새로 받았습니다"
+    return f"'{src.stem}' 저장본 출입증이 곧 끝나는데 미리 받지 못했습니다({cred_refresh.last_error})"
+
+
 def mark_pending(label: str) -> None:
     """열쇠꾸러미에 못 넣었을 때, 화면 세션이 마무리하도록 예약만 남긴다."""
     try:
@@ -461,6 +511,10 @@ def switch_file(src: Path, leaving=None, label=None) -> bool:
     """
     LIVE.parent.mkdir(parents=True, exist_ok=True)
     print(f"[save-back] {save_back(leaving)}")
+    if (label or src.stem) != leaving:
+        fresh = freshen_before_install(src)
+        if fresh:
+            print(f"[fresh] {fresh}")
     if LIVE.exists():
         shutil.copy2(LIVE, LIVE.with_suffix(".json.bak"))  # 되돌리기용 백업
     # 열쇠꾸러미를 먼저 처리한다. 덮어쓰기 전 되저장(_rescue_keychain_value)이 갈아탈 라벨의
