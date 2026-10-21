@@ -982,6 +982,15 @@ def _record_window_limit(where: str | None, bucket: str, at: float) -> None:
             label = _account_for_where_at(state, where, at)
             if not label or st.is_scoped_blocked(state, label, bucket):
                 return
+            # `at` 은 멈춤을 처음 본 시각이라 실제 거절보다 늦다. 그 사이 자리가 갈아탔으면 거절과
+            # 무관한 계정이 잡힌다(2026-10-21: D 가 Fable 7% 인데 10/26 까지 막혀, Opus 자리가 D 대신
+            # Fable 100% 인 A 로 가서 Fable 창이 멈췄다). 사용량은 초기화 전까지 줄지 않으므로,
+            # 거절 뒤에 읽은 값이 아직 남아 있으면 그 계정은 거절 당시에도 바닥이 아니었다.
+            seen = (state.get("usage_seen") or {}).get(label) or {}
+            pct = ((seen.get("scoped") or {}).get(bucket) or {}).get("pct")
+            if pct is not None and float(seen.get("at") or 0) >= at and float(pct) < 99:
+                log(f"창 거절 반영 안 함: '{label}' 의 {bucket} 칸은 거절 뒤에도 {pct:.0f}% 라 바닥이 아니다")
+                return
             until = _bucket_reset_for(state, label, bucket)
             if not until or until <= time.time():
                 return

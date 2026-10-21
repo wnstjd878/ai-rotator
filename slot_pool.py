@@ -408,13 +408,14 @@ def _revive(state: dict, bucket: str, below: float, need=None) -> list:
             continue
         if any(usage_check.which_limit(u, threshold=below, bucket=n) for n in need):
             continue
-        box = dict(state.get("scoped_blocked") or {})
-        if l in box and any(n in (box.get(l) or {}) for n in need):
-            box[l] = {k: v for k, v in box[l].items() if k not in need}
-            state["scoped_blocked"] = box
-        blocked = dict(state.get("blocked") or {})
-        blocked.pop(l, None)
-        state["blocked"] = blocked
+        # 공유 칠판까지 지운다. 이 상태만 고치면 다음 병합(prune_blocked)이 막힘을 도로 살려,
+        # "실제로 열려 있어 막힘을 풉니다" 를 매번 찍고도 그 계정을 못 고른다(2026-10-21 D).
+        for n in need:
+            st.clear_scoped_bucket(state, l, n)
+        if not st.clear_account_block(state, l, now):
+            blocked = dict(state.get("blocked") or {})
+            blocked.pop(l, None)
+            state["blocked"] = blocked
         freed.append(l)
         log(f"자리 {bucket}: '{l}' 는 실제로 열려 있어 막힘을 풉니다({', '.join(need)})")
     return freed
