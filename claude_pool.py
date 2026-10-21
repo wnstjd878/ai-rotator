@@ -2063,8 +2063,11 @@ def _rotate_after_failure(used_label: str | None, verdict: str, out: str, err: s
                     # 호출이 겹치면 남의 자격으로 나가 인증 실패가 난다. 이때 지금 계정을
                     # 죽었다고 막으면 멀쩡한 계정이 줄줄이 막히고, 봇들이 종량제로 넘어가
                     # 카드가 나간다(2026-07-29 실제 사고). 막지 말고 같은 계정으로 재시도한다.
+                    # 거절 문구를 같이 남긴다. 없으면 거절이 몰린 뒤 무엇에 걸렸는지 알 길이
+                    # 없다(2026-10-22 04:42 D 8분 거절: 원문이 어디에도 안 남아 원인을 못 가림).
                     log(f"'{used_label}' 저장본은 살아 있습니다(서버 확인). "
-                        f"계정을 막지 않고 그대로 다시 시도합니다.")
+                        f"계정을 막지 않고 그대로 다시 시도합니다. "
+                        f"거절 문구: {limit_detect.short_reason(out, err, 120) or '없음'}")
                     st.save_state(state)
                     return used_label
                 if forced and strikes >= 2 and not place_why and _quarantine_cred(used_label):
