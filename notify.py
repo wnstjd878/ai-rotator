@@ -66,6 +66,9 @@ URGENT_WORDS = ("로그인", "인증", "자격", "토큰", "열쇠", "비밀", "
 ALIVE = Path.home() / ".claude" / ".aioffice-alive"
 INBOX = Path.home() / "Documents" / "AI-Office" / "logs" / "notify-inbox.jsonl"
 OUTBOX_MAC = Path.home() / ".claude" / "ops" / "aioffice_outbox.py"
+# AI 오피스도 맥 우편함도 없는 기계(winserver): 켜짐 표시(.aioffice-alive)를 본컴이 ssh 로 갱신해 주면 이 파일에 쌓고,
+# 본컴 aioffice_alerts.py 가 10분마다 `notify.py --take` 로 가져간다. 표시가 낡으면(앱 꺼짐) 텔레그램.
+OUTBOX_LOCAL = Path.home() / ".config" / "ai-rotator" / "office-outbox.jsonl"
 
 
 def _office_alive() -> bool:
@@ -90,6 +93,12 @@ def _to_office(message: str) -> bool:
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)  # type: ignore[union-attr]
             return bool(mod.route(message, who="계정 순환"))
+        if _office_alive():   # winserver 처럼 본컴이 켜짐 표시를 갱신해 주는 기계
+            import json, time
+            OUTBOX_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+            with open(OUTBOX_LOCAL, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "who": "계정 순환(winserver)", "text": message}, ensure_ascii=False) + "\n")
+            return True
     except Exception:
         return False
     return False
@@ -112,8 +121,32 @@ def send(message: str, urgent: bool = False) -> bool:
         return False
 
 
+def _take() -> None:
+    """본컴이 ssh 로 부른다: 쌓인 알림을 한 줄씩(ascii JSON) 내놓고 파일을 비운다."""
+    import json
+    if not OUTBOX_LOCAL.exists():
+        return
+    tmp = OUTBOX_LOCAL.with_suffix(".taking")
+    try:
+        OUTBOX_LOCAL.replace(tmp)
+    except Exception:
+        return
+    for line in tmp.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                print(json.dumps(json.loads(line), ensure_ascii=True))
+            except Exception:
+                pass
+    tmp.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     import sys
+    if sys.argv[1:2] == ["--alive"]:   # 본컴이 "AI 오피스 켜져 있음"을 알려 줄 때
+        ALIVE.parent.mkdir(parents=True, exist_ok=True); ALIVE.write_text("alive", encoding="utf-8"); raise SystemExit(0)
+    if sys.argv[1:2] == ["--take"]:
+        _take(); raise SystemExit(0)
 
     text = " ".join(sys.argv[1:]) or "계정 순환기 알림 시험"
     print("보냄" if send(text) else "못 보냄 (자격 없음 또는 전송 실패)")
