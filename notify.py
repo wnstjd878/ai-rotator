@@ -9,7 +9,8 @@
 주의: 자격 값은 이 모듈 안에서만 쓰고 화면·기록·명령 인자에 절대 싣지 않는다.
       보내기 실패는 예외를 올리지 않는다 — 알림 때문에 본 작업이 멈추면 안 되므로.
 의도적 미구현: 알림 묶음/재시도 없음. 같은 사고가 반복되면 그때 붙인다.
-마지막 점검: 2026-07-22
+AI 오피스 경로: 2026-10-22 추가(send 위 설명 참고). 비상 길(stuck_alert)은 urgent=True 로 부른다.
+마지막 점검: 2026-10-22
 """
 
 from __future__ import annotations
@@ -58,8 +59,46 @@ def _creds():
     return "", ""
 
 
-def send(message: str) -> bool:
+# 2026-10-22 사용자 "AI 한도 알림도 오피스로": AI 오피스가 켜져 있으면 텔레그램 대신 AI 오피스로 보낸다.
+# 이 PC 는 알림함 파일(앱이 읽어 회의실에 올리고 PC 알림을 띄움), 맥은 기존 우편함(aioffice_outbox.route, 10분마다 이 PC 로 넘어옴).
+# 로그인·인증처럼 사람이 바로 손써야 하는 것과 urgent=True(맥이 꺼졌을 때 비상 알림 등)는 지금처럼 텔레그램으로 간다.
+URGENT_WORDS = ("로그인", "인증", "자격", "토큰", "열쇠", "비밀", "결제", "입금")
+ALIVE = Path.home() / ".claude" / ".aioffice-alive"
+INBOX = Path.home() / "Documents" / "AI-Office" / "logs" / "notify-inbox.jsonl"
+OUTBOX_MAC = Path.home() / ".claude" / "ops" / "aioffice_outbox.py"
+
+
+def _office_alive() -> bool:
+    try:
+        import time
+        return (time.time() - ALIVE.stat().st_mtime) < 25 * 60
+    except Exception:
+        return False
+
+
+def _to_office(message: str) -> bool:
+    """AI 오피스로 넘겼으면 True. 넘길 길이 없거나 앱이 꺼져 있으면 False(그러면 텔레그램)."""
+    try:
+        if INBOX.parent.is_dir() and _office_alive():   # AI 오피스가 깔린 이 PC
+            import json, time
+            with open(INBOX, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "who": "계정 순환", "text": message}, ensure_ascii=False) + "\n")
+            return True
+        if OUTBOX_MAC.is_file():   # 맥: 우편함이 앱 켜짐을 스스로 판단해, 꺼져 있으면 False 를 돌려준다
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("_aioffice_outbox", OUTBOX_MAC)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+            return bool(mod.route(message, who="계정 순환"))
+    except Exception:
+        return False
+    return False
+
+
+def send(message: str, urgent: bool = False) -> bool:
     """메시지를 보낸다. 보냈으면 True, 자격이 없거나 실패하면 False."""
+    if not urgent and not any(w in message for w in URGENT_WORDS) and _to_office(message):
+        return True
     token, chat = _creds()
     if not token or not chat:
         return False
