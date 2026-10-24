@@ -60,7 +60,10 @@ STORE_ROOT = BASE / "creds" / "slots"
 LOG_FILE = BASE / "rotator.log"
 BUCKETS = ("Opus", "Fable", "Sonnet", "Haiku")
 # 원본이 새로워지면 자리 폴더로 다시 복사하는 설정 파일들
-COPY_FILES = ("settings.json", "settings.local.json", "CLAUDE.md", "keybindings.json")
+# CLAUDE.md 는 자리에 복사하지 않는다(2026-10-25): 자리 사본은 다른 경로라 ~/.claude/CLAUDE.md 와
+# 두 번 로드됐다(같은 경로면 Claude Code 가 한 번만 읽음). 홈 아래 어느 폴더에서 띄워도 상위 탐색으로
+# ~/.claude/CLAUDE.md 가 잡히고, settings.json 의 claudeMdExcludes 가 자리 사본을 막는다.
+COPY_FILES = ("settings.json", "settings.local.json", "keybindings.json")
 # 처음 한 번만 심는 파일(그 뒤로는 자리마다 따로 자란다)
 SEED_ONCE = ("history.jsonl",)
 CRED_NAME = ".credentials.json"
