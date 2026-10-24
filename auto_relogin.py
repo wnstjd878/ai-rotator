@@ -176,8 +176,16 @@ def main() -> int:
                     log(f"자리 {bucket} {label}: 만료 {days}일 — 갱신 대상 (dry-run이라 실행 안 함)")
                     continue
                 log(f"자리 {bucket} {label}: 만료 {days}일 — 자동 갱신 시작")
-                r = run([sys.executable, str(BASE / "relogin.py"), "--slot", bucket, label], RELOGIN_TIMEOUT)
-                if r.returncode == 0:
+                # 시간 초과를 여기서 받는다. 예전엔 바깥 try 로 빠져 "자리 자격 점검 중 오류" 한 줄로
+                # 끝났고, 뒤 자리들은 시도도 못 했으며 사람 알림(problems)에도 안 실렸다.
+                # 실측 2026-10-22~24: Opus B 가 매일 시간 초과 → Opus C(만료 4.8일)는 한 번도 안 봄.
+                try:
+                    r = run([sys.executable, str(BASE / "relogin.py"), "--slot", bucket, label], RELOGIN_TIMEOUT)
+                    rc = r.returncode
+                except subprocess.TimeoutExpired:
+                    log(f"  relogin --slot {bucket} {label} 시간 초과({RELOGIN_TIMEOUT}초)")
+                    rc = -1
+                if rc == 0:
                     log(f"자리 {bucket} {label}: 갱신 성공")
                     renewed += 1
                 else:
