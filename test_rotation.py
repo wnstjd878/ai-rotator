@@ -2911,6 +2911,7 @@ def case_env_token_dead(tmp):
     try:
         claude_pool.ENV_TOKEN_WAIT = 1
         setup(tmp, ["A", "B"], "A")
+        st.shared_state = FakeShared()  # 알림 접기(claim_notice)는 공유가 켜진 세 머신 기준이다
         creds = Path(tmp) / "creds"
         (creds / "A.json").write_text(_env_cred("A", "tok-A", 7200), encoding="utf-8")
         (creds / "B.json").write_text(_env_cred("B", "tok-B", 7200), encoding="utf-8")
@@ -2958,6 +2959,7 @@ def case_env_token_dead(tmp):
               and (creds / "dead" / "A.json").exists())
     finally:
         cr.refresh_file, claude_pool.ENV_TOKEN_WAIT = real_refresh, real_wait
+        st.shared_state = None
         os.environ.pop("AIROTATOR_ENV_TOKEN", None)
 
 
