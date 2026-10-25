@@ -349,6 +349,8 @@ def apply_pending() -> str:
     내려가면 열쇠꾸러미에 남아 있는 옛 계정 값이 방금 갈아끼운 파일을 덮어써서 전환이
     소리 없이 취소된다(코덱스 검수 2026-07-30).
     """
+    if _env_token_mode():
+        return "none"  # 저장본 단일 소유 방식: 열쇠꾸러미에 꽂을 일이 없다
     p = creds_dir() / ".pending-switch"
     try:
         label = p.read_text(encoding="utf-8").strip()
@@ -412,6 +414,8 @@ def sync(quiet: bool = False) -> bool:
     """
     if sys.platform != "darwin":
         return False
+    if _env_token_mode():
+        return False  # 저장본 하나만 쓰는 방식: 열쇠꾸러미·자격 파일을 맞추지 않는다(맞추면 오히려 저장본을 옛 값으로 덮는다)
 
     pending = apply_pending()
     if pending == "done":
@@ -480,7 +484,33 @@ def sync(quiet: bool = False) -> bool:
     return False
 
 
+def _env_token_mode() -> bool:
+    try:
+        import cred_refresh
+
+        return cred_refresh.env_token_mode()
+    except Exception:
+        return False
+
+
+def _note_env_mode_daily() -> None:
+    """쉬는 이유를 하루 한 줄만 남긴다(5분마다 적으면 기록만 쌓인다)."""
+    stamp = creds_dir() / ".env-token-mirror-note"
+    today = time.strftime("%Y-%m-%d")
+    try:
+        if stamp.exists() and stamp.read_text(encoding="utf-8").strip() == today:
+            return
+        stamp.write_text(today, encoding="utf-8")
+    except Exception:
+        return
+    log("되비추기는 쉽니다. 환경변수 열쇠 방식(cred_refresh.env_token_mode)에서는 순환기가 "
+        "저장본 하나만 소유하고 열쇠꾸러미·자격 파일을 맞추지 않습니다. 끄려면 AIROTATOR_ENV_TOKEN=0.")
+
+
 def main() -> int:
+    if _env_token_mode():
+        _note_env_mode_daily()
+        return 0
     sync()
     return 0
 

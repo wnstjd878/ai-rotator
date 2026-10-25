@@ -107,6 +107,11 @@ BROKEN_CRED_COOLDOWN = 30 * 60  # 갈아끼운 저장본이 상했을 때 그 �
 AUTH_FAIL_WINDOW = 10 * 60      # 이 시간 안에 서로 다른 계정이 거절받으면 자격 자리를 의심한다
 AUTH_REJECT_LIMIT = 3           # 강제 교체에 필요한 최소 거절 횟수(이 횟수 + 아래 시간 둘 다)
 AUTH_REJECT_STUCK = 3 * 60      # 같은 계정이 이 시간을 넘겨 계속 거절받으면 판정을 믿지 말고 갈아탄다
+
+# ---- 환경변수 열쇠 방식(맥, cred_refresh.env_token_mode 참조) ----
+ENV_TOKEN_MIN_LEFT = 600    # 출입증(access token)이 이 초보다 덜 남으면 부르기 전에 새로 받는다
+ENV_TOKEN_WAIT = 20         # 다른 프로세스가 같은 저장본을 갱신 중이면 이만큼 기다린다(초)
+ENV_TOKEN_FAIL_REST = 300   # 통신 문제 등으로 출입증을 못 받은 계정을 쉬게 하는 시간(초)
 FORCED_ROTATE_COOLDOWN = 5 * 60  # 그렇게 강제로 넘길 때 그 계정을 쉬게 할 시간(초)
 BARRED_COOLDOWN = 24 * 3600     # 조직 설정 차단(barred) 계정을 쉬게 할 시간. 관리자가 다시 켤 수 있어 하루 뒤 재확인
 SCOPED_LOW_LEFT = 5.0           # 모델 칸이 이만큼 이하로 남으면 바닥으로 본다(which_limit 의 95% 와 같은 선)
@@ -163,6 +168,10 @@ def _switch(label: str, leaving: str | None = None) -> bool:
     leaving 은 지금까지 쓰던 계정이다. 갈아타기 직전에 그 계정의 갱신된 자격을
     creds/<라벨>.json 으로 되저장하라는 뜻(안 하면 그 계정 자격이 죽는다 — save_back 참조).
     """
+    if env_token_mode():
+        # 저장본을 자격 자리(파일·열쇠꾸러미)에 꽂을 일이 없다. 다음 호출이 creds/<라벨>.json 에서
+        # 바로 열쇠를 꺼내 환경변수로 넘긴다. 되저장(save_back)도 없다, 갱신하는 쪽이 저장본 자신이다.
+        return True
     cmd = [sys.executable, str(BASE / "switch_account.py"), label]
     if leaving:
         cmd += ["--from", leaving]
@@ -1521,6 +1530,8 @@ def _mirror_now() -> bool:
 
     두 자리가 어긋나 나는 거절은 지우기가 아니라 되비추기로 고친다(cred_mirror.py 참조).
     """
+    if env_token_mode():
+        return False  # 저장본 하나만 쓰는 방식이라 맞출 자리가 없다
     try:
         import cred_mirror
     except Exception:
@@ -2204,6 +2215,159 @@ def _notify_switch(used_label, nxt, verdict, state, bucket=None):
     notify(switch_message(used_label, nxt, verdict, state, bucket))
 
 
+def env_token_mode() -> bool:
+    """맥 '환경변수 열쇠 방식' 스위치(cred_refresh.env_token_mode 와 같은 것)."""
+    try:
+        import cred_refresh as cr
+
+        return cr.env_token_mode()
+    except Exception:
+        return False
+
+
+def _refresh_why(err: str) -> str:
+    """cred_refresh.last_error 를 세 갈래로: revoked(저장본 죽음) / busy(다른 곳 갱신 중) / error."""
+    err = err or ""
+    if "다른 곳에서 갱신 중" in err:
+        return "busy"
+    if "HTTP 400" in err or "HTTP 401" in err or "재발급 열쇠 없음 또는 만료" in err:
+        return "revoked"
+    return "error"
+
+
+def _env_token_for(label: str | None) -> tuple:
+    """환경변수 열쇠 방식: 저장본 creds/<라벨>.json 에서 지금 쓸 접근 열쇠를 꺼낸다.
+
+    (열쇠, 사유) 를 돌려준다. 열쇠가 None 이면 사유는
+      "missing"  저장본이 없다(격리됐거나 아직 저장 전)
+      "revoked"  재발급 열쇠가 폐기·만료됐다 = 저장본이 죽었다(사람이 다시 로그인해야 한다)
+      "busy"     다른 프로세스가 갱신 중인데 기다려도 끝나지 않았다
+      "error"    통신 실패 등. 저장본은 멀쩡할 수 있다.
+    출입증이 ENV_TOKEN_MIN_LEFT 보다 덜 남았으면 여기서 새로 받는다. 갱신은 cred_refresh 가
+    잠금으로 한 번만 하고, 먼저 받은 쪽이 있으면 그 값을 그대로 쓴다(봇 수십 개가 만료 순간에
+    몰려도 재발급 열쇠는 한 번만 회전한다). 값은 이 프로세스 안에서만 흐른다.
+    """
+    if not label:
+        return None, "missing"
+    import cred_refresh as cr
+
+    path = BASE / "creds" / f"{label}.json"
+    deadline = time.time() + ENV_TOKEN_WAIT
+    tok, left, why, err = None, 0.0, "error", ""
+    refreshes = 0
+    while True:
+        try:
+            o = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth") or {}
+        except Exception:
+            return None, "missing"
+        tok = o.get("accessToken")
+        exp = cr._ms(o.get("expiresAt"))
+        left = (exp - time.time()) if exp else 0.0
+        if tok and left >= ENV_TOKEN_MIN_LEFT:
+            return tok, ""
+        if refreshes >= 3:
+            why, err = "error", "갱신해도 출입증 만료 시각이 늘지 않음"
+            break
+        if cr.refresh_file(path, min_left=ENV_TOKEN_MIN_LEFT):
+            refreshes += 1
+            try:
+                n = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth") or {}
+            except Exception:
+                return None, "missing"
+            if n.get("accessToken") and n.get("accessToken") != tok:
+                log(f"'{label}' 출입증을 새로 받았습니다(남은 시간 {int(max(left, 0)) // 60}분이라 미리 갱신).")
+            continue
+        err = cr.last_error or ""
+        why = _refresh_why(err)
+        if why == "busy" and time.time() < deadline:
+            time.sleep(1)
+            continue
+        break
+    if tok and left > 0 and why != "revoked":
+        # 새로 못 받았지만 아직 유효한 출입증은 쓴다(통신 문제일 수 있다). 다음 호출이 다시 시도한다.
+        log(f"'{label}' 출입증 갱신 실패({err}). 남은 출입증으로 한 번 더 갑니다.")
+        return tok, ""
+    return None, why
+
+
+def _force_refresh(label: str | None) -> tuple:
+    """거절받은 저장본의 출입증을 무조건 새로 받는다. (성공 여부, 실패 사유)."""
+    if not label:
+        return False, "missing"
+    import cred_refresh as cr
+
+    path = BASE / "creds" / f"{label}.json"
+    if not path.exists():
+        return False, "missing"
+    for _ in range(ENV_TOKEN_WAIT):
+        if cr.refresh_file(path):  # min_left 없음 = 무조건 회전
+            return True, ""
+        why = _refresh_why(cr.last_error or "")
+        if why != "busy":
+            return False, why
+        time.sleep(1)
+    return False, "busy"
+
+
+def _drop_dead_cred(label: str | None, why: str) -> str | None:
+    """환경변수 열쇠 방식에서 저장본으로 출입증을 못 받았을 때. 다음에 쓸 라벨을 돌려준다.
+
+    "revoked" 는 저장본이 진짜 죽은 것이라 바로 격리하고 하루 한 번 알린다. 옛 방식처럼
+    3분 거절을 지켜보며 '저장본은 살아 있다' 를 추측할 일이 없다. 봇이 쓰는 열쇠가 바로
+    그 파일이고, 재발급 요청을 서버가 거절한 것이 판정이다.
+    그 밖(missing/busy/error)은 잠깐 재우고 넘긴다. 쓸 계정이 없으면 AllAccountsExhausted.
+    """
+    dead_label = None
+    exhausted = None
+    with st.with_lock():
+        state = st.prune_blocked(st.load_state())
+        current = state.get("current")
+        if label and current and current != label:
+            return current  # 다른 프로세스가 이미 바꿨다
+        if label:
+            if why == "revoked":
+                if _quarantine_cred(label):
+                    log(f"'{label}' 저장본의 재발급 열쇠가 폐기돼 creds/dead/ 로 격리했습니다. "
+                        "재로그인 전까지 순환에서 뺍니다.")
+                    dead_label = label
+                else:
+                    st.mark_blocked(state, label, time.time() + ENV_TOKEN_FAIL_REST,
+                                    "재발급 열쇠 폐기(격리 실패)")
+            elif why == "missing":
+                st.mark_blocked(state, label, time.time() + ENV_TOKEN_FAIL_REST, "저장본 없음")
+                log(f"'{label}' 저장본이 없어 {ENV_TOKEN_FAIL_REST // 60}분 재우고 다음 계정으로 넘깁니다.")
+            else:
+                st.mark_blocked(state, label, time.time() + ENV_TOKEN_FAIL_REST,
+                                f"출입증 발급 실패({why})")
+                log(f"'{label}' 출입증을 받지 못했습니다({why}). "
+                    f"{ENV_TOKEN_FAIL_REST // 60}분 재우고 다음 계정으로 넘깁니다.")
+        nxt = _pick_account(state, exclude=label)
+        if nxt is None:
+            st.save_state(state)
+            exhausted = ("클로드 구독 계정을 하나도 못 씁니다. 출입증을 받을 저장본이 없습니다. "
+                         "본체 ai-rotator 폴더에서 relogin.py 로 계정을 다시 저장하세요.")
+        else:
+            st.set_current(state, nxt, f"{label} → {nxt} (출입증 발급 실패: {why})")
+            st.save_state(state)
+            log(f"'{label}' → '{nxt}' 계정 교체 완료")
+    if dead_label:
+        _notify_cred_dead(dead_label)
+    if exhausted:
+        hourly = st.claim_notice(f"env-exhausted:{int(time.time() // 3600)}")
+        raise AllAccountsExhausted(exhausted, notify_message=exhausted if hourly else None)
+    return nxt
+
+
+def _tend_env_token() -> None:
+    """주기 작업용: 지금 계정의 출입증이 곧 끝나면 봇이 몰리기 전에 미리 새로 받아 둔다."""
+    try:
+        cur = st.load_state().get("current")
+        if cur:
+            _env_token_for(cur)
+    except Exception as e:
+        log(f"출입증 미리 갱신 실패({type(e).__name__})")
+
+
 def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs):
     """claude CLI 를 순환 보호 아래서 실행한다. subprocess.run 과 같은 결과를 돌려준다.
 
@@ -2243,16 +2407,34 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
 
     retried_plain = False
     switched_here = False  # 이 호출 안에서 계정을 갈아끼웠는지
+    env_forced: set = set()  # 환경변수 열쇠 방식에서 거절 뒤 강제 갱신을 이미 해 본 라벨
+    # 환경변수 열쇠는 CLAUDE_CONFIG_DIR 을 따로 쓰는 호출(자기 로그인을 가진 작업)에는 넣지 않는다.
+    use_env_token = env_token_mode() and not (env if env is not None else os.environ).get("CLAUDE_CONFIG_DIR")
     proc = None
     for attempt in range(max_attempts):
         state = st.prune_blocked(st.load_state())
         used_label = _switch_if_blocked(state, bucket)
 
+        run_env = env
+        if use_env_token:
+            tok, why = _env_token_for(used_label)
+            if tok is None:
+                try:
+                    nxt = _drop_dead_cred(used_label, why)
+                except AllAccountsExhausted as e:
+                    if e.notify_message:
+                        notify(e.notify_message)
+                    raise
+                switched_here = switched_here or (nxt != used_label)
+                continue
+            run_env = dict(env if env is not None else os.environ)
+            run_env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+
         try:
             _hidden = _hidden_child_flags()
             if _hidden:
                 kwargs.setdefault("creationflags", _hidden)
-            proc = subprocess.run(args, input=input, timeout=timeout, env=env, **kwargs)
+            proc = subprocess.run(args, input=input, timeout=timeout, env=run_env, **kwargs)
         except Exception:
             raise
         verdict = limit_detect.classify(proc.returncode, proc.stdout, proc.stderr)
@@ -2260,6 +2442,30 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         if verdict == "ok":
             _clear_auth_rejects(used_label)
             return _finish(proc, args, want_check)
+
+        if use_env_token and verdict in ("auth", "dead"):
+            # 환경변수로 넘긴 출입증이 거절됐다. 저장본을 한 번 강제로 새로 받아 같은 계정으로
+            # 다시 가고, 그래도 거절이면(또는 재발급 자체가 거절되면) 그 저장본은 죽은 것이다.
+            reason = limit_detect.short_reason(proc.stdout, proc.stderr, 120) or "없음"
+            if used_label not in env_forced:
+                env_forced.add(used_label)
+                ok, why = _force_refresh(used_label)
+                if ok:
+                    log(f"'{used_label}' 출입증이 거절돼 새로 받았습니다. 같은 계정으로 다시 시도합니다. "
+                        f"거절 문구: {reason}")
+                    continue
+                why = why or "revoked"
+            else:
+                why = "revoked"
+            log(f"'{used_label}' 출입증이 거절됐고 재발급도 안 됩니다({why}). 거절 문구: {reason}")
+            try:
+                nxt = _drop_dead_cred(used_label, why)
+            except AllAccountsExhausted as e:
+                if e.notify_message:
+                    notify(e.notify_message)
+                raise
+            switched_here = switched_here or (nxt != used_label)
+            continue
 
         if verdict == "auth" and not switched_here:
             # 계정을 바꿔도 안 풀린다. ssh 비대화형처럼 자격을 아예 못 읽는 환경에서 나오는데,
@@ -2332,6 +2538,8 @@ def main():
         return ensure_usable(intended_model(argv[1:]))
     if argv[0] == "--tend":
         # 떠 있는 사람 창의 칸이 바닥났으면 갈아끼운다(주기 작업용, 창 없으면 조회 0).
+        if env_token_mode():
+            _tend_env_token()  # 맥: 지금 계정 출입증이 곧 끝나면 봇이 몰리기 전에 미리 갱신
         return tend_windows()
     if argv[0] in ("--slot-prepare", "--slot-check", "--slot-next"):
         # cc 가 켜기 직전(--slot-prepare: 초기화가 이른 계정으로 되돌리기까지), 창이 끝난 뒤

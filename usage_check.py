@@ -329,6 +329,13 @@ def get_usage_for(cred_path, *, is_current: bool = False,
     u = get_usage(cred_path)
     if u:
         return u
+    try:
+        import cred_refresh as _cr
+
+        if _cr.env_token_mode():
+            is_current = False  # 저장본 단일 소유 방식: 지금 계정도 저장본이 원본이고 갱신은 순환기 몫이다
+    except Exception:
+        pass
     if is_current:
         live = Path.home() / ".claude" / ".credentials.json"
         if not live.exists():

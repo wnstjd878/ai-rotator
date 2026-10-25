@@ -119,10 +119,52 @@ def save_refreshed(src: Path, label: str) -> str:
     return "주인 확인 실패(%r) — 저장본 안 덮고 %s 에 보관" % (owner, dst.name)
 
 
+def burn_env_mode() -> int:
+    """환경변수 열쇠 방식: 저장본의 재발급 열쇠를 실제로 한 번 회전시켜 생존을 본다.
+
+    claude 를 띄우지 않고 자격 파일(LIVE)·열쇠꾸러미·되비추기를 건드리지 않는다. 화면 자리에서도
+    유효하다. 지금 쓰는 계정도 같이 본다(순환기가 유일한 갱신자라 회전해도 봇이 다치지 않고, 봇은
+    다음 호출에 새 출입증을 그대로 꺼내 쓴다). 출력은 cost_guard_report 가 읽는 형식 그대로:
+    "<라벨>: 살아 있음(...)" / "<라벨>: 죽음 — 재로그인 필요".
+    """
+    import cred_refresh as cr
+    try:
+        import pool_state as st
+        current = st.load_state().get("current")
+    except Exception:
+        current = None
+    print("지금 쓰는 계정:", current or "(모름)")
+    print("방식: 환경변수 열쇠(저장본 단일 소유), 재발급 열쇠를 회전시켜 판정")
+    bad = 0
+    for label in ("A", "B", "C", "D"):
+        store = cm.creds_dir() / (label + ".json")
+        if not store.exists():
+            print("%s: 저장본 없음" % label)
+            bad += 1
+            continue
+        before = fp(store)
+        if cr.refresh_file(store):  # min_left 없음 = 무조건 새로 받는다(재발급 열쇠가 살았는지가 판정)
+            print("%s: 살아 있음(재발급 성공) / 지문 %s → %s" % (label, before, fp(store)))
+            continue
+        err = cr.last_error or ""
+        if "HTTP 400" in err or "HTTP 401" in err or "재발급 열쇠 없음 또는 만료" in err:
+            print("%s: 죽음 — 재로그인 필요 (%s)" % (label, err))
+        else:
+            print("%s: 판정 불가 (%s)" % (label, err))
+        bad += 1
+    return 1 if bad else 0
+
+
 def main() -> int:
     if sys.platform != "darwin":
         print("Mac 전용입니다. 윈도우는 burn_check_win.py 를 쓰세요.")
         return 1
+    try:
+        import cred_refresh as _cr
+        if _cr.env_token_mode():
+            return burn_env_mode()
+    except Exception:
+        pass
     if keychain_readable():
         print("화면 세션(열쇠꾸러미가 읽히는 자리)입니다 — 판정이 무효라 중단. ssh 로 부르세요.")
         return 1

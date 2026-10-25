@@ -523,6 +523,16 @@ def switch_file(src: Path, leaving=None, label=None) -> bool:
     복사 전에 지금 쓰던 계정의 갱신분을 그 라벨 파일로 되저장한다(save_back).
     맥에서는 열쇠꾸러미까지 같이 맞춘다. 못 맞추면 예약을 남긴다.
     """
+    try:
+        import cred_refresh as _cr
+
+        if _cr.env_token_mode():
+            # 저장본 단일 소유 방식(맥): 자격 파일·열쇠꾸러미에 꽂지 않는다. 순환기가 creds/<라벨>.json
+            # 에서 바로 열쇠를 꺼내 환경변수로 넘기므로 되저장할 '갱신분' 도 없다.
+            print("[env-token] 저장본 단일 소유 방식이라 자격 파일·열쇠꾸러미에 꽂지 않습니다")
+            return True
+    except Exception:
+        pass
     LIVE.parent.mkdir(parents=True, exist_ok=True)
     print(f"[save-back] {save_back(leaving)}")
     if (label or src.stem) != leaving:

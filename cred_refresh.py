@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -43,6 +44,28 @@ TIMEOUT = 15
 LOCK_STALE = 120  # 초. 이보다 오래된 잠금은 죽은 것으로 본다.
 
 last_error = None  # 마지막 실패 사유(종류만, 자격 값은 절대 안 담는다)
+
+
+def env_token_mode() -> bool:
+    """맥 전용 '환경변수 열쇠 방식' 이 켜져 있는가.
+
+    켜지면 순환기가 creds/<라벨>.json 하나만 소유하고, 그 접근 열쇠를 CLAUDE_CODE_OAUTH_TOKEN
+    환경변수로 claude 에 넘긴다. claude 는 열쇠꾸러미도 ~/.claude/.credentials.json 도 읽지도
+    쓰지도 않는다(2026-10-25 실측: 빈 CLAUDE_CONFIG_DIR + 환경변수만으로 답하고 자격 파일을
+    만들지 않음. 폐기된 열쇠는 "OAuth token revoked" 로 바로 거절).
+    왜: 같은 계정 열쇠가 열쇠꾸러미(화면 세션 봇)와 파일(ssh 자리·되비추기·태우기)에 따로 살면
+    8시간마다 먼저 갱신한 쪽이 다른 쪽을 폐기시켜 "로그인 거절 → 3분 뒤 강제 교체 → 격리 알림"
+    이 되풀이됐다(2026-08~10 격리 7회, 10-25 하루 두 번). 저장본 하나만 두면 다툴 상대가 없다.
+    이 방식에서는 순환기가 유일한 갱신자라 "지금 쓰는 계정은 갱신하지 않는다" 규칙이 뒤집힌다.
+    AIROTATOR_ENV_TOKEN=0 으로 끄면 옛 방식(열쇠꾸러미·되비추기)으로 돌아간다. 1 이면 다른
+    운영체제에서도 켜진다(시험용).
+    """
+    v = (os.environ.get("AIROTATOR_ENV_TOKEN") or "").strip().lower()
+    if v in ("0", "off", "no"):
+        return False
+    if v in ("1", "on", "yes"):
+        return True
+    return sys.platform == "darwin"
 
 
 def _ms(value):
