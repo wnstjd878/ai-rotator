@@ -2793,7 +2793,8 @@ def main():
                      case_usage_cache_backoff, case_nudge_stalled,
                      case_window_limit_from_screen, case_slot_pool, case_slot_fresh_switch,
                      case_last_resort_shared, case_revive_clears_shared,
-                     case_fresh_before_install):
+                     case_fresh_before_install,
+                     case_env_token_inject, case_env_token_dead):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
         case_shared_iso_roundtrip()
@@ -2814,6 +2815,150 @@ def main():
         return 1
     print("전부 통과")
     return 0
+
+
+def _env_cred(label, token, left_sec):
+    """환경변수 열쇠 방식 시험용 저장본(가짜 값)."""
+    return json.dumps({"claudeAiOauth": {
+        "accessToken": token, "refreshToken": "rt-" + label,
+        "expiresAt": int((time.time() + left_sec) * 1000),
+        "refreshTokenExpiresAt": int((time.time() + 86400 * 20) * 1000),
+    }})
+
+
+def case_env_token_inject(tmp):
+    """[71] 환경변수 열쇠 방식: 저장본의 출입증을 CLAUDE_CODE_OAUTH_TOKEN 으로 넘기고, 곧 끝나면 미리 새로 받는다.
+
+    2026-10-25: 맥에서 같은 계정 열쇠가 열쇠꾸러미와 파일에 따로 살아 8시간마다 서로 폐기시키던
+    문제를 "순환기가 저장본 하나만 소유" 로 끊었다. claude 는 자격을 읽지도 쓰지도 않는다.
+    """
+    print("\n[71] 환경변수 열쇠 방식: 출입증 주입 + 미리 갱신")
+    import cred_refresh as cr
+    real_refresh, real_wait = cr.refresh_file, claude_pool.ENV_TOKEN_WAIT
+    os.environ["AIROTATOR_ENV_TOKEN"] = "1"
+    try:
+        claude_pool.ENV_TOKEN_WAIT = 1
+        setup(tmp, ["A", "B"], "A")
+        creds = Path(tmp) / "creds"
+        (creds / "A.json").write_text(_env_cred("A", "tok-A", 7200), encoding="utf-8")
+        seen = []
+        fake = Fake({"A": (0, OK_OUT, "")})
+
+        def run(args, **kw):
+            seen.append(kw.get("env") or {})
+            return fake.run(args, **kw)
+
+        install(fake)
+        claude_pool.subprocess.run = run
+        refreshed = []
+        cr.refresh_file = lambda path, min_left=None: refreshed.append(str(path)) or False
+
+        # (1) 출입증이 넉넉하면 그대로 넘긴다. 갱신은 안 부른다.
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("성공", proc.returncode == 0)
+        check("환경변수로 출입증을 넘김", seen and seen[-1].get("CLAUDE_CODE_OAUTH_TOKEN") == "tok-A",
+              f"{sorted(k for k in (seen[-1] if seen else {}) if 'CLAUDE' in k)}")
+        check("넉넉하면 갱신 안 함", refreshed == [], f"{refreshed}")
+        check("계정 교체 없음", fake.switches == [])
+
+        # (2) 자기 로그인을 가진 호출(CLAUDE_CONFIG_DIR)에는 넣지 않는다.
+        claude_pool.run(["claude", "-p", "안녕"], env={"CLAUDE_CONFIG_DIR": str(Path(tmp) / "other")})
+        check("자리 폴더 호출에는 넣지 않음", "CLAUDE_CODE_OAUTH_TOKEN" not in seen[-1])
+
+        # (3) 곧 끝나는 출입증은 부르기 전에 새로 받고 새 값을 넘긴다.
+        (creds / "A.json").write_text(_env_cred("A", "tok-A-old", 120), encoding="utf-8")
+
+        def fake_refresh(path, min_left=None):
+            Path(path).write_text(_env_cred("A", "tok-A-new", 28800), encoding="utf-8")
+            refreshed.append("ok")
+            return True
+
+        cr.refresh_file = fake_refresh
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("곧 끝나면 미리 갱신", refreshed == ["ok"], f"{refreshed}")
+        check("새 출입증을 넘김", seen[-1].get("CLAUDE_CODE_OAUTH_TOKEN") == "tok-A-new")
+        check("갱신 기록", "출입증을 새로 받았습니다" in claude_pool.LOG_FILE.read_text(encoding="utf-8"))
+
+        # (4) 갱신이 통신 문제로 안 되면 남은 출입증으로 간다(계정을 막지 않는다).
+        (creds / "A.json").write_text(_env_cred("A", "tok-A-short", 120), encoding="utf-8")
+
+        def fail_refresh(path, min_left=None):
+            cr.last_error = "갱신 실패(URLError)"
+            return False
+
+        cr.refresh_file = fail_refresh
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("통신 실패면 남은 출입증으로 감", proc.returncode == 0 and
+              seen[-1].get("CLAUDE_CODE_OAUTH_TOKEN") == "tok-A-short")
+        check("계정은 막지 않음", st.load_state()["blocked"] == {}, f"{st.load_state()['blocked']}")
+    finally:
+        cr.refresh_file, claude_pool.ENV_TOKEN_WAIT = real_refresh, real_wait
+        os.environ.pop("AIROTATOR_ENV_TOKEN", None)
+
+
+def case_env_token_dead(tmp):
+    """[72] 환경변수 열쇠 방식: 재발급이 거절되면 그 저장본만 바로 격리하고 다음 계정으로, 알림은 한 번.
+
+    옛 방식의 "저장본은 살아 있으니 3분 재시도 → 강제 교체 → 두 번째면 격리" 추측 경로가 없다.
+    봇이 쓰는 열쇠가 바로 그 파일이라, 서버가 재발급을 거절한 것이 곧 판정이다.
+    """
+    print("\n[72] 환경변수 열쇠 방식: 폐기된 저장본은 바로 격리")
+    import cred_refresh as cr
+    real_refresh, real_wait = cr.refresh_file, claude_pool.ENV_TOKEN_WAIT
+    os.environ["AIROTATOR_ENV_TOKEN"] = "1"
+    revoked = json.dumps({"type": "result", "is_error": True,
+                          "result": "Failed to authenticate: OAuth token revoked. Please log in again"})
+    try:
+        claude_pool.ENV_TOKEN_WAIT = 1
+        setup(tmp, ["A", "B"], "A")
+        creds = Path(tmp) / "creds"
+        (creds / "A.json").write_text(_env_cred("A", "tok-A", 7200), encoding="utf-8")
+        (creds / "B.json").write_text(_env_cred("B", "tok-B", 7200), encoding="utf-8")
+
+        def refresh_rejected(path, min_left=None):
+            cr.last_error = "갱신 거절(HTTP 400)"
+            return False
+
+        cr.refresh_file = refresh_rejected
+        fake = Fake({"A": (1, revoked, ""), "B": (0, OK_OUT, "")})
+        install(fake)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("B 로 넘어가 성공", proc.returncode == 0 and fake.calls == ["A", "B"], f"{fake.calls}")
+        check("A 저장본을 격리", not (creds / "A.json").exists() and (creds / "dead" / "A.json").exists())
+        check("지금 계정은 B", st.load_state().get("current") == "B")
+        check("사람에게 한 번 알림", sum("순환에서 뺐습니다" in m for m in fake.notices) == 1,
+              f"{len(fake.notices)}")
+        check("3분 재시도 없이 바로 판정", not any("저장본은 살아 있습니다" in ln
+                                           for ln in claude_pool.LOG_FILE.read_text(encoding="utf-8").splitlines()))
+
+        # 같은 날 또 같은 라벨이 죽어도 알림은 더 안 간다.
+        (creds / "A.json").write_text(_env_cred("A", "tok-A2", 7200), encoding="utf-8")
+        state = st.load_state(); st.set_current(state, "A", "시험"); st.save_state(state)
+        fake2 = Fake({"A": (1, revoked, ""), "B": (0, OK_OUT, "")})
+        install(fake2)
+        claude_pool.run(["claude", "-p", "안녕"])
+        check("같은 날 같은 라벨 알림은 접음", fake2.notices == [], f"{fake2.notices[:1]}")
+
+        # 재발급은 됐는데 새 출입증도 거절이면 역시 격리(한 번만 다시 시도한다).
+        (creds / "A.json").write_text(_env_cred("A", "tok-A3", 7200), encoding="utf-8")
+        state = st.load_state(); st.set_current(state, "A", "시험"); st.save_state(state)
+        tries = []
+
+        def refresh_ok(path, min_left=None):
+            tries.append(1)
+            Path(path).write_text(_env_cred("A", "tok-A4", 28800), encoding="utf-8")
+            return True
+
+        cr.refresh_file = refresh_ok
+        fake3 = Fake({"A": (1, revoked, ""), "B": (0, OK_OUT, "")})
+        install(fake3)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("거절 뒤 한 번 새로 받아 다시 시도", tries == [1] and fake3.calls[:2] == ["A", "A"], f"{fake3.calls}")
+        check("그래도 거절이면 격리 후 B", proc.returncode == 0 and fake3.calls[-1] == "B"
+              and (creds / "dead" / "A.json").exists())
+    finally:
+        cr.refresh_file, claude_pool.ENV_TOKEN_WAIT = real_refresh, real_wait
+        os.environ.pop("AIROTATOR_ENV_TOKEN", None)
 
 
 def case_usage_cache_backoff(tmp):

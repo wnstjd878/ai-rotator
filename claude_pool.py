@@ -2251,7 +2251,7 @@ def _env_token_for(label: str | None) -> tuple:
         return None, "missing"
     import cred_refresh as cr
 
-    path = BASE / "creds" / f"{label}.json"
+    path = Path(st.CREDS_DIR) / f"{label}.json"
     deadline = time.time() + ENV_TOKEN_WAIT
     tok, left, why, err = None, 0.0, "error", ""
     refreshes = 0
@@ -2296,7 +2296,7 @@ def _force_refresh(label: str | None) -> tuple:
         return False, "missing"
     import cred_refresh as cr
 
-    path = BASE / "creds" / f"{label}.json"
+    path = Path(st.CREDS_DIR) / f"{label}.json"
     if not path.exists():
         return False, "missing"
     for _ in range(ENV_TOKEN_WAIT):
