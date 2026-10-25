@@ -139,6 +139,26 @@ python claude_pool.py --tend       떠 있는 창의 칸이 바닥났으면 갈�
 - `check=True`, `stdout=...` 같은 인자도 `subprocess.run` 과 똑같이 받는다.
 - 공유 저장소가 죽어도 봇을 멈추지 않는다. 각 머신이 로컬 상태로 버틴다.
 
+### 맥은 환경변수 열쇠 방식으로 돈다 (2026-10-25)
+
+스위치는 표시 파일 `creds/.env-token-mode` 다(맥에만 있음, git 밖). `cred_refresh.env_token_mode()` 가 읽는다.
+
+- 순환기가 `creds/<라벨>.json` 하나만 소유한다. 봇이 claude 를 부르면 `claude_pool.run()` 이 그 파일의
+  accessToken 을 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로 넘기고, claude 는 열쇠꾸러미도
+  `~/.claude/.credentials.json` 도 읽지도 쓰지도 않는다(실측: 빈 CLAUDE_CONFIG_DIR + 환경변수만으로 답함).
+- 출입증이 10분 미만 남으면 부르기 전에 `cred_refresh.refresh_file` 로 새로 받는다(잠금으로 한 번만 회전).
+  `--tend`(3분)도 지금 계정을 미리 갱신한다. 거절을 받으면 한 번 강제 갱신 뒤 같은 계정으로 다시 가고,
+  재발급까지 거절(HTTP 400/401)이면 그 저장본만 바로 격리하고 하루 한 번 알린다. "저장본은 살아 있다"
+  추측과 3분 재시도, 강제 교체 2회 뒤 격리 같은 옛 경로는 이 방식에서 쓰지 않는다.
+- `switch_account.switch_file`, `cred_mirror`(되비추기), `_switch`, `_mirror_now` 는 이 방식에서 아무것도
+  하지 않는다. `burn_check_mac.py` 는 claude 대신 `refresh_file` 로 재발급 열쇠를 회전시켜 생존을 본다.
+- `CLAUDE_CONFIG_DIR` 을 따로 쓰는 호출(슈퍼애드 launchd 등 자기 로그인을 가진 작업)에는 넣지 않는다.
+- 왜: 같은 계정 열쇠가 열쇠꾸러미(화면 세션 봇)와 파일(ssh 쪽·되비추기·태우기)에 따로 살면 8시간마다
+  먼저 갱신한 쪽이 다른 쪽을 폐기시켜 "로그인 거절, 3분 뒤 강제 교체, 격리 알림" 이 되풀이됐다
+  (2026-08~10 격리 7회, 10-25 하루 두 번). 저장본 하나만 두면 다툴 상대가 없다.
+- 끄기: `AIROTATOR_ENV_TOKEN=0` 또는 표시 파일 삭제(옛 방식 복귀). 이전 판 백업 `.bak-envtoken-20261025/`(맥).
+- 맥에서 사람이 대화형 `claude` 를 띄우면 그건 여전히 열쇠꾸러미를 읽는다(순환기와 무관, 오래된 로그인일 수 있음).
+
 ## 지피티(Codex) 순환
 
 클로드와 규칙은 같다. 거절을 받은 뒤에만 계정을 바꾸고, 남은량은 알림으로만 알린다
