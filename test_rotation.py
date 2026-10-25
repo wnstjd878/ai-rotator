@@ -2761,6 +2761,7 @@ def main():
     os.environ["AIROTATOR_NO_SLOTS"] = "1"
     os.environ["AIROTATOR_NO_NUDGE"] = "1"   # 창 지키기가 실제 창에 이어가기 줄을 넣지 않게
     os.environ["AIROTATOR_NO_ALERT"] = "1"   # 자리 로그인 알림(slot_pool._login_alert)이 진짜 알림·표시를 안 건드리게
+    os.environ["AIROTATOR_ENV_TOKEN"] = "0"  # 맥에서 돌려도 옛 방식 시험은 옛 방식으로(표시 파일 무시). [71]·[72]만 켠다
     real_run = subprocess.run
     real_switch = claude_pool._switch
     real_notify = claude_pool.notify
@@ -2893,7 +2894,7 @@ def case_env_token_inject(tmp):
         check("계정은 막지 않음", st.load_state()["blocked"] == {}, f"{st.load_state()['blocked']}")
     finally:
         cr.refresh_file, claude_pool.ENV_TOKEN_WAIT = real_refresh, real_wait
-        os.environ.pop("AIROTATOR_ENV_TOKEN", None)
+        os.environ["AIROTATOR_ENV_TOKEN"] = "0"
 
 
 def case_env_token_dead(tmp):
@@ -2940,7 +2941,8 @@ def case_env_token_dead(tmp):
         claude_pool.run(["claude", "-p", "안녕"])
         check("같은 날 같은 라벨 알림은 접음", fake2.notices == [], f"{fake2.notices[:1]}")
 
-        # 재발급은 됐는데 새 출입증도 거절이면 역시 격리(한 번만 다시 시도한다).
+        # 재발급은 됐는데 새 출입증도 거절이면 저장본 탓이 아니다. 격리하지 않고 멈추고 사람에게 알린다
+        # (검수 2026-10-25: 서버 장애 때 멀쩡한 네 계정이 줄줄이 격리될 수 있었다).
         (creds / "A.json").write_text(_env_cred("A", "tok-A3", 7200), encoding="utf-8")
         state = st.load_state(); st.set_current(state, "A", "시험"); st.save_state(state)
         tries = []
@@ -2954,9 +2956,31 @@ def case_env_token_dead(tmp):
         fake3 = Fake({"A": (1, revoked, ""), "B": (0, OK_OUT, "")})
         install(fake3)
         proc = claude_pool.run(["claude", "-p", "안녕"])
-        check("거절 뒤 한 번 새로 받아 다시 시도", tries == [1] and fake3.calls[:2] == ["A", "A"], f"{fake3.calls}")
-        check("그래도 거절이면 격리 후 B", proc.returncode == 0 and fake3.calls[-1] == "B"
-              and (creds / "dead" / "A.json").exists())
+        check("거절 뒤 한 번 새로 받아 다시 시도", tries == [1] and fake3.calls == ["A", "A"], f"{fake3.calls}")
+        check("그래도 거절이면 격리·교체 없이 멈춤", proc.returncode == 1 and (creds / "A.json").exists()
+              and st.load_state().get("current") == "A" and fake3.switches == [])
+        check("저장본 탓이 아니라고 알림", any("출입증을 새로 받았는데도" in m for m in fake3.notices),
+              f"{len(fake3.notices)}")
+
+        # 거절받은 사이 다른 프로세스가 이미 새로 받았으면 또 회전시키지 않고 그 값으로 간다.
+        (creds / "A.json").write_text(_env_cred("A", "tok-A5", 7200), encoding="utf-8")
+        tries.clear()
+        seen_tok = []
+
+        class Switching(Fake):
+            def run(self, args, **kw):
+                env_ = kw.get("env") or {}
+                seen_tok.append(env_.get("CLAUDE_CODE_OAUTH_TOKEN"))
+                if len(seen_tok) == 1:
+                    (creds / "A.json").write_text(_env_cred("A", "tok-A6", 7200), encoding="utf-8")  # 남이 갱신
+                    return subprocess.CompletedProcess(args, 1, revoked, "")
+                return subprocess.CompletedProcess(args, 0, OK_OUT, "")
+
+        fake6 = Switching({})
+        install(fake6)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("남이 이미 갱신했으면 회전 없이 새 값으로 재시도", tries == [] and seen_tok == ["tok-A5", "tok-A6"]
+              and proc.returncode == 0, f"tries={tries} seen={seen_tok}")
 
         # (코덱스 2026-10-25) 계정 넷 중 셋이 거절·재갱신·격리를 거쳐도 넷째 멀쩡한 계정까지 간다.
         (Path(tmp) / "state.json").unlink(missing_ok=True)
@@ -2965,15 +2989,11 @@ def case_env_token_dead(tmp):
         for lb in "ABCD":
             (creds / f"{lb}.json").write_text(_env_cred(lb, "tok-" + lb, 7200), encoding="utf-8")
 
-        def refresh_ok_any(path, min_left=None):
-            Path(path).write_text(_env_cred(Path(path).stem, "tok-%s-2" % Path(path).stem, 28800), encoding="utf-8")
-            return True
-
-        cr.refresh_file = refresh_ok_any
+        cr.refresh_file = refresh_rejected  # 셋은 재발급까지 거절 = 진짜 죽음
         fake4 = Fake({"A": (1, revoked, ""), "B": (1, revoked, ""), "C": (1, revoked, ""), "D": (0, OK_OUT, "")})
         install(fake4)
         proc = claude_pool.run(["claude", "-p", "안녕"])
-        check("셋이 죽어도 넷째 멀쩡한 계정까지 감", proc.returncode == 0 and fake4.calls[-1] == "D",
+        check("셋이 죽어도 넷째 멀쩡한 계정까지 감", proc.returncode == 0 and fake4.calls == ["A", "B", "C", "D"],
               f"{fake4.calls}")
 
         # (코덱스) 저장본이 없는 계정(이 기계 사정)은 이 기계에서만 재우고 공유에는 안 올린다.
@@ -3004,7 +3024,7 @@ def case_env_token_dead(tmp):
     finally:
         cr.refresh_file, claude_pool.ENV_TOKEN_WAIT = real_refresh, real_wait
         st.shared_state = None
-        os.environ.pop("AIROTATOR_ENV_TOKEN", None)
+        os.environ["AIROTATOR_ENV_TOKEN"] = "0"
 
 
 def case_usage_cache_backoff(tmp):

@@ -222,8 +222,12 @@ def main():
         # accounts.json 에 없는 라벨로 저장했을 때 가로채기는 켜지고 고를 계정은 없는
         # 상태가 되어 첫 한도에서 곧바로 전 계정 소진이 된다.
         usable = set(st.saved_labels()) & set(st.account_labels())
-        if len(usable) < 2:
+        if not usable:
+            passthrough(argv)  # 저장본이 하나도 없다. 원래 자격(열쇠꾸러미·자격 파일)으로 간다.
+        if len(usable) < 2 and not claude_pool.env_token_mode():
             passthrough(argv)  # 순환할 계정이 없음
+        # 환경변수 열쇠 방식(맥)은 계정이 하나뿐이어도 순환기를 거친다. 거치지 않으면 claude 가
+        # 아무도 맞추지 않는 열쇠꾸러미 자격으로 나가 저장본과 다시 다툰다(검수 2026-10-25).
     except Exception:
         passthrough(argv)
 
@@ -270,6 +274,17 @@ def main():
         sys.stderr.write(f"[shim] 순환기 오류({type(e).__name__}). 원래 방식으로 실행합니다\n")
         import subprocess
 
+        try:
+            # 환경변수 열쇠 방식이면 되돌아가는 실행에도 저장본 출입증을 넘긴다. 안 넘기면 열쇠꾸러미
+            # 자격으로 나가 저장본의 열쇠를 폐기시킬 수 있다(검수 2026-10-25).
+            import claude_pool as _cp
+            import pool_state as _st
+            if _cp.env_token_mode() and not env.get("CLAUDE_CONFIG_DIR"):
+                _tok, _why = _cp._env_token_for(_st.load_state().get("current"))
+                if _tok:
+                    env["CLAUDE_CODE_OAUTH_TOKEN"] = _tok
+        except Exception:
+            pass
         proc = subprocess.run([REAL_CLAUDE, *argv], input=stdin_data,
                               capture_output=True, text=True,
                               encoding="utf-8", errors="replace", env=env)

@@ -2290,8 +2290,13 @@ def _env_token_for(label: str | None) -> tuple:
     return None, why
 
 
-def _force_refresh(label: str | None) -> tuple:
-    """거절받은 저장본의 출입증을 무조건 새로 받는다. (성공 여부, 실패 사유)."""
+def _force_refresh(label: str | None, used_tok: str | None = None) -> tuple:
+    """거절받은 저장본의 출입증을 새로 받는다. (성공 여부, 실패 사유).
+
+    `used_tok` 은 거절받은 그 출입증이다. 파일에 이미 다른 출입증이 들어 있으면 다른 프로세스가 방금
+    갱신한 것이니 또 회전시키지 않고 그 값을 쓴다(검수 2026-10-25: 봇 수십 개가 동시에 거절받으면
+    갱신이 줄줄이 일어나 앞 호출의 출입증까지 무효가 될 수 있다).
+    """
     if not label:
         return False, "missing"
     import cred_refresh as cr
@@ -2299,6 +2304,13 @@ def _force_refresh(label: str | None) -> tuple:
     path = Path(st.CREDS_DIR) / f"{label}.json"
     if not path.exists():
         return False, "missing"
+    if used_tok:
+        try:
+            cur = (json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth") or {}).get("accessToken")
+        except Exception:
+            cur = None
+        if cur and cur != used_tok:
+            return True, ""  # 누가 이미 새로 받았다. 그걸로 다시 간다.
     for _ in range(ENV_TOKEN_WAIT):
         if cr.refresh_file(path):  # min_left 없음 = 무조건 회전
             return True, ""
@@ -2455,12 +2467,14 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
             return _finish(proc, args, want_check)
 
         if use_env_token and verdict in ("auth", "dead"):
-            # 환경변수로 넘긴 출입증이 거절됐다. 저장본을 한 번 강제로 새로 받아 같은 계정으로
-            # 다시 가고, 그래도 거절이면(또는 재발급 자체가 거절되면) 그 저장본은 죽은 것이다.
+            # 환경변수로 넘긴 출입증이 거절됐다. 저장본을 한 번 강제로 새로 받아 같은 계정으로 다시 간다.
+            # 재발급 자체가 거절되면 그 저장본은 죽은 것이다(격리). 재발급은 됐는데 새 출입증도 거절이면
+            # 저장본 탓이 아니다(서버 장애, claude 가 환경변수 열쇠를 안 받는 판 등). 그때 격리하면 멀쩡한
+            # 계정이 줄줄이 격리된다(검수 2026-10-25). 옛 방식의 "처음부터 거절이면 돌리지 않는다" 처럼 멈춘다.
             reason = limit_detect.short_reason(proc.stdout, proc.stderr, 120) or "없음"
             if used_label not in env_forced:
                 env_forced.add(used_label)
-                ok, why = _force_refresh(used_label)
+                ok, why = _force_refresh(used_label, run_env.get("CLAUDE_CODE_OAUTH_TOKEN"))
                 if ok:
                     log(f"'{used_label}' 출입증이 거절돼 새로 받았습니다. 같은 계정으로 다시 시도합니다. "
                         f"거절 문구: {reason}")
@@ -2472,7 +2486,16 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
                     continue
                 why = why or "revoked"
             else:
-                why = "revoked"
+                log(f"'{used_label}' 새로 받은 출입증까지 거절됐습니다. 저장본 탓이 아니라고 보고 계정을 "
+                    f"바꾸지 않습니다(서버 장애나 claude 판 문제 의심). 거절 문구: {reason}")
+                if st.claim_notice(f"env-token-reject:{int(time.time() // 3600)}"):
+                    notify(f"클로드 '{used_label}' 계정의 출입증을 새로 받았는데도 로그인 거절이 이어집니다"
+                           "(Mac, 환경변수 열쇠 방식).\n\n무슨 일: 저장본은 멀쩡한데 서버가 거절합니다. "
+                           "서버 장애이거나 claude 새 판이 CLAUDE_CODE_OAUTH_TOKEN 을 안 받는 경우입니다. "
+                           "계정을 바꾸거나 격리하지 않고 그대로 둡니다.\n\n"
+                           f"할 일: 거절 문구를 확인하고, 계속되면 AIROTATOR_ENV_TOKEN=0 으로 옛 방식에 돌릴지 정하세요.\n"
+                           f"  거절 문구: {reason}")
+                return _finish(proc, args, want_check)
             log(f"'{used_label}' 출입증이 거절됐고 재발급도 안 됩니다({why}). 거절 문구: {reason}")
             try:
                 nxt = _drop_dead_cred(used_label, why)
@@ -2488,7 +2511,10 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
             # 이때 계정을 돌리면 멀쩡한 계정들이 줄줄이 막힌 것으로 잘못 기록된다.
             # 다만 봇 자리(launchd)에서 이 문구가 나오면 열쇠꾸러미에 남은 옛 자격이 원인일 수
             # 있다. 그 경우 사람이 지워줘야 풀리므로 여기서도 한 번 알린다.
-            place = _warn_cred_place(used_label)
+            # 환경변수 열쇠 방식에서는 열쇠꾸러미를 아무도 안 쓰므로 그 정리 경로를 타지 않는다
+            # (CLAUDE_CONFIG_DIR 호출은 자기 로그인 문제다. 검수 2026-10-25: 여기로 오면 열쇠꾸러미를
+            # 지우고 "고쳤다" 는 거짓 알림이 나갈 수 있었다).
+            place = "" if env_token_mode() else _warn_cred_place(used_label)
             if place == "fixed":
                 continue  # 옛 자격을 지웠으니 같은 계정으로 한 번 더 해본다
             if not place:
