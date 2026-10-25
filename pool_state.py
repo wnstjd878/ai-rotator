@@ -788,6 +788,21 @@ def mark_blocked(state: dict, label: str, until_epoch: float, reason: str = "") 
     return state
 
 
+def mark_blocked_local(state: dict, label: str, until_epoch: float, reason: str = "") -> dict:
+    """이 기계에서만 계정을 잠깐 막는다(공유에 올리지 않는다).
+
+    저장본 파일 누락·갱신 통신 실패처럼 **이 기계의** 사정으로 못 쓰는 계정은 다른 기계에선 멀쩡하다.
+    mark_blocked 로 올리면 세 머신이 그 계정을 다 피해 가서 멀쩡한 계정이 통째로 쉰다(코덱스 검수 2026-10-25).
+    prune_blocked 는 로컬·공유를 합치기만 하므로(큰 쪽 유지) 여기 적은 막힘은 해제 시각까지 남는다.
+    """
+    blocked = dict(state.get("blocked") or {})
+    prev = float(blocked.get(label, 0))
+    blocked[label] = max(prev, float(until_epoch))
+    state["blocked"] = blocked
+    _push_history(state, label, "blocked(이 기계만)", reason)
+    return state
+
+
 def clear_blocked_label(state: dict, label: str) -> dict:
     """한 계정의 막힘을 푼다(로컬 + 공유). 사람이 --use 로 고른 계정 등.
 

@@ -2957,6 +2957,50 @@ def case_env_token_dead(tmp):
         check("거절 뒤 한 번 새로 받아 다시 시도", tries == [1] and fake3.calls[:2] == ["A", "A"], f"{fake3.calls}")
         check("그래도 거절이면 격리 후 B", proc.returncode == 0 and fake3.calls[-1] == "B"
               and (creds / "dead" / "A.json").exists())
+
+        # (코덱스 2026-10-25) 계정 넷 중 셋이 거절·재갱신·격리를 거쳐도 넷째 멀쩡한 계정까지 간다.
+        (Path(tmp) / "state.json").unlink(missing_ok=True)
+        setup(tmp, ["A", "B", "C", "D"], "A")
+        st.shared_state = FakeShared()
+        for lb in "ABCD":
+            (creds / f"{lb}.json").write_text(_env_cred(lb, "tok-" + lb, 7200), encoding="utf-8")
+
+        def refresh_ok_any(path, min_left=None):
+            Path(path).write_text(_env_cred(Path(path).stem, "tok-%s-2" % Path(path).stem, 28800), encoding="utf-8")
+            return True
+
+        cr.refresh_file = refresh_ok_any
+        fake4 = Fake({"A": (1, revoked, ""), "B": (1, revoked, ""), "C": (1, revoked, ""), "D": (0, OK_OUT, "")})
+        install(fake4)
+        proc = claude_pool.run(["claude", "-p", "안녕"])
+        check("셋이 죽어도 넷째 멀쩡한 계정까지 감", proc.returncode == 0 and fake4.calls[-1] == "D",
+              f"{fake4.calls}")
+
+        # (코덱스) 저장본이 없는 계정(이 기계 사정)은 이 기계에서만 재우고 공유에는 안 올린다.
+        (Path(tmp) / "state.json").unlink(missing_ok=True)
+        setup(tmp, ["A", "B"], "A")
+        shared = FakeShared(); st.shared_state = shared
+        (creds / "A.json").unlink(missing_ok=True)
+        (creds / "B.json").write_text(_env_cred("B", "tok-B", 7200), encoding="utf-8")
+        fake5 = Fake({"B": (0, OK_OUT, "")})
+        install(fake5)
+        proc = claude_pool.run(["claude", "-p", "안녕"], max_attempts=1)
+        check("준비 실패는 실행 횟수를 안 깎아 한 번 허용에도 B 로 실행됨", proc is not None and proc.returncode == 0
+              and fake5.calls == ["B"], f"{fake5.calls}")
+        check("이 기계 사정 막힘은 공유에 안 올림", shared.blocked == {}, f"{shared.blocked}")
+        check("로컬에는 막힘 기록", st.is_blocked(st.load_state(), "A"))
+
+        # (코덱스) 실행을 한 번도 못 하면 None 대신 뜻 있는 예외
+        (Path(tmp) / "state.json").unlink(missing_ok=True)
+        setup(tmp, ["A"], "A")
+        st.shared_state = FakeShared()
+        (creds / "A.json").unlink(missing_ok=True)
+        install(Fake({}))
+        try:
+            claude_pool.run(["claude", "-p", "안녕"])
+            check("실행 없이 끝나면 예외", False, "예외 없음")
+        except claude_pool.AllAccountsExhausted:
+            check("실행 없이 끝나면 예외", True)
     finally:
         cr.refresh_file, claude_pool.ENV_TOKEN_WAIT = real_refresh, real_wait
         st.shared_state = None

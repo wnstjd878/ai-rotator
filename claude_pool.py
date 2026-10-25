@@ -2331,14 +2331,15 @@ def _drop_dead_cred(label: str | None, why: str) -> str | None:
                         "재로그인 전까지 순환에서 뺍니다.")
                     dead_label = label
                 else:
-                    st.mark_blocked(state, label, time.time() + ENV_TOKEN_FAIL_REST,
-                                    "재발급 열쇠 폐기(격리 실패)")
+                    st.mark_blocked_local(state, label, time.time() + ENV_TOKEN_FAIL_REST,
+                                          "재발급 열쇠 폐기(격리 실패)")
             elif why == "missing":
-                st.mark_blocked(state, label, time.time() + ENV_TOKEN_FAIL_REST, "저장본 없음")
-                log(f"'{label}' 저장본이 없어 {ENV_TOKEN_FAIL_REST // 60}분 재우고 다음 계정으로 넘깁니다.")
+                # 이 기계 사정(파일 없음·통신 실패)이라 이 기계에서만 재운다. 공유에 올리면 다른 머신까지 그 계정을 피한다.
+                st.mark_blocked_local(state, label, time.time() + ENV_TOKEN_FAIL_REST, "저장본 없음")
+                log(f"'{label}' 저장본이 없어 {ENV_TOKEN_FAIL_REST // 60}분 재우고 다음 계정으로 넘깁니다(이 기계만).")
             else:
-                st.mark_blocked(state, label, time.time() + ENV_TOKEN_FAIL_REST,
-                                f"출입증 발급 실패({why})")
+                st.mark_blocked_local(state, label, time.time() + ENV_TOKEN_FAIL_REST,
+                                      f"출입증 발급 실패({why})")
                 log(f"'{label}' 출입증을 받지 못했습니다({why}). "
                     f"{ENV_TOKEN_FAIL_REST // 60}분 재우고 다음 계정으로 넘깁니다.")
         nxt = _pick_account(state, exclude=label)
@@ -2411,7 +2412,10 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
     # 환경변수 열쇠는 CLAUDE_CONFIG_DIR 을 따로 쓰는 호출(자기 로그인을 가진 작업)에는 넣지 않는다.
     use_env_token = env_token_mode() and not (env if env is not None else os.environ).get("CLAUDE_CONFIG_DIR")
     proc = None
-    for attempt in range(max_attempts):
+    attempt = 0        # 실제로 claude 를 띄운 횟수만 센다
+    env_spins = 0      # 출입증 준비 실패·거절 뒤 강제 갱신으로 같은 자리를 다시 돈 횟수(따로 상한)
+    env_spin_cap = 2 * max(1, len(labels)) + 2
+    while attempt < max_attempts:
         state = st.prune_blocked(st.load_state())
         used_label = _switch_if_blocked(state, bucket)
 
@@ -2419,6 +2423,12 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
         if use_env_token:
             tok, why = _env_token_for(used_label)
             if tok is None:
+                # 실행 전 준비 실패는 실행 횟수를 안 깎는다(코덱스 검수 2026-10-25: 계정 넷이면 A,A,B,B,C 에서
+                # 끝나 멀쩡한 D 에 못 갔다). 대신 준비 실패에만 따로 상한을 둔다.
+                env_spins += 1
+                if env_spins > env_spin_cap:
+                    log(f"출입증 준비를 {env_spins - 1}번 되돌아도 못 끝냈습니다. 멈춥니다.")
+                    break
                 try:
                     nxt = _drop_dead_cred(used_label, why)
                 except AllAccountsExhausted as e:
@@ -2437,6 +2447,7 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
             proc = subprocess.run(args, input=input, timeout=timeout, env=run_env, **kwargs)
         except Exception:
             raise
+        attempt += 1
         verdict = limit_detect.classify(proc.returncode, proc.stdout, proc.stderr)
 
         if verdict == "ok":
@@ -2453,6 +2464,11 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
                 if ok:
                     log(f"'{used_label}' 출입증이 거절돼 새로 받았습니다. 같은 계정으로 다시 시도합니다. "
                         f"거절 문구: {reason}")
+                    attempt -= 1   # 같은 계정 재시도는 계정 순회 횟수를 안 깎는다(상한은 env_spin_cap)
+                    env_spins += 1
+                    if env_spins > env_spin_cap:
+                        log("출입증 갱신 재시도가 너무 잦습니다. 멈춥니다.")
+                        break
                     continue
                 why = why or "revoked"
             else:
@@ -2498,6 +2514,11 @@ def run(args, *, input=None, timeout=None, env=None, max_attempts=None, **kwargs
             raise
         switched_here = switched_here or (nxt != used_label)
 
+    if proc is None:
+        # 실행을 한 번도 못 했다(출입증 준비만 되돌다 끝남). None 을 돌려주면 호출부가 proc.stdout 에서
+        # 터지므로(코덱스 검수 2026-10-25) 뜻이 분명한 예외로 끝낸다.
+        raise AllAccountsExhausted("claude 를 한 번도 띄우지 못했습니다(출입증을 받을 저장본이 없음). "
+                                   "relogin.py 로 계정을 다시 저장하세요.")
     log("재시도 횟수를 다 썼습니다. 마지막 결과를 그대로 돌려줍니다.")
     return _finish(proc, args, want_check)
 
