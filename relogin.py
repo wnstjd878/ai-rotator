@@ -397,7 +397,10 @@ def approve(page, url, proc=None):
     time.sleep(2)
 
     told_login = False
-    labels_to_click = ["Authorize", "승인", "Allow", "허용", "Continue", "계속하기", "계속"]
+    # "다시 시도"/"Try again": claude.ai 가 "브라우저를 확인하지 못했습니다" 로 막았을 때 뜨는 단추.
+    # 한 번 누르면 대개 승인이 통과돼 코드 화면까지 간다(2026-10-25 Opus 자리 B 에서 실측).
+    labels_to_click = ["Authorize", "승인", "Allow", "허용", "Continue", "계속하기", "계속",
+                       "다시 시도", "Try again"]
     deadline = time.time() + LOGIN_TIMEOUT
     while time.time() < deadline:
         if proc is not None and proc.poll() is not None:
