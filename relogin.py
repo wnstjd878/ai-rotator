@@ -15,6 +15,8 @@
       python relogin.py <라벨> --setup      전용 크롬만 띄운다(그 계정으로 1회 로그인해둘 때)
       python relogin.py --status            계정별 재발급 열쇠 만료일 보기
       python relogin.py --reset             전용 크롬을 전부 닫고 폴더를 비운다(처음부터 다시)
+      (2026-10-27 사용자 "작업이 끝나면 크롬창 닫게": 갱신이 성공하면 이번 실행이 띄운 전용 크롬을 닫는다.
+       이미 떠 있던 창(사람이 쓰던 창)과 실패했을 때의 창(사람이 그 창에서 로그인해야 할 수 있음)은 남긴다)
       python relogin.py --remote <머신> <라벨>  원격 머신(macmini/winserver) 자격을 갱신.
                                             그쪽 CLI 를 ssh 로 띄우고 승인은 이 PC 크롬이
                                             한다. 원격 데스크톱 접속 없이 여기서 끝난다.
@@ -147,6 +149,9 @@ def guide_page(label):
     return path.as_uri()
 
 
+_LAUNCHED = []   # 이번 실행이 새로 띄운 전용 크롬 라벨(성공하면 main 이 닫는다)
+
+
 def launch_chrome(label, open_login=False):
     """그 계정 전용 폴더로 크롬을 디버그 포트에 띄운다. 이미 떠 있으면 그대로 쓴다.
 
@@ -201,6 +206,7 @@ def launch_chrome(label, open_login=False):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2)
             print(f"[relogin] '{label}' 전용 크롬을 띄웠습니다(포트 {port}).")
+            _LAUNCHED.append(label)
             if not open_login:
                 wait_warm(port)
             return port
@@ -898,5 +904,15 @@ def main():
     return relogin(label)
 
 
+def run():
+    rc = main()
+    setup = "--setup" in sys.argv[1:]   # 사람이 그 창에서 로그인하라고 띄운 창은 남긴다
+    if rc == 0 and not setup:
+        for lb in _LAUNCHED:
+            if close_chrome(lb):
+                print(f"[relogin] 갱신이 끝나 '{lb}' 전용 크롬을 닫았습니다.")
+    return rc
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())
