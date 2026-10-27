@@ -11,7 +11,7 @@
 # 외부 의존: claude_pool.py (--ensure / --status / --next), 진짜 claude 실행 파일
 # 의도적 미구현: 봇 단발 호출(-p) 순환은 claude_shim.py 가 맡는다. 여기는 사람 창 전용.
 #              (두 곳에서 같이 순환시키면 계정이 이중으로 튄다 — 재구현 금지)
-# 마지막 점검: 2026-09-06
+# 마지막 점검: 2026-10-27 (맥 환경변수 열쇠 방식이면 cc_env_token.py 로 열쇠를 넘김)
 
 POOL="$HOME/projects/ai-rotator/claude_pool.py"
 PY=/usr/bin/python3
@@ -49,10 +49,24 @@ while true; do
   AIROTATOR_COLOR=1 "$PY" "$POOL" --status "${run_args[@]}"
   echo ""
 
+  # 맥 환경변수 열쇠 방식이면 지금 계정 열쇠를 넘긴다(2026-10-27). 안 넘기면 화면 세션의 claude 가
+  # 순환기가 더는 갱신하지 않는 열쇠꾸러미 자격을 읽어 "Login expired" 로 멈춘다. 값은 화면에 안 찍는다.
+  # 계정을 갈아탄 뒤 다시 켤 때도 새 계정 열쇠로 바꿔야 해서 반복마다 새로 받는다.
+  set_cc_token() {
+    unset CLAUDE_CODE_OAUTH_TOKEN
+    [ -n "${CLAUDE_CONFIG_DIR:-}" ] && return 0
+    local tok
+    tok="$("$PY" "$HOME/projects/ai-rotator/cc_env_token.py")" && [ -n "$tok" ] && export CLAUDE_CODE_OAUTH_TOKEN="$tok"
+    return 0
+  }
+  set_cc_token
+
   "$CLAUDE_BIN" "${run_args[@]}"
 
   # claude 가 끝났다. 지금 계정이 한도/만료인지 조용히 확인(haiku 한 번, 소비 미미).
   # 가로채기(claude_shim)가 이 확인을 대신 처리하면 판정이 흐려지므로 꺼두고 부른다.
+  # 확인 전에 열쇠를 다시 받는다. 창이 오래 돌아 넘겨 둔 열쇠가 만료됐으면 그것만으로 '만료'로 오판한다.
+  set_cc_token
   probe="$(echo "ping" | CLAUDE_ROTATOR_DISABLED=1 "$CLAUDE_BIN" -p --model claude-haiku-4-5-20251001 --output-format json 2>&1)"
 
   # "reached your ..." 는 모델별 한도 문구다(실제: "You've reached your Fable 5 limit").
