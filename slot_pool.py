@@ -634,6 +634,8 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None, sort_by: str | N
         if any(usage_check.which_limit(u, threshold=100.0, bucket=n) for n in (need or (bucket,))):
             continue
         pct = usage_check.scoped_pct(u, hit_name)
+        if pct is None and sort_by:
+            continue   # 살리려는 칸의 사용률이 응답에 없으면 남았는지 모른다(코덱스 검수 2026-10-28)
         cands.append((pct if pct is not None else 0.0, l))
     if not cands:
         box["last_resort_at"] = time.time()
@@ -747,6 +749,9 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                     got = _last_resort(state, bucket, cur, tuple(need) + tuple(dead_hit), sort_by=dead_hit[0])
                     if got:
                         cur, switched = got, True
+                        # 끝난 창의 칸(judge)을 살렸으면 그 창은 되켜야 한다(3). 창 지키기(judge=자리 칸)엔 해당 없음
+                        if entry_full and judge != bucket and judge in dead_hit:
+                            own_switched = True
             if not forced and not hit:
                 break
             nxt = _pick_or_revive(state, bucket, cur, threshold, need, skip) if need else None
@@ -773,6 +778,8 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 got = _last_resort(state, bucket, cur, need, sort_by=full[0] if full else hit[0])
                 if got:
                     cur, switched = got, True
+                    if entry_full and judge != bucket and judge in hit:
+                        own_switched = True
                     break   # 옮긴 계정은 97~99% 일 수 있다. 다시 재면 도로 "바닥" 으로 본다
             if nxt is None:
                 st.save_state(state)

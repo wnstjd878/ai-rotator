@@ -4520,6 +4520,27 @@ def case_slot_pool(tmp):
               sp.slot_current(st.load_state(), "Opus") == "B", (switched, sp.slot_current(st.load_state(), "Opus")))
         again = sp.tend(claude_pool.PREEMPT_PCT)
         check("B 가 98% 여도 100% 전엔 다시 안 옮긴다", sp.slot_current(st.load_state(), "Opus") == "B", again)
+        # 창이 Fable 한도로 끝난 뒤(--slot-check, window_bucket=Fable): 옮겼으면 3(되켜짐)(코덱스 검수)
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["blocked"] = {"C": now + 48 * 3600}
+            s2["scoped_blocked"] = {x: {"Fable": now + 48 * 3600} for x in ("A", "B")}
+            sp._slots(s2).setdefault("Opus", {}).pop("last_resort_at", None)
+            sp.switch(s2, "Opus", "A", "시험")
+            st.save_state(s2)
+        rc, cur = sp.prepare("Opus", reclaim=False, window_bucket="Fable")
+        check("Fable 한도로 끝난 Opus 자리 창: B 로 옮기고 3", rc == 3 and sp.slot_current(st.load_state(), "Opus") == "B",
+              (rc, sp.slot_current(st.load_state(), "Opus")))
+        # 응답에 Fable 칸이 없는 B 는 후보가 아니다(코덱스 검수)
+        with st.with_lock():
+            s2 = st.load_state()
+            sp._slots(s2).setdefault("Opus", {}).pop("last_resort_at", None)
+            sp.switch(s2, "Opus", "A", "시험")
+            st.save_state(s2)
+        table.update({"B": {k: v for k, v in fab(5.0).items() if k != "scoped"}})
+        sp.tend(claude_pool.PREEMPT_PCT)
+        check("Fable 칸이 없는 응답의 B 로는 안 옮긴다", sp.slot_current(st.load_state(), "Opus") == "A",
+              sp.slot_current(st.load_state(), "Opus"))
         alive.discard("7009")
         claude_pool.release_session(7009)
         alive.add("7001")
