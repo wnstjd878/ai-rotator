@@ -4501,6 +4501,27 @@ def case_slot_pool(tmp):
         check("A 를 못 읽어도 실제로 98% 인 B 로 간다",
               got == "fable" and sp.slot_current(st.load_state(), "Fable") == "B",
               (got, sp.slot_current(st.load_state(), "Fable")))
+        # (23) Opus 자리 창에서 /model 로 Fable 을 골랐는데 자리 계정 A 의 Fable 이 100%(2026-10-28 사용자 지적).
+        #      Opus 칸은 멀쩡해도 창들이 쓰는 Fable 칸이 실제 100% 면 97~99% 계정으로 옮긴다.
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["blocked"] = {"C": now + 48 * 3600}   # C 는 주간 100% 로 계정째 막힘
+            s2["scoped_blocked"] = {x: {"Fable": now + 48 * 3600} for x in ("A", "B")}
+            sp._slots(s2).setdefault("Opus", {}).pop("last_resort_at", None)
+            sp.switch(s2, "Opus", "A", "시험")
+            st.save_state(s2)
+        table.update({"A": fab(100.0), "B": fab(98.0), "C": dict(fab(5.0), weekly_pct=100.0)})
+        os.environ["CLAUDE_CONFIG_DIR"] = str(sp.slot_dir("Opus"))
+        alive.add("7009")
+        claude_pool.claim_session(7009, model="claude-fable-5-1")
+        del os.environ["CLAUDE_CONFIG_DIR"]
+        switched = sp.tend(claude_pool.PREEMPT_PCT)
+        check("Opus 자리 창의 Fable 이 A 에서 100% 면 Opus 자리를 B(98%) 로 옮긴다",
+              sp.slot_current(st.load_state(), "Opus") == "B", (switched, sp.slot_current(st.load_state(), "Opus")))
+        again = sp.tend(claude_pool.PREEMPT_PCT)
+        check("B 가 98% 여도 100% 전엔 다시 안 옮긴다", sp.slot_current(st.load_state(), "Opus") == "B", again)
+        alive.discard("7009")
+        claude_pool.release_session(7009)
         alive.add("7001")
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,

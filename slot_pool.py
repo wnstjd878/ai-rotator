@@ -595,7 +595,16 @@ def _full_now(bucket: str, label: str, forced: bool = False, state: dict | None 
     return bool(state) and seen_full(state, label, bucket)
 
 
-def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
+def _hit_full_now(state: dict, bucket: str, label: str, names) -> bool:
+    """자리 계정이 `names` 칸 중 하나라도 **실제로** 100% 인가. 읽기는 자리 저장본으로(2분 캐시),
+    못 읽으면 마지막으로 읽은 기록(seen_full)으로 본다. 그것도 없으면 거짓(모르면 안 움직인다)."""
+    u = _read_usage(bucket, label)
+    if u:
+        return any(usage_check.which_limit(u, threshold=100.0, bucket=n) for n in names)
+    return any(seen_full(state, label, n) for n in names)
+
+
+def _last_resort(state: dict, bucket: str, cur: str, need=None, sort_by: str | None = None) -> str | None:
     """지금 계정이 그 칸에서 100% 인데 97% 기준으로는 갈 곳이 없을 때: 100% 미만인 계정 중 가장 여유 있는 곳.
 
     2026-09-23 실사고: Fable 자리 A 가 100%, B·C·D 는 97~98% 라 미리 넘김 기준(97)에 걸려 전부 막힌
@@ -603,7 +612,10 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
     기록은 믿지 않고 실제로 읽는다. 옮겨 간 계정이 97~99% 여도 100% 가 되기 전까지는 다시 안 옮기므로
     (부르는 쪽이 _full_now 로 거른다) 왕복은 없다. 채울 칸(`need`, 어디서도 못 쓰는 칸은 이미 빠짐)이
     전부 100% 미만인 계정만 고른다. 옮긴 라벨 또는 None. 전환은 여기서 한다.
+    `sort_by`: 자리 칸이 아니라 이 자리 창들이 쓰는 다른 칸(예: Opus 자리에서 /model 로 고른 Fable)이
+    100% 라 부를 때 그 칸. 그 칸이 가장 여유 있는 계정을 고른다.
     """
+    hit_name = sort_by or bucket
     box = _slots(state).setdefault(bucket, {})
     if time.time() - float(box.get("last_resort_at") or 0) < LAST_RESORT_GAP:
         return None
@@ -621,7 +633,7 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
         # 이 자리 창들이 쓰는 다른 칸도 100% 미만이어야 한다. 아니면 그 창을 막아 다음 회차가 되밀어 왕복한다
         if any(usage_check.which_limit(u, threshold=100.0, bucket=n) for n in (need or (bucket,))):
             continue
-        pct = usage_check.scoped_pct(u, bucket)
+        pct = usage_check.scoped_pct(u, hit_name)
         cands.append((pct if pct is not None else 0.0, l))
     if not cands:
         box["last_resort_at"] = time.time()
@@ -629,7 +641,7 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
     order = st.priority_order(state, [c[1] for c in cands])
     cands.sort(key=lambda c: (c[0], order.index(c[1]) if c[1] in order else 99))
     pct, nxt = cands[0]
-    if not switch(state, bucket, nxt, f"{bucket} 칸 100% 소진, 마지막 수단(남은 {100 - pct:.0f}%)"):
+    if not switch(state, bucket, nxt, f"{hit_name} 칸 100% 소진, 마지막 수단(남은 {100 - pct:.0f}%)"):
         _slots(state).setdefault(bucket, {})["last_resort_at"] = time.time()
         return None
     # 옮긴 뒤에 막힌 기록(97% 에서 적힌 것)을 지운다. 안 지우면 다음 회차에 조회가 429 일 때
@@ -641,7 +653,7 @@ def _last_resort(state: dict, bucket: str, cur: str, need=None) -> str | None:
     blocked = dict(state.get("blocked") or {})
     blocked.pop(nxt, None)
     state["blocked"] = blocked
-    log(f"자리 {bucket}: '{cur}' 의 {bucket} 칸이 100% 라 97% 기준을 넘은 계정 중 가장 여유 있는 "
+    log(f"자리 {bucket}: '{cur}' 의 {hit_name} 칸이 100% 라 97% 기준을 넘은 계정 중 가장 여유 있는 "
         f"'{nxt}'(사용 {pct:.0f}%) 로 갑니다")
     return nxt
 
@@ -726,6 +738,15 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                 entry_hit = (forced or judge in bad) and judge in need
                 entry_full = bool(forced or judge in bad)
             hit = [n for n in need if n in bad]
+            if not forced and not hit and not own_hit:
+                # 기록상 어디서도 못 쓰는 칸(need 에서 빠짐)이라도 이 자리 창이 그 칸을 쓰고 있고 자리 계정에서
+                # 실제로 100% 면 97~99% 계정으로 옮긴다. 기록은 창 지키기가 97% 에서 남긴 것이라 남은 몫이 있을 수 있다
+                # (2026-10-28: Opus 자리 창에서 Fable 을 고르자 "You've reached your Fable limit" 만 되풀이).
+                dead_hit = [n for n in wanted if n != bucket and n in bad and n not in need]
+                if dead_hit and _hit_full_now(state, bucket, cur, dead_hit):
+                    got = _last_resort(state, bucket, cur, tuple(need) + tuple(dead_hit), sort_by=dead_hit[0])
+                    if got:
+                        cur, switched = got, True
             if not forced and not hit:
                 break
             nxt = _pick_or_revive(state, bucket, cur, threshold, need, skip) if need else None
@@ -743,6 +764,15 @@ def ensure(bucket: str, threshold: float = 100.0, force_next: bool = False,
                     if entry_full and judge == bucket:
                         own_switched = True
                     own_dead = False
+                    break   # 옮긴 계정은 97~99% 일 수 있다. 다시 재면 도로 "바닥" 으로 본다
+            if nxt is None and not own_hit and hit and _hit_full_now(state, bucket, cur, hit):
+                # 자리 칸은 멀쩡한데 이 자리 창이 /model 로 고른 다른 칸(Fable 등)이 실제로 100% 다. 옛 코드는
+                # 마지막 수단을 자리 칸에만 써서, Opus 자리 창에서 Fable 을 고르면 100% 계정에 눌러앉아
+                # "You've reached your Fable limit" 만 되풀이했다(2026-10-28 사용자 지적). 97~99% 계정이라도 옮긴다.
+                full = [n for n in hit if _hit_full_now(state, bucket, cur, (n,))]
+                got = _last_resort(state, bucket, cur, need, sort_by=full[0] if full else hit[0])
+                if got:
+                    cur, switched = got, True
                     break   # 옮긴 계정은 97~99% 일 수 있다. 다시 재면 도로 "바닥" 으로 본다
             if nxt is None:
                 st.save_state(state)
