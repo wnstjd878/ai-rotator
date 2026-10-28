@@ -15,7 +15,7 @@
       python claude_pool.py --sweep           낡은 계정 막힘 걷어내기(주기 작업용, 30분 간격 제한)
       python claude_pool.py --tend            떠 있는 창의 칸이 바닥났으면 갈아끼우기(주기 작업용)
       python claude_pool.py --claim <번호>     그 프로세스가 쓰는 창이 이 모델 칸을 잡았다고 표시
-      python claude_pool.py --launch-model    cc 가 켤 모델(마지막으로 고른 모델, Fable 이 계정 전부 바닥이면 opus[1m])
+      python claude_pool.py --launch-model    cc 가 켤 모델(마지막으로 고른 모델, Fable 이 계정 전부 100% 면 opus[1m])
       python claude_pool.py --remember-model --model <이름>   사람이 cc 에 직접 준 모델을 기억
       python claude_pool.py --unclaim <번호>   창이 닫혔다고 표시(프로세스가 죽으면 자동 정리)
       python claude_pool.py -- -p "안녕"       claude 를 순환 보호 아래서 실행
@@ -615,7 +615,10 @@ def launch_model() -> str | None:
     """cc 가 켤 모델. 기억한 게 없으면 None(그러면 cc 는 예전처럼 인자 없이 켠다).
 
     Fable 을 기억했는데 Fable 이 이 컴퓨터의 계정 전부에서 막혀 있으면 opus[1m] 로 켠다.
-    그대로 Fable 로 켜면 첫 질문부터 한도 문구가 뜬다. 판단은 기록만 본다(조회 없음 — 켜기를 늦추지 않게).
+    그대로 Fable 로 켜면 첫 질문부터 한도 문구가 뜬다. 먼저 기록만 보고(조회 없음 — 켜기를 늦추지 않게),
+    기록상 전부 막혔을 때만 실제로 읽어 본다(_left_below_full). 막힘 기록은 창 지키기가 97% 에서 남기므로
+    계정마다 2~3% 가 남아 있어도 전부 막힌 것으로 보였다(2026-10-28 사용자 지적: 다섯 계정 남은 몫을 버림).
+    100% 미만인 계정이 하나라도 있으면 Fable 로 켜고, 자리 고르기(--slot-prepare, 문턱 100)가 그 계정에 앉힌다.
     이렇게 켠 창은 기억을 바꾸지 않는다(claim_session 의 launch 갈래). 그래서 Fable 이 풀리면
     다음 cc 는 다시 Fable 로 켜진다.
     """
@@ -624,12 +627,60 @@ def launch_model() -> str | None:
         return None
     if usage_check is not None and usage_check.bucket_for_model(alias) == "Fable":
         try:
-            if "Fable" in _dead_everywhere(st.load_state(), "Fable"):
+            if "Fable" in _dead_everywhere(st.load_state(), "Fable") and not _left_below_full("Fable"):
                 log(f"켜기 모델: Fable 이 계정 전부 막혀 {LAUNCH_FALLBACK_MODEL} 로 켠다")
                 return LAUNCH_FALLBACK_MODEL
         except Exception:
             pass
     return alias
+
+
+LAUNCH_PROBE_GAP = 600   # 켜기 전 실제 조회가 빈손이었으면 이만큼(초) 다시 안 읽는다(429 방지, 켜기 지연 방지)
+
+
+def _left_below_full(bucket: str) -> bool:
+    """기록상 그 칸이 계정 전부 막혔을 때 실제로 읽어 본다. 그 칸·주간·세션이 전부 100% 미만인 계정이 있으면 참.
+
+    97% 에서 남긴 막힘 기록은 "거의 다 씀" 이지 "못 씀" 이 아니다. 실제 거절 기준(100%)으로 다시 본다.
+    못 읽은 계정(429 등)은 없는 셈 친다(모르면 Fable 로 켜지 않는다 — 켜자마자 거절받는 쪽이 더 나쁘다).
+    빈손이면 LAUNCH_PROBE_GAP 동안 다시 안 읽는다. 자리 저장본이 있으면 그걸로, 없으면 공용 저장본으로 읽는다.
+    """
+    state = st.load_state()
+    gaps = state.get("launch_probe_at")
+    gaps = dict(gaps) if isinstance(gaps, dict) else {}
+    if time.time() - float(gaps.get(bucket) or 0) < LAUNCH_PROBE_GAP:
+        return False
+    slotted = slot_pool.enabled() and bool(slot_pool.stored_labels(bucket))
+    labels = slot_pool.stored_labels(bucket) if slotted else st.usable_labels()
+    now = time.time()
+    seen, found = [], None
+    for l in labels:
+        if st.is_blocked(state, label=l, now=now):
+            continue
+        if slotted:
+            u = slot_pool._read_usage(bucket, l)
+        else:
+            u = usage_check.get_usage_for(BASE / "creds" / f"{l}.json", is_current=(l == state.get("current")))
+        if not u:
+            continue
+        seen.append((l, u))
+        if not usage_check.which_limit(u, threshold=100.0, bucket=bucket):
+            found = (l, usage_check.scoped_pct(u, bucket))
+            break
+    with st.with_lock():
+        state = st.load_state()
+        for l, u in seen:
+            st.note_usage(state, l, u)
+        if found is None:
+            gaps[bucket] = time.time()
+            state["launch_probe_at"] = gaps
+        st.save_state(state)
+    if found is None:
+        return False
+    l, pct = found
+    log(f"켜기 모델: {bucket} 막힘 기록은 계정 전부지만 '{l}' 이 실제로 "
+        f"{pct if pct is not None else 0:.0f}% 라 {bucket} 로 켠다")
+    return True
 
 
 ENSURE_SWITCHED = 3   # ensure_usable 종료코드: 갈아탔다(0 은 그대로, 2 는 갈아탈 데 없음)
