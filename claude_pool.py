@@ -674,6 +674,15 @@ def _left_below_full(bucket: str) -> bool:
         if found is None:
             gaps[bucket] = time.time()
             state["launch_probe_at"] = gaps
+        else:
+            # 켜기 직전 계정 고르기(--slot-prepare / --ensure)는 지금 계정이 100% 면 마지막 수단으로 이 계정을
+            # 찾아간다. 그런데 마지막 수단이 10분 안에 빈손이었으면 다시 안 읽어서 100% 계정에 그대로 앉는다
+            # (코덱스 검수 2026-10-28). 방금 실제로 100% 미만을 읽었으니 그 대기를 지운다.
+            lr = state.get("last_resort_at")
+            if isinstance(lr, dict) and bucket in lr:
+                state["last_resort_at"] = {k: v for k, v in lr.items() if k != bucket}
+            if slotted:
+                slot_pool._slots(state).setdefault(bucket, {}).pop("last_resort_at", None)
         st.save_state(state)
     if found is None:
         return False

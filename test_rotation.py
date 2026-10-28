@@ -4826,6 +4826,7 @@ def case_launch_probe(tmp):
 
     blk = {x: {"Fable": now + 48 * 3600} for x in ("A", "B", "C")}
     real_get, real_status = uc.get_usage_for, uc.last_status
+    real_get0 = uc.get_usage
     real_remembered = claude_pool.remembered_model
     calls = []
 
@@ -4868,8 +4869,29 @@ def case_launch_probe(tmp):
         uc.get_usage_for = lambda path, **kw: calls.append(Path(path).stem) or None
         got = claude_pool.launch_model()
         check("막힘 기록이 없으면 조회 없이 fable", got == "fable" and calls == [], (got, calls))
+        # 켠 뒤 계정 고르기까지: 마지막 수단이 10분 안에 빈손이었어도 100% 인 A 에 앉지 않는다(코덱스 검수)
+        table = {"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)}
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B", "C"], "A")
+        s = st.load_state()
+        s["scoped_blocked"] = dict(blk)
+        s["last_resort_at"] = {"Fable": time.time()}
+        s["tend_revive_at"] = time.time()   # 낡은 막힘 되살리기도 30분 대기 중(그쪽 길로 빠지지 않게)
+        s["reclaim_at"] = None
+        st.save_state(s)
+        install(Fake({x: (0, OK_OUT, "") for x in ("A", "B", "C")}))
+        claude_pool.usage_check = uc
+        uc.get_usage_for = lambda path, **kw: table.get(Path(path).stem)
+        uc.get_usage = lambda path: table.get(Path(path).stem)
+        got = claude_pool.launch_model()
+        with contextlib.redirect_stdout(io.StringIO()):
+            claude_pool.ensure_usable(model="claude-fable-5-1")
+        cur = st.load_state().get("current")
+        check("fable 로 켠 뒤 100% 인 A 를 떠나 100% 미만 계정에 앉는다", got == "fable" and cur in ("B", "C"), (got, cur))
     finally:
         uc.get_usage_for, uc.last_status = real_get, real_status
+        uc.get_usage = real_get0
         claude_pool.usage_check = None
         claude_pool.remembered_model = real_remembered
 
