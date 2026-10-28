@@ -2794,7 +2794,7 @@ def main():
                      case_usage_cache_backoff, case_nudge_stalled,
                      case_window_limit_from_screen, case_slot_pool, case_slot_fresh_switch,
                      case_last_resort_shared, case_revive_clears_shared,
-                     case_fresh_before_install,
+                     case_fresh_before_install, case_launch_probe,
                      case_env_token_inject, case_env_token_dead):
             with tempfile.TemporaryDirectory() as tmp:
                 case(tmp)
@@ -4807,6 +4807,68 @@ def case_fresh_before_install(tmp):
     finally:
         (sw.LIVE, sw.CREDS_DIR, sw.read_keychain_value, cr.refresh_file, cm.LIVE, cm.LOG,
          sw.switch_keychain, sw.PENDING, sw.keychain_account, cm.time.sleep, sys.platform) = real
+
+
+def case_launch_probe(tmp):
+    """[63] 켤 모델: Fable 막힘 기록이 계정 전부여도 실제로 100% 미만인 계정이 있으면 Fable 로 켠다 (2026-10-28).
+
+    창 지키기가 97% 에서 막힘을 적어 다섯 계정에 2~3% 씩 남은 채로 새 창이 opus 로 켜졌다.
+    """
+    print()
+    print("[63] 켤 모델: 97% 막힘 기록이어도 100% 미만이면 Fable")
+    import usage_check as uc
+
+    now = time.time()
+
+    def fab(pct):
+        return {"weekly_pct": 50.0, "session_pct": 5.0, "weekly_reset": now + 48 * 3600,
+                "session_reset": now + 3600, "scoped": {"Fable": {"pct": pct, "reset": now + 48 * 3600}}}
+
+    blk = {x: {"Fable": now + 48 * 3600} for x in ("A", "B", "C")}
+    real_get, real_status = uc.get_usage, uc.last_status
+    real_remembered = claude_pool.remembered_model
+    calls = []
+
+    def run(table, fresh=True):
+        if fresh:
+            if st.STATE_FILE.exists():
+                st.STATE_FILE.unlink()
+            setup(tmp, ["A", "B", "C"], "A")
+            s = st.load_state()
+            s["scoped_blocked"] = dict(blk)
+            st.save_state(s)
+        calls.clear()
+        uc.get_usage = lambda path: calls.append(Path(path).stem) or table.get(Path(path).stem)
+        return claude_pool.launch_model()
+
+    claude_pool.usage_check = uc
+    uc.last_status = None
+    claude_pool.remembered_model = lambda: "fable"
+    try:
+        got = run({"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)})
+        check("A 100%, B 98%, C 97%(전부 막힘 기록) → fable", got == "fable", got)
+        got = run({"A": fab(100.0), "B": fab(100.0), "C": fab(100.0)})
+        check("전부 100% → opus[1m]", got == claude_pool.LAUNCH_FALLBACK_MODEL, got)
+        got = run({"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)}, fresh=False)
+        check("빈손 직후 10분 안엔 다시 안 읽는다", got == claude_pool.LAUNCH_FALLBACK_MODEL and calls == [],
+              (got, calls))
+        got = run({"A": None, "B": None, "C": None})
+        check("하나도 못 읽으면(429) opus[1m]", got == claude_pool.LAUNCH_FALLBACK_MODEL, got)
+        w = fab(50.0)
+        w["weekly_pct"] = 100.0
+        got = run({"A": fab(100.0), "B": w, "C": fab(100.0)})
+        check("Fable 칸이 남아도 주간 100% 면 못 쓴다 → opus[1m]", got == claude_pool.LAUNCH_FALLBACK_MODEL, got)
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B", "C"], "A")
+        calls.clear()
+        uc.get_usage = lambda path: calls.append(Path(path).stem) or None
+        got = claude_pool.launch_model()
+        check("막힘 기록이 없으면 조회 없이 fable", got == "fable" and calls == [], (got, calls))
+    finally:
+        uc.get_usage, uc.last_status = real_get, real_status
+        claude_pool.usage_check = None
+        claude_pool.remembered_model = real_remembered
 
 
 if __name__ == "__main__":
