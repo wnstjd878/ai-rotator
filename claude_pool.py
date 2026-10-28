@@ -643,36 +643,37 @@ def _left_below_full(bucket: str) -> bool:
 
     97% 에서 남긴 막힘 기록은 "거의 다 씀" 이지 "못 씀" 이 아니다. 실제 거절 기준(100%)으로 다시 본다.
     찾으면 그 계정의 막힘 기록을 풀어 켜기 직전 계정 고르기가 그 계정을 고를 수 있게 한다.
-    못 읽은 계정(429 등)은 없는 셈 친다(모르면 Fable 로 켜지 않는다 — 켜자마자 거절받는 쪽이 더 나쁘다).
-    빈손이면 LAUNCH_PROBE_GAP 동안 다시 안 읽는다. 자리 저장본이 있으면 그걸로, 없으면 공용 저장본으로 읽는다.
+    못 읽은 계정(429 등)과 그 칸 사용률이 응답에 없는 계정은 없는 셈 친다(모르면 Fable 로 켜지 않는다 —
+    켜자마자 거절받는 쪽이 더 나쁘다). 빈손이면 LAUNCH_PROBE_GAP 동안 다시 안 읽는다.
+    자리 저장본이 있으면 그걸로, 없으면 공용 저장본으로 읽는다.
+    조회는 상태 잠금 안에서 한다. 잠금 밖에서 "지금 계정" 을 판단하면 그사이 다른 쪽이 그 계정으로 갈아탄 뒤
+    우리가 그 자격을 재발급해 떠 있는 창을 끊을 수 있다(코덱스 검수 2026-10-28, ensure_usable 과 같은 규율).
     """
-    state = st.load_state()
-    gaps = state.get("launch_probe_at")
-    gaps = dict(gaps) if isinstance(gaps, dict) else {}
-    if time.time() - float(gaps.get(bucket) or 0) < LAUNCH_PROBE_GAP:
+    if time.time() - float((st.load_state().get("launch_probe_at") or {}).get(bucket) or 0) < LAUNCH_PROBE_GAP:
         return False
-    slotted = slot_pool.enabled() and bool(slot_pool.stored_labels(bucket))
-    labels = slot_pool.stored_labels(bucket) if slotted else st.usable_labels()
-    now = time.time()
-    seen, found = [], None
-    for l in labels:
-        # 계정 전체 막힘도 거르지 않는다. 창 지키기는 주간·세션 97% 에서도 계정 전체를 막아서(코덱스 검수 2026-10-28)
-        # 거르면 98% 계정의 남은 몫을 또 버린다. 읽기가 되면 열쇠는 살아 있다는 뜻이라 100% 기준으로만 본다.
-        if slotted:
-            u = slot_pool._read_usage(bucket, l)
-        else:
-            u = usage_check.get_usage_for(BASE / "creds" / f"{l}.json", is_current=(l == state.get("current")))
-        if not u:
-            continue
-        seen.append((l, u))
-        if not usage_check.which_limit(u, threshold=100.0, bucket=bucket):
-            found = (l, usage_check.scoped_pct(u, bucket))
-            break
+    found = None
     with st.with_lock():
         state = st.load_state()
-        for l, u in seen:
+        slotted = slot_pool.enabled() and bool(slot_pool.stored_labels(bucket))
+        labels = slot_pool.stored_labels(bucket) if slotted else st.usable_labels()
+        for l in labels:
+            # 계정 전체 막힘도 거르지 않는다. 창 지키기는 주간·세션 97% 에서도 계정 전체를 막아서(코덱스 검수)
+            # 거르면 98% 계정의 남은 몫을 또 버린다. 읽기가 되면 열쇠는 살아 있다는 뜻이라 100% 기준으로만 본다.
+            if slotted:
+                u = slot_pool._read_usage(bucket, l)
+            else:
+                u = usage_check.get_usage_for(BASE / "creds" / f"{l}.json", is_current=(l == state.get("current")))
+            if not u:
+                continue
             st.note_usage(state, l, u)
+            pct = usage_check.scoped_pct(u, bucket)
+            if pct is None or usage_check.which_limit(u, threshold=100.0, bucket=bucket):
+                continue
+            found = (l, pct)
+            break
         if found is None:
+            gaps = state.get("launch_probe_at")
+            gaps = dict(gaps) if isinstance(gaps, dict) else {}
             gaps[bucket] = time.time()
             state["launch_probe_at"] = gaps
         else:

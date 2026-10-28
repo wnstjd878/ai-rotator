@@ -4919,6 +4919,12 @@ def case_launch_probe(tmp):
         s = st.load_state()
         check("주간 98% 로 계정째 막힌 B 도 읽어 fable, B 막힘은 풀린다",
               got == "fable" and not st.is_blocked(s, "B"), (got, s.get("blocked")))
+        # 응답에 Fable 칸이 빠졌으면(주간·세션만) 남았다고 보지 않고 막힘도 안 푼다(코덱스 검수)
+        nofab = {k: v for k, v in fab(50.0).items() if k != "scoped"}
+        got = run({"A": fab(100.0), "B": nofab, "C": fab(100.0)})
+        s = st.load_state()
+        check("Fable 칸이 없는 응답은 남은 것으로 안 본다 → opus[1m], B 막힘 유지",
+              got == claude_pool.LAUNCH_FALLBACK_MODEL and st.is_scoped_blocked(s, "B", "Fable"), got)
         if st.STATE_FILE.exists():
             st.STATE_FILE.unlink()
         setup(tmp, ["A", "B", "C"], "A")
