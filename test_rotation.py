@@ -4479,8 +4479,27 @@ def case_slot_pool(tmp):
         finally:
             claude_pool.remembered_model = real_rm
         rc, _ = sp.prepare("Fable")
-        check("켤 모델 fable, 자리는 100% 인 A 를 떠나 C(97%) 로",
-              got == "fable" and sp.slot_current(st.load_state(), "Fable") == "C",
+        check("켤 모델 fable, 자리는 100% 인 A 를 떠나 100% 미만 계정으로",
+              got == "fable" and sp.slot_current(st.load_state(), "Fable") in ("B", "C"),
+              (got, sp.slot_current(st.load_state(), "Fable")))
+        # 지금 계정 A 를 못 읽고(429) 기록도 없을 때: 찾은 B 의 막힘이 풀려 있어야 B 로 간다(코덱스 검수 재현)
+        seat_lr("A", {"A": None, "B": fab(98.0), "C": fab(100.0)},
+                {x: {"Fable": now + 48 * 3600} for x in ("A", "B", "C")})
+        with st.with_lock():
+            s2 = st.load_state()
+            s2["usage_seen"] = {}
+            box = sp._slots(s2).setdefault("Fable", {})
+            box["last_resort_at"] = box["revive_at"] = time.time()
+            s2.pop("launch_probe_at", None)
+            st.save_state(s2)
+        claude_pool.remembered_model = lambda: "fable"
+        try:
+            got = claude_pool.launch_model()
+        finally:
+            claude_pool.remembered_model = real_rm
+        sp.prepare("Fable")
+        check("A 를 못 읽어도 실제로 98% 인 B 로 간다",
+              got == "fable" and sp.slot_current(st.load_state(), "Fable") == "B",
               (got, sp.slot_current(st.load_state(), "Fable")))
         alive.add("7001")
     finally:
@@ -4883,6 +4902,23 @@ def case_launch_probe(tmp):
         w["weekly_pct"] = 100.0
         got = run({"A": fab(100.0), "B": w, "C": fab(100.0)})
         check("Fable 칸이 남아도 주간 100% 면 못 쓴다 → opus[1m]", got == claude_pool.LAUNCH_FALLBACK_MODEL, got)
+        # 창 지키기가 주간 98% 로 계정 전체를 막은 B(Fable 칸은 50%) 도 실제로 읽어 본다(코덱스 검수)
+        w = fab(50.0)
+        w["weekly_pct"] = 98.0
+        if st.STATE_FILE.exists():
+            st.STATE_FILE.unlink()
+        setup(tmp, ["A", "B", "C"], "A")
+        s = st.load_state()
+        s["scoped_blocked"] = {"A": {"Fable": now + 48 * 3600}, "C": {"Fable": now + 48 * 3600}}
+        s["blocked"] = {"B": now + 48 * 3600}
+        st.save_state(s)
+        claude_pool.usage_check = uc
+        table = {"A": fab(100.0), "B": w, "C": fab(100.0)}
+        uc.get_usage_for = lambda path, **kw: table.get(Path(path).stem)
+        got = claude_pool.launch_model()
+        s = st.load_state()
+        check("주간 98% 로 계정째 막힌 B 도 읽어 fable, B 막힘은 풀린다",
+              got == "fable" and not st.is_blocked(s, "B"), (got, s.get("blocked")))
         if st.STATE_FILE.exists():
             st.STATE_FILE.unlink()
         setup(tmp, ["A", "B", "C"], "A")
