@@ -4837,6 +4837,7 @@ def case_launch_probe(tmp):
             s = st.load_state()
             s["scoped_blocked"] = dict(blk)
             st.save_state(s)
+        claude_pool.usage_check = uc   # setup 이 None 으로 돌려놓는다
         calls.clear()
         # 지금 계정(A)은 진짜 자격 파일로 다시 읽는 갈래가 있어 get_usage 가 아니라 get_usage_for 를 바꾼다
         uc.get_usage_for = lambda path, **kw: calls.append(Path(path).stem) or table.get(Path(path).stem)
@@ -4862,6 +4863,7 @@ def case_launch_probe(tmp):
         if st.STATE_FILE.exists():
             st.STATE_FILE.unlink()
         setup(tmp, ["A", "B", "C"], "A")
+        claude_pool.usage_check = uc
         calls.clear()
         uc.get_usage_for = lambda path, **kw: calls.append(Path(path).stem) or None
         got = claude_pool.launch_model()
