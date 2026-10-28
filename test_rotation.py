@@ -4461,6 +4461,28 @@ def case_slot_pool(tmp):
         sp.ensure("Fable", threshold=claude_pool.PREEMPT_PCT)
         uc.get_usage = orig_get
         check("빈손 직후엔 다른 계정을 다시 안 읽는다", not ({"B", "C"} & set(reads)), reads)
+        # (22) 켤 모델(2026-10-28 코덱스 검수): 막힘 기록이 전부여도 실제로 100% 미만이면 fable 로 켜고,
+        #      마지막 수단·되살리기가 대기 중이어도 자리 고르기가 100% 인 A 에 눌러앉지 않는다.
+        alive.discard("7001")
+        seat_lr("A", {"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)},
+                {x: {"Fable": now + 48 * 3600} for x in ("A", "B", "C")})
+        with st.with_lock():
+            s2 = st.load_state()
+            box = sp._slots(s2).setdefault("Fable", {})
+            box["last_resort_at"] = box["revive_at"] = time.time()
+            s2.pop("launch_probe_at", None)
+            st.save_state(s2)
+        real_rm = claude_pool.remembered_model
+        claude_pool.remembered_model = lambda: "fable"
+        try:
+            got = claude_pool.launch_model()
+        finally:
+            claude_pool.remembered_model = real_rm
+        rc, _ = sp.prepare("Fable")
+        check("켤 모델 fable, 자리는 100% 인 A 를 떠나 C(97%) 로",
+              got == "fable" and sp.slot_current(st.load_state(), "Fable") == "C",
+              (got, sp.slot_current(st.load_state(), "Fable")))
+        alive.add("7001")
     finally:
         (sp.POOL_ROOT, sp.STORE_ROOT, sp.CLAUDE_HOME, sp.LOG_FILE, uc.get_usage, uc.last_status,
          claude_pool.usage_check, st._pid_alive, sp._has_window) = real
@@ -4869,7 +4891,7 @@ def case_launch_probe(tmp):
         uc.get_usage_for = lambda path, **kw: calls.append(Path(path).stem) or None
         got = claude_pool.launch_model()
         check("막힘 기록이 없으면 조회 없이 fable", got == "fable" and calls == [], (got, calls))
-        # 켠 뒤 계정 고르기까지: 마지막 수단이 10분 안에 빈손이었어도 100% 인 A 에 앉지 않는다(코덱스 검수)
+        # 켠 뒤 계정 고르기까지(공용 계정): 마지막 수단이 10분 안에 빈손이었어도 100% 인 A 에 앉지 않는다
         table = {"A": fab(100.0), "B": fab(98.0), "C": fab(97.0)}
         if st.STATE_FILE.exists():
             st.STATE_FILE.unlink()
