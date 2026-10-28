@@ -642,6 +642,7 @@ def _left_below_full(bucket: str) -> bool:
     """기록상 그 칸이 계정 전부 막혔을 때 실제로 읽어 본다. 그 칸·주간·세션이 전부 100% 미만인 계정이 있으면 참.
 
     97% 에서 남긴 막힘 기록은 "거의 다 씀" 이지 "못 씀" 이 아니다. 실제 거절 기준(100%)으로 다시 본다.
+    찾으면 그 계정의 막힘 기록을 풀어 켜기 직전 계정 고르기가 그 계정을 고를 수 있게 한다.
     못 읽은 계정(429 등)은 없는 셈 친다(모르면 Fable 로 켜지 않는다 — 켜자마자 거절받는 쪽이 더 나쁘다).
     빈손이면 LAUNCH_PROBE_GAP 동안 다시 안 읽는다. 자리 저장본이 있으면 그걸로, 없으면 공용 저장본으로 읽는다.
     """
@@ -655,8 +656,8 @@ def _left_below_full(bucket: str) -> bool:
     now = time.time()
     seen, found = [], None
     for l in labels:
-        if st.is_blocked(state, label=l, now=now):
-            continue
+        # 계정 전체 막힘도 거르지 않는다. 창 지키기는 주간·세션 97% 에서도 계정 전체를 막아서(코덱스 검수 2026-10-28)
+        # 거르면 98% 계정의 남은 몫을 또 버린다. 읽기가 되면 열쇠는 살아 있다는 뜻이라 100% 기준으로만 본다.
         if slotted:
             u = slot_pool._read_usage(bucket, l)
         else:
@@ -675,6 +676,10 @@ def _left_below_full(bucket: str) -> bool:
             gaps[bucket] = time.time()
             state["launch_probe_at"] = gaps
         else:
+            # 찾은 계정의 막힘 기록을 푼다(공유 칠판까지). 안 풀면 지금 계정을 못 읽을 때(429) 자리 고르기가
+            # 기록만 보고 이 계정을 못 골라 막힌 계정에 눌러앉는다(코덱스 검수 재현). slot_pool._revive 와 같은 방식.
+            st.clear_scoped_bucket(state, found[0], bucket)
+            st.clear_account_block(state, found[0])
             # 켜기 직전 계정 고르기(--slot-prepare / --ensure)는 지금 계정이 100% 면 마지막 수단으로 이 계정을
             # 찾아간다. 그런데 마지막 수단이 10분 안에 빈손이었으면 다시 안 읽어서 100% 계정에 그대로 앉는다
             # (코덱스 검수 2026-10-28). 방금 실제로 100% 미만을 읽었으니 그 대기를 지운다.
