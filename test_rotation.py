@@ -4825,7 +4825,7 @@ def case_launch_probe(tmp):
                 "session_reset": now + 3600, "scoped": {"Fable": {"pct": pct, "reset": now + 48 * 3600}}}
 
     blk = {x: {"Fable": now + 48 * 3600} for x in ("A", "B", "C")}
-    real_get, real_status = uc.get_usage, uc.last_status
+    real_get, real_status = uc.get_usage_for, uc.last_status
     real_remembered = claude_pool.remembered_model
     calls = []
 
@@ -4838,7 +4838,8 @@ def case_launch_probe(tmp):
             s["scoped_blocked"] = dict(blk)
             st.save_state(s)
         calls.clear()
-        uc.get_usage = lambda path: calls.append(Path(path).stem) or table.get(Path(path).stem)
+        # 지금 계정(A)은 진짜 자격 파일로 다시 읽는 갈래가 있어 get_usage 가 아니라 get_usage_for 를 바꾼다
+        uc.get_usage_for = lambda path, **kw: calls.append(Path(path).stem) or table.get(Path(path).stem)
         return claude_pool.launch_model()
 
     claude_pool.usage_check = uc
@@ -4862,11 +4863,11 @@ def case_launch_probe(tmp):
             st.STATE_FILE.unlink()
         setup(tmp, ["A", "B", "C"], "A")
         calls.clear()
-        uc.get_usage = lambda path: calls.append(Path(path).stem) or None
+        uc.get_usage_for = lambda path, **kw: calls.append(Path(path).stem) or None
         got = claude_pool.launch_model()
         check("막힘 기록이 없으면 조회 없이 fable", got == "fable" and calls == [], (got, calls))
     finally:
-        uc.get_usage, uc.last_status = real_get, real_status
+        uc.get_usage_for, uc.last_status = real_get, real_status
         claude_pool.usage_check = None
         claude_pool.remembered_model = real_remembered
 
