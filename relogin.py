@@ -803,6 +803,32 @@ def remote(host, label):
     return p.returncode
 
 
+def open_tab_and_wait(label, url, proc):
+    """전용 크롬에 자동화 연결 없이 인증 주소 탭만 열고, claude auth login 이 스스로 끝나기를 기다린다.
+
+    Playwright 를 CDP 로 붙인 채 인증 주소로 가면 claude.ai 가 "브라우저를 확인할 수 없습니다" 로
+    막는다(2026-10-13 A·B, 2026-11-08 AI 오피스 한도 탭에서 다시 겪음). 같은 user-data-dir 로
+    chrome.exe 를 한 번 더 부르면 떠 있는 창에 탭이 열리고 자동화 표시가 없다. 사람이 승인을
+    누르면 claude auth login 이 내 컴퓨터 안 주소로 결과를 받아 끝난다(DONE).
+    돌려주는 값: "DONE"(끝남) / "" (시간 안에 안 끝남) / None(탭을 못 열어 옛 길로 가야 함)
+    """
+    profile = CHROME_DIR / label
+    try:
+        subprocess.Popen([chrome_bin(), f"--user-data-dir={profile}", url],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"[relogin] 전용 크롬에 탭을 못 열었습니다({type(e).__name__}). 자동화 연결로 다시 시도합니다.")
+        return None
+    print(f"[relogin] '{label}' 전용 크롬에 승인 화면을 열었습니다. 그 창에서 승인을 눌러 주세요(최대 {LOGIN_TIMEOUT // 60}분).")
+    deadline = time.time() + LOGIN_TIMEOUT
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return "DONE"
+        time.sleep(1)
+    print("[relogin] 시간 안에 승인이 없었습니다(승인 화면을 닫았거나 다른 계정으로 로그인돼 있을 수 있습니다).")
+    return ""
+
+
 def relogin(label, keep_current=True):
     if label not in labels():
         print(f"[relogin] '{label}' 은 accounts.json 에 없는 라벨입니다. 쓸 수 있는 라벨: {labels()}")
@@ -816,21 +842,23 @@ def relogin(label, keep_current=True):
     port = launch_chrome(label)
     print("[relogin] 로그인 절차를 시작합니다...")
     p, url = start_login()
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
-            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = ctx.new_page()
-            code = approve(page, url, p)
-    except Exception as e:
-        p.kill()
-        print(f"[relogin] 브라우저 단계에서 막혔습니다: {type(e).__name__}: {e}")
-        restore_previous(before, keep)
-        return 1
+    code = open_tab_and_wait(label, url, p)  # 자동화 연결 없이 탭만 열고 사람이 승인하기를 기다린다(2026-11-08)
+    if code is None:  # 탭을 못 열었을 때만 옛 길(Playwright 로 붙어 승인 단추를 누름)
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+                ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+                page = ctx.new_page()
+                code = approve(page, url, p)
+        except Exception as e:
+            p.kill()
+            print(f"[relogin] 브라우저 단계에서 막혔습니다: {type(e).__name__}: {e}")
+            restore_previous(before, keep)
+            return 1
 
     if not code:
         p.kill()
-        print("[relogin] 인증 코드를 못 받았습니다.")
+        print("[relogin] 인증 코드를 못 받았습니다(승인이 없었습니다).")
         restore_previous(before, keep)
         return 1
     if code != "DONE":
