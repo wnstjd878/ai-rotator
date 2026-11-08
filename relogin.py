@@ -27,7 +27,7 @@
 주의: 인증 코드는 자격정보다. 화면 출력·명령 인자·로그에 넣지 않는다(CLAUDE.md 9.1).
       claude auth logout 은 절대 부르지 않는다(그 계정 자격이 서버에서 폐기된다).
 의도적 미구현: 계정 비밀번호 자동 입력. 브라우저 로그인은 사람이 1회만 한다(계정 보호).
-마지막 점검: 2026-07-28
+마지막 점검: 2026-11-08(탭 주소에서 코드 꺼내기)
 """
 
 import json
@@ -803,14 +803,51 @@ def remote(host, label):
     return p.returncode
 
 
+def code_from_url(u):
+    """되돌아온 주소(platform.claude.com/oauth/code/callback?code=…&state=…)에서 코드#상태 를 꺼낸다.
+
+    인증 주소 자체에도 code=true 가 붙어 있고 host 가 같을 수 있어, 경로가 /oauth/code/callback 인
+    것만 본다. 값은 돌려주기만 하고 어디에도 찍지 않는다.
+    """
+    from urllib.parse import unquote, urlparse
+
+    try:
+        pu = urlparse(u)
+    except Exception:
+        return None
+    if pu.netloc.lower() != CALLBACK_HOST or not pu.path.startswith("/oauth/code/callback"):
+        return None
+    m = re.search(r"[?&]code=([^&#\s]+)", u)
+    if not m or m.group(1) in ("true", "false"):
+        return None
+    code = unquote(m.group(1))
+    st = re.search(r"[?&]state=([^&#\s]+)", u)
+    return f"{code}#{unquote(st.group(1))}" if st else code
+
+
+def tab_urls(port):
+    """전용 크롬의 탭 주소 목록. 탭에 붙지 않고 목록만 읽으므로 자동화 표시가 생기지 않는다."""
+    import urllib.request
+
+    try:
+        raw = urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3).read()
+        return [t.get("url") or "" for t in json.loads(raw.decode("utf-8")) if t.get("type") == "page"]
+    except Exception:
+        return []
+
+
 def open_tab_and_wait(label, url, proc):
-    """전용 크롬에 자동화 연결 없이 인증 주소 탭만 열고, claude auth login 이 스스로 끝나기를 기다린다.
+    """전용 크롬에 자동화 연결 없이 인증 주소 탭만 열고, 사람이 승인하면 되돌아온 탭 주소에서 코드를 꺼낸다.
 
     Playwright 를 CDP 로 붙인 채 인증 주소로 가면 claude.ai 가 "브라우저를 확인할 수 없습니다" 로
     막는다(2026-10-13 A·B, 2026-11-08 AI 오피스 한도 탭에서 다시 겪음). 같은 user-data-dir 로
-    chrome.exe 를 한 번 더 부르면 떠 있는 창에 탭이 열리고 자동화 표시가 없다. 사람이 승인을
-    누르면 claude auth login 이 내 컴퓨터 안 주소로 결과를 받아 끝난다(DONE).
-    돌려주는 값: "DONE"(끝남) / "" (시간 안에 안 끝남) / None(탭을 못 열어 옛 길로 가야 함)
+    chrome.exe 를 한 번 더 부르면 떠 있는 창에 탭이 열리고 자동화 표시가 없다.
+    2026-11-08 밤 정정: claude auth login 은 입력 통로가 파이프면 되돌아올 주소를 내 컴퓨터 안이
+    아니라 platform.claude.com/oauth/code/callback 으로 주고, 그 화면에 코드를 보여 준 채 표준입력을
+    기다린다. 그래서 "스스로 끝나기"만 기다리면 사람은 코드 화면에서, 로그인은 입력에서 서로 기다리다
+    15분 뒤 시간 초과가 났다(E 계정에서 사용자가 겪음). 지금은 탭 주소 목록(/json/list)을 1초마다
+    읽어 되돌아온 주소의 코드를 꺼내 돌려주고, finish_common 이 표준입력으로 넘긴다.
+    돌려주는 값: 코드 / "DONE"(로그인이 먼저 끝남) / "" (시간 안에 승인 없음) / None(탭을 못 열어 옛 길)
     """
     profile = CHROME_DIR / label
     try:
@@ -820,10 +857,15 @@ def open_tab_and_wait(label, url, proc):
         print(f"[relogin] 전용 크롬에 탭을 못 열었습니다({type(e).__name__}). 자동화 연결로 다시 시도합니다.")
         return None
     print(f"[relogin] '{label}' 전용 크롬에 승인 화면을 열었습니다. 그 창에서 승인을 눌러 주세요(최대 {LOGIN_TIMEOUT // 60}분).")
+    port = port_for(label)
     deadline = time.time() + LOGIN_TIMEOUT
     while time.time() < deadline:
         if proc.poll() is not None:
             return "DONE"
+        for u in tab_urls(port):
+            code = code_from_url(u)
+            if code:
+                return code
         time.sleep(1)
     print("[relogin] 시간 안에 승인이 없었습니다(승인 화면을 닫았거나 다른 계정으로 로그인돼 있을 수 있습니다).")
     return ""
@@ -839,9 +881,13 @@ def relogin(label, keep_current=True):
 
     before = sa.live_label() if keep_current else None  # 지금 쓰는 계정을 기억해둔다
 
+    import os
+
     port = launch_chrome(label)
     print("[relogin] 로그인 절차를 시작합니다...")
-    p, url = start_login()
+    env = dict(os.environ)
+    env["BROWSER"] = str(BASE / "browser_noop.cmd")   # 기본 브라우저(사용자 크롬)에 승인 탭을 또 띄우지 않는다. 그 탭의 코드는 읽을 수 없어 헷갈리기만 한다(2026-11-08)
+    p, url = start_login(env=env)
     code = open_tab_and_wait(label, url, p)  # 자동화 연결 없이 탭만 열고 사람이 승인하기를 기다린다(2026-11-08)
     if code is None:  # 탭을 못 열었을 때만 옛 길(Playwright 로 붙어 승인 단추를 누름)
         try:
