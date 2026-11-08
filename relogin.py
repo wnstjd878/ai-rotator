@@ -477,6 +477,16 @@ def finish_login(p, code):
     return p.returncode == 0, (out or "")[-400:]
 
 
+def _digest(p):
+    """파일 지문(바뀌었는지만 본다). 없으면 ""."""
+    import hashlib
+
+    try:
+        return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    except Exception:
+        return ""
+
+
 def current_email():
     """지금 꽂힌 자격이 실제로 누구 계정인지.
 
@@ -550,11 +560,13 @@ def finish_common(p, code, label, before):
     그래서 원래 자격을 미리 떠놨다가 저장이 끝나는 즉시 제자리로 돌린다.
     """
     keep = None
+    live_path = Path.home() / ".claude" / ".credentials.json"
+    live_before = _digest(live_path)   # 로그인 뒤 실제로 바뀌었는지 볼 지문(값은 안 찍는다)
     if before:
         try:  # 되돌릴 자격을 미리 확보(파일이 곧 덮어써지므로 지금 떠둔다)
             keep = LIVE_BACKUP
             keep.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(Path.home() / ".claude" / ".credentials.json", keep)
+            shutil.copy2(live_path, keep)
         except Exception:
             keep = None
 
@@ -571,6 +583,12 @@ def finish_common(p, code, label, before):
             restore_previous(before)
             return 1
 
+    if _digest(live_path) == live_before:
+        # 2026-11-08 밤: CLAUDE_CONFIG_DIR 이 새면 로그인은 다른 폴더에 들어가고 이 파일은 그대로다. 그 상태로 저장하면 옛 자격을
+        # "갱신됐다"고 다시 저장하고, 계정 조회까지 안 되면(만료된 접속 열쇠) 라벨 대조도 건너뛰어 완료로 보인다. 여기서 막는다.
+        print("[relogin] 로그인은 끝났다는데 자격 파일(~/.claude/.credentials.json)이 바뀌지 않았습니다. 다른 폴더(CLAUDE_CONFIG_DIR)로 들어갔을 수 있어 저장하지 않습니다.")
+        restore_previous(before, keep)
+        return 1
     email = current_email()
     want = expected_email(label)
     print(f"[relogin] 로그인된 계정: {email or '(못 읽음)'}")
@@ -885,7 +903,10 @@ def relogin(label, keep_current=True):
 
     port = launch_chrome(label)
     print("[relogin] 로그인 절차를 시작합니다...")
-    env = dict(os.environ)
+    # CLAUDE_* 환경 변수를 물려주지 않는다(2026-11-08 밤): AI 오피스가 CLAUDE_CONFIG_DIR=~/.claude-pool/Fable 을 물고 떠 있어서
+    # 본체 로그인이 ~/.claude/.credentials.json 이 아니라 그 자리 파일에 들어갔고, 저장은 안 바뀐 옛 파일을 복사해 "완료"로 끝났다
+    # (E·D·C·A 네 계정, 본체 저장본은 11/24 만료 그대로). 자리 로그인(relogin_slot)은 원래 이렇게 걸러 왔다.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     env["BROWSER"] = str(BASE / "browser_noop.cmd")   # 기본 브라우저(사용자 크롬)에 승인 탭을 또 띄우지 않는다. 그 탭의 코드는 읽을 수 없어 헷갈리기만 한다(2026-11-08)
     p, url = start_login(env=env)
     code = open_tab_and_wait(label, url, p)  # 자동화 연결 없이 탭만 열고 사람이 승인하기를 기다린다(2026-11-08)
