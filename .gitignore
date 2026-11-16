@@ -51,3 +51,4 @@ auto_update_cli.log
 
 # 로그인 흐름 출력(계정 메일이 찍힘)
 _login_*.txt
+_open_*.cmd

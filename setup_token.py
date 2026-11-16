@@ -27,7 +27,8 @@ OUT_DIR = R.BASE / "creds" / "longtoken"
 
 
 def _clean(text):
-    return TOKEN_RE.sub("[열쇠]", text)
+    text = TOKEN_RE.sub("[열쇠]", text)
+    return re.sub(r"[A-Za-z0-9_\-]{30,}", "[긴 문자열 가림]", text)   # 줄이 꺾여 열쇠 조각이 남아도 찍히지 않게
 
 
 def _env():
@@ -118,7 +119,78 @@ def test(label):
     return 0
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]")
+OAT = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{80,}")
+
+
+def issue_pty(label):
+    """자동화 통로(디버그 포트) 없는 평소 크롬으로 승인 창을 띄우는 길(2026-11-16).
+    디버그 포트로 띄운 전용 크롬에서는 claude.ai 가 "브라우저를 확인하지 못했습니다"로 막았다.
+    claude 를 가짜 터미널(winpty)로 띄우면 승인 뒤 내 컴퓨터 주소로 바로 돌아와 코드를 옮길 필요가 없다."""
+    from winpty import PtyProcess
+
+    if label not in R.labels():
+        print("없는 라벨:", label)
+        return 1
+    R.close_chrome(label)
+    opener = R.BASE / f"_open_{label}.cmd"
+    line = '@start "" "{}" --user-data-dir="{}" --no-first-run --new-window "%~1"'.format(R.chrome_bin(), R.CHROME_DIR / label)
+    opener.write_text(line + "\r\n", encoding="utf-8")
+    env = _env()
+    env["BROWSER"] = str(opener)
+    cmd = " ".join('"' + a + '"' if " " in a else a for a in R.claude_cmd("setup-token"))
+    pp = PtyProcess.spawn(cmd, cwd=str(R.BASE), env=env, dimensions=(50, 400))
+    buf, deadline, sent_enter = "", time.time() + R.LOGIN_TIMEOUT, False
+    print(f"'{label}' 크롬에 승인 화면을 띄웁니다. 승인을 눌러 주세요(최대 {R.LOGIN_TIMEOUT // 60}분).", flush=True)
+    while time.time() < deadline:
+        try:
+            chunk = pp.read(4096)
+        except EOFError:
+            break
+        except Exception:
+            time.sleep(0.5)
+            continue
+        if not chunk:
+            time.sleep(0.3)
+            continue
+        buf += chunk
+        flat = ANSI.sub("", buf).replace("\r", "").replace("\n", "")
+        if OAT.search(flat):
+            time.sleep(1.5)
+            try:
+                buf += pp.read(4096)
+            except Exception:
+                pass
+            break
+        if not sent_enter and re.search(r"[Pp]ress Enter", flat):
+            pp.write("\r")
+            sent_enter = True
+    try:
+        pp.terminate(force=True)
+    except Exception:
+        pass
+    text = ANSI.sub("", buf).replace("\r", "")
+    toks = [re.sub(r"Store$", "", t) for t in OAT.findall(text.replace("\n", ""))]   # 줄바꿈을 지우면 뒤 문장 "Store this token" 의 Store 가 붙는다(2026-11-16 실측 401)
+    print("claude 출력(열쇠 가림, 끝부분):")
+    print("\n".join(l.strip() for l in _clean(text).splitlines() if l.strip())[-1200:])
+    if not toks:
+        print("열쇠를 못 받음")
+        return 1
+    tok = toks[-1]
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    f = OUT_DIR / f"{label}.token"
+    f.write_text(tok, encoding="utf-8")
+    meta = {"label": label, "issuedAt": int(time.time()), "sha12": hashlib.sha256(tok.encode()).hexdigest()[:12]}
+    (OUT_DIR / f"{label}.json").write_text(json.dumps(meta), encoding="utf-8")
+    print(f"저장: {f} (길이 {len(tok)}, 지문 {meta['sha12']})")
+    return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--test":
         sys.exit(test(sys.argv[2]))
+    if len(sys.argv) >= 3 and sys.argv[1] == "--pty":
+        sys.exit(issue_pty(sys.argv[2]))
+    if len(sys.argv) >= 3 and sys.argv[1] == "--pty":
+        sys.exit(issue_pty(sys.argv[2]))
     sys.exit(issue(sys.argv[1] if len(sys.argv) > 1 else "E"))
