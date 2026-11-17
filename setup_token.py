@@ -186,11 +186,44 @@ def issue_pty(label):
     return 0
 
 
+def usage_print(tok):
+    """짧은 haiku 호출의 응답 머리에서 주간 사용률·풀림 시각을 읽는다. 1년 토큰은 메일 조회 권한이 없어 이것으로 계정을 가른다(2026-11-16)."""
+    body = json.dumps({"model": "claude-haiku-4-5", "max_tokens": 1, "system": "You are Claude Code, Anthropic's official CLI for Claude.", "messages": [{"role": "user", "content": "hi"}]}).encode()
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
+        "Authorization": "Bearer " + tok, "anthropic-version": "2023-06-01", "anthropic-beta": "oauth-2025-04-20",
+        "content-type": "application/json", "User-Agent": "claude-cli/2.1.0 (external, cli)"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            h = r.headers
+    except urllib.error.HTTPError as e:
+        h = e.headers
+    return (h.get("anthropic-ratelimit-unified-7d-utilization"), h.get("anthropic-ratelimit-unified-7d-reset"))
+
+
+def same_account_check(label):
+    """새 토큰이 다른 라벨 토큰과 주간 사용률·풀림 시각이 같으면 같은 계정으로 보고 멈춘다(A 창이 E 로 로그인돼 E 토큰이 A 로 저장된 사고)."""
+    me = usage_print((OUT_DIR / f"{label}.token").read_text(encoding="utf-8").strip())
+    print(f"'{label}' 주간 사용률 {me[0]} · 풀림 {me[1]}")
+    for f in OUT_DIR.glob("*.token"):
+        other = f.stem
+        if other == label:
+            continue
+        o = usage_print(f.read_text(encoding="utf-8").strip())
+        if me[1] and o == me:
+            print(f"경고: '{other}' 토큰과 사용률·풀림 시각이 같습니다. 승인 창이 '{other}' 계정으로 로그인돼 있었을 수 있습니다.")
+            return 1
+    return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--test":
         sys.exit(test(sys.argv[2]))
+    if len(sys.argv) >= 3 and sys.argv[1] == "--check":
+        sys.exit(same_account_check(sys.argv[2]))
     if len(sys.argv) >= 3 and sys.argv[1] == "--pty":
         sys.exit(issue_pty(sys.argv[2]))
+    if len(sys.argv) >= 3 and sys.argv[1] == "--check":
+        sys.exit(same_account_check(sys.argv[2]))
     if len(sys.argv) >= 3 and sys.argv[1] == "--pty":
         sys.exit(issue_pty(sys.argv[2]))
     sys.exit(issue(sys.argv[1] if len(sys.argv) > 1 else "E"))
