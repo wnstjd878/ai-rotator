@@ -85,6 +85,10 @@ def issue(label):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     f = OUT_DIR / f"{label}.token"
     f.write_text(tok, encoding="utf-8")
+    try:
+        os.chmod(f, 0o600)
+    except OSError:
+        pass
     meta = {"label": label, "issuedAt": int(time.time()), "sha12": hashlib.sha256(tok.encode()).hexdigest()[:12]}
     (OUT_DIR / f"{label}.json").write_text(json.dumps(meta), encoding="utf-8")
     print(f"저장: {f} (길이 {len(tok)}, 종류 {tok[:13]}…가림, 지문 {meta['sha12']})")
@@ -180,6 +184,10 @@ def issue_pty(label):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     f = OUT_DIR / f"{label}.token"
     f.write_text(tok, encoding="utf-8")
+    try:
+        os.chmod(f, 0o600)
+    except OSError:
+        pass
     meta = {"label": label, "issuedAt": int(time.time()), "sha12": hashlib.sha256(tok.encode()).hexdigest()[:12]}
     (OUT_DIR / f"{label}.json").write_text(json.dumps(meta), encoding="utf-8")
     print(f"저장: {f} (길이 {len(tok)}, 지문 {meta['sha12']})")

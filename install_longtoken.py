@@ -99,8 +99,10 @@ def owner_of_live(f, stored, state):
         except Exception:
             pass
         cur = (state.get("slots") or {}).get(f.parent.name, {}).get("current") if f.parent.parent.name == ".claude-pool" else state.get("current")
+        if cur and "--trust-state" in sys.argv:   # 기록은 낡을 수 있어 사람이 확인하고 옵션을 줄 때만 믿는다(코덱스 검수)
+            return str(cur), "순환기 기록(--trust-state)"
         if cur:
-            return str(cur), "순환기 기록"
+            return None, f"대조 안 됨(순환기 기록은 {cur}, 확인 뒤 --trust-state)"
     return None, ("저장본 여러 개와 겹침 " + ",".join(sorted(hit))) if hit else "대조 안 됨"
 
 
@@ -117,8 +119,14 @@ def build(old, tok, issued):
 
 def write(p, obj):
     tmp = Path(str(p) + ".lt-tmp")
-    tmp.write_text(json.dumps(obj), encoding="utf-8")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # 주인만 읽게(맥 umask 022 에서 0644 가 되지 않게, 코덱스 검수)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj))
     os.replace(tmp, p)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
 
 
 def main():

@@ -89,10 +89,12 @@ def cred_email(path=None):
 
     path = path or LIVE
     try:
-        token = json.loads(Path(path).read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+        _obj = json.loads(Path(path).read_text(encoding="utf-8"))
+        token = _obj["claudeAiOauth"]["accessToken"]
     except Exception:
         return None
-    if str(token).startswith("sk-ant-oat01-"):
+    import cred_refresh as _cr
+    if _cr.is_long_lived(_obj):  # 접두사만으로는 못 가른다: 30일 열쇠도 sk-ant-oat01- 로 시작한다(코덱스 검수 2026-11-17)
         # 1년 토큰(2026-11-17)은 메일 조회 권한이 없다. 발급 때 라벨별로 둔 creds/longtoken/<라벨>.token 과 대조해 메일을 찾는다
         try:
             for f in (CREDS_DIR / "longtoken").glob("*.token"):

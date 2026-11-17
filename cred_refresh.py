@@ -232,7 +232,8 @@ def header_usage(token: str, timeout: float = 30):
     wk = num("anthropic-ratelimit-unified-7d-utilization")
     if wk is None:
         return st, None
-    out = {"five_hour": {}, "seven_day": {"utilization": round(wk * 100, 1), "resets_at": iso("anthropic-ratelimit-unified-7d-reset")}, "limits": []}
+    fh = num("anthropic-ratelimit-unified-5h-utilization")   # 5시간 칸이 다시 생기면 같이 읽는다(코덱스 검수)
+    out = {"five_hour": ({"utilization": round(fh * 100, 1), "resets_at": iso("anthropic-ratelimit-unified-5h-reset")} if fh is not None else {}), "seven_day": {"utilization": round(wk * 100, 1), "resets_at": iso("anthropic-ratelimit-unified-7d-reset")}, "limits": []}
     oi = num("anthropic-ratelimit-unified-7d_oi-utilization")
     if oi is not None:
         out["limits"].append({"kind": "weekly_scoped", "percent": round(oi * 100, 1),

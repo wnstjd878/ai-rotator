@@ -221,9 +221,9 @@ def get_usage(cred_path) -> dict | None:
         "Accept": "application/json",
     })
     try:
-        if str(tok).startswith("sk-ant-oat01-"):
+        import cred_refresh
+        if cred_refresh.is_long_lived(d):  # 30일 열쇠도 같은 접두사라 재발급 칸 표시(lt-)로 가른다
             # 1년 토큰(2026-11-17): 사용량 주소는 권한이 없어 403. 짧은 호출의 응답 머리에서 읽는다
-            import cred_refresh
             hst, j = cred_refresh.header_usage(tok, timeout=TIMEOUT)
             if j is None:
                 raise urllib.error.HTTPError(USAGE_URL, hst or 500, "header probe", None, None)
