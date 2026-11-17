@@ -70,8 +70,11 @@ check("저장 내용", json.loads(q.read_text(encoding="utf-8")) == longt)
 import switch_account as sa
 z = Path(d) / "Z.json"
 z.write_text(json.dumps(longt), encoding="utf-8")
+sa._write_owner_only(z, regular, keep_long=True)
+check("자동 되저장은 1년 토큰 저장본을 30일 열쇠로 덮지 않는다", json.loads(z.read_text(encoding="utf-8")) == longt)
 sa._write_owner_only(z, regular)
-check("1년 토큰 저장본을 30일 열쇠로 덮지 않는다", json.loads(z.read_text(encoding="utf-8")) == longt)
+check("일부러 다시 로그인한 것은 바꾼다", json.loads(z.read_text(encoding="utf-8")) == regular)
+z.write_text(json.dumps(longt), encoding="utf-8")
 sa._write_owner_only(z, longt)
 check("1년 토큰끼리는 덮어쓴다", json.loads(z.read_text(encoding="utf-8")) == longt)
 
