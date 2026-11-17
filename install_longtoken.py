@@ -134,6 +134,19 @@ def main():
     if not toks:
         print("creds/longtoken 에 토큰이 없습니다")
         return 1
+    # 바꾸기 전에 토큰 전부를 검사한다: 꼴(접두사·길이)과 실제로 통하는지(코덱스 검수 2026-11-17 4차)
+    import cred_refresh as cr
+    bad = []
+    for lab, (tok, _) in sorted(toks.items()):
+        if not tok.startswith(cr.LONG_PREFIX) or len(tok) < 100:
+            bad.append(f"{lab}(꼴이 이상함, 길이 {len(tok)})")
+            continue
+        stt, u = cr.header_usage(tok)
+        if u is None:
+            bad.append(f"{lab}(호출 거절, 응답 {stt})")
+    if bad:
+        print("멈춤: 토큰 검사 실패 → " + ", ".join(bad) + ". 아무 파일도 바꾸지 않았습니다.")
+        return 1
     stored = stored_files()
     state = load(BASE / "state.json") or {}
     lives = live_files()

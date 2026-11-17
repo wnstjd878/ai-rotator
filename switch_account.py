@@ -225,8 +225,6 @@ def save_back(leaving) -> str:
         return _done("지금 자격을 못 읽어 되저장 안 함")
     if live_fp == _fingerprint(dest):
         return _done(f"'{leaving}' 자격에 변화 없음(되저장 불필요)")
-    if _keeps_long(dest, LIVE):
-        return _done(f"'{leaving}' 저장본이 1년 토큰이라 30일 열쇠로 덮지 않음")
 
     # 기록보다 실측이 우선. 사람이 /login 으로 계정을 바꿔 기록이 낡았을 수 있다.
     actual = live_label()
@@ -250,6 +248,8 @@ def save_back(leaving) -> str:
     # 한 세대 되돌리기용. creds/*.json 목록에 안 섞이도록 하위 폴더에 둔다
     prev_dir = CREDS_DIR / "prev"
     prev_dir.mkdir(exist_ok=True)
+    if _keeps_long(dest, LIVE):   # 실제 주인을 확정한 뒤에 본다(코덱스 검수 2026-11-17 4차)
+        return _done(f"'{leaving}' 저장본이 1년 토큰이라 30일 열쇠로 덮지 않음")
     shutil.copy2(dest, prev_dir / f"{leaving}.json")
     shutil.copy2(LIVE, dest)
     done = f"'{leaving}' 의 갱신된 자격을 되저장했습니다"
@@ -334,17 +334,22 @@ def _keeps_long(dest, src) -> bool:
         return False
 
 
-def _write_owner_only(dest: Path, obj) -> None:
-    """자격을 담는 파일은 만들 때부터 소유자 전용(0600)으로 쓴다."""
-    if _keeps_long(dest, obj):
+def _write_owner_only(dest: Path, obj, keep_long: bool = False) -> bool:
+    """자격을 담는 파일은 만들 때부터 소유자 전용(0600)으로 쓴다. 썼으면 True.
+
+    keep_long: 자동 되저장 경로만 True 로 부른다 — 1년 토큰 저장본을 30일 열쇠로 덮지 않는다.
+    사람이 일부러 다시 로그인한 것(relogin)은 그대로 바꾼다(코덱스 검수 2026-11-17 4차).
+    """
+    if keep_long and _keeps_long(dest, obj):
         print(f"[switch] {Path(dest).name}: 1년 토큰 저장본을 30일 열쇠로 덮지 않음", file=sys.stderr)
-        return
+        return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.parent / ("." + dest.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(obj))
     os.replace(tmp, dest)
+    return True
 
 
 def _owner_of(obj):

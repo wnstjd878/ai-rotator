@@ -295,7 +295,7 @@ def sync_creds(bucket: str, label: str | None) -> str:
         prev.mkdir(parents=True, exist_ok=True)
         if store.exists():
             shutil.copy2(store, prev / store.name)
-        sa._write_owner_only(store, lv)
+        sa._write_owner_only(store, lv, keep_long=True)
         return f"'{label}' 갱신분을 저장본에 되저장"
     _put_live(bucket, sv)
     return f"'{label}' 저장본이 더 새로워 자리에 밀어 넣음"
