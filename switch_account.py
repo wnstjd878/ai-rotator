@@ -92,6 +92,18 @@ def cred_email(path=None):
         token = json.loads(Path(path).read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
     except Exception:
         return None
+    if str(token).startswith("sk-ant-oat01-"):
+        # 1년 토큰(2026-11-17)은 메일 조회 권한이 없다. 발급 때 라벨별로 둔 creds/longtoken/<라벨>.token 과 대조해 메일을 찾는다
+        try:
+            for f in (CREDS_DIR / "longtoken").glob("*.token"):
+                if f.read_text(encoding="utf-8").strip() == token:
+                    accs = json.loads((CREDS_DIR.parent / "accounts.json").read_text(encoding="utf-8"))
+                    for a in accs if isinstance(accs, list) else []:
+                        if isinstance(a, dict) and a.get("label") == f.stem:
+                            return a.get("email")
+        except Exception:
+            pass
+        return None
     req = urllib.request.Request(PROFILE_URL, headers={
         "Authorization": f"Bearer {token}",
         "User-Agent": CLI_UA,

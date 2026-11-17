@@ -221,8 +221,15 @@ def get_usage(cred_path) -> dict | None:
         "Accept": "application/json",
     })
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            j = json.loads(r.read().decode("utf-8"))
+        if str(tok).startswith("sk-ant-oat01-"):
+            # 1년 토큰(2026-11-17): 사용량 주소는 권한이 없어 403. 짧은 호출의 응답 머리에서 읽는다
+            import cred_refresh
+            hst, j = cred_refresh.header_usage(tok, timeout=TIMEOUT)
+            if j is None:
+                raise urllib.error.HTTPError(USAGE_URL, hst or 500, "header probe", None, None)
+        else:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                j = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         last_status = e.code
         last_error = "조회 제한(429). 잠시 뒤 다시" if e.code == 429 else f"HTTP {e.code}"

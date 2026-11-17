@@ -152,6 +152,95 @@ def current_label() -> str | None:
         return None
 
 
+# ---- 1년짜리 토큰(claude setup-token, 2026-11-17) ----
+# 재발급 열쇠가 없는 장기 접근 열쇠다. 자격 파일 꼴은 그대로 두고 accessToken 에 1년 토큰을,
+# refreshToken 에는 계정마다 다른 표시값("lt-"+지문)을 넣는다(지문 대조가 계정을 가르게).
+# 이 파일은 갱신할 것이 없으므로 refresh_file 은 아무것도 보내지 않고 성공으로 돌려준다.
+# 메일 조회(user:profile)·사용량 주소(/api/oauth/usage)는 권한이 없어 403 → header_usage 로 대신 읽는다.
+LONG_PREFIX = "sk-ant-oat01-"
+LONG_RT_PREFIX = "lt-"
+
+
+def is_long_lived(obj) -> bool:
+    """자격 dict(파일 전체 또는 claudeAiOauth 안쪽)가 1년 토큰인가."""
+    o = (obj or {}).get("claudeAiOauth") if isinstance(obj, dict) and "claudeAiOauth" in obj else (obj or {})
+    if not isinstance(o, dict):
+        return False
+    return str(o.get("accessToken") or "").startswith(LONG_PREFIX) and str(o.get("refreshToken") or "").startswith(LONG_RT_PREFIX)
+
+
+_CLI_VER = None
+
+
+def _cli_ua() -> str:
+    """새 모델은 낡은 판 이름표를 거절한다(2.1.0 → 400 claude_code_version_too_old). 설치된 claude 판을 한 번 읽는다."""
+    global _CLI_VER
+    if _CLI_VER is None:
+        _CLI_VER = "2.1.326"
+        try:
+            import re
+            import shutil
+            import subprocess
+            exe = shutil.which("claude") or shutil.which("claude.exe")
+            if exe:
+                out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20).stdout
+                m = re.search(r"(\d+\.\d+\.\d+)", out or "")
+                if m:
+                    _CLI_VER = m.group(1)
+        except Exception:
+            pass
+    return f"claude-cli/{_CLI_VER} (external, cli)"
+
+
+HEADER_PROBE_MODEL = os.environ.get("AIROTATOR_PROBE_MODEL", "claude-fable-5-2")
+
+
+def header_usage(token: str, timeout: float = 30):
+    """1년 토큰의 사용량을 짧은 호출(출력 1토큰)의 응답 머리에서 읽는다.
+
+    (상태번호, /api/oauth/usage 와 같은 꼴의 dict 또는 None) 을 돌려준다. Fable 모델로 불러야
+    Fable 칸(머리 이름 7d_oi)이 같이 온다. 429 여도 머리는 온다.
+    """
+    body = json.dumps({"model": HEADER_PROBE_MODEL, "max_tokens": 1,
+                       "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+                       "messages": [{"role": "user", "content": "."}]}).encode()
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
+        "Authorization": "Bearer " + token, "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20", "content-type": "application/json", "User-Agent": _cli_ua()})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            st, h = r.status, r.headers
+    except urllib.error.HTTPError as e:
+        st, h = e.code, e.headers
+    if st in (401, 403) or h is None:
+        return st, None
+
+    def num(k):
+        try:
+            v = h.get(k)
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def iso(k):
+        v = num(k)
+        if not v:
+            return None
+        import datetime
+        return datetime.datetime.fromtimestamp(v, datetime.timezone.utc).isoformat()
+
+    wk = num("anthropic-ratelimit-unified-7d-utilization")
+    if wk is None:
+        return st, None
+    out = {"five_hour": {}, "seven_day": {"utilization": round(wk * 100, 1), "resets_at": iso("anthropic-ratelimit-unified-7d-reset")}, "limits": []}
+    oi = num("anthropic-ratelimit-unified-7d_oi-utilization")
+    if oi is not None:
+        out["limits"].append({"kind": "weekly_scoped", "percent": round(oi * 100, 1),
+                              "resets_at": iso("anthropic-ratelimit-unified-7d_oi-reset"),
+                              "scope": {"model": {"display_name": "Fable"}}})
+    return (200 if st == 429 else st), out
+
+
 def can_refresh(obj, now: float | None = None) -> bool:
     """이 저장본으로 갱신을 시도할 수 있는가(재발급 열쇠가 있고 아직 안 만료됐는가)."""
     o = (obj or {}).get("claudeAiOauth") or {}
@@ -198,6 +287,8 @@ def refresh_file(cred_path, min_left: float | None = None) -> bool:
     except Exception:
         last_error = "자격 파일 못 읽음"
         return False
+    if isinstance(obj, dict) and is_long_lived(obj):
+        return True  # 1년 토큰: 갱신할 것이 없다(아무것도 보내지 않는다)
     if not isinstance(obj, dict) or not can_refresh(obj):
         last_error = "재발급 열쇠 없음 또는 만료"
         return False
