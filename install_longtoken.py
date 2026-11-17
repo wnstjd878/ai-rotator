@@ -98,6 +98,9 @@ def owner_of_live(f, stored, state):
                     return a.get("label"), "서버 메일 조회"
         except Exception:
             pass
+        cur = (state.get("slots") or {}).get(f.parent.name, {}).get("current") if f.parent.parent.name == ".claude-pool" else state.get("current")
+        if cur:
+            return str(cur), "순환기 기록"
     return None, ("저장본 여러 개와 겹침 " + ",".join(sorted(hit))) if hit else "대조 안 됨"
 
 
