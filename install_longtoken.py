@@ -154,7 +154,10 @@ def main():
         return 0
     bak = CREDS / f"_bak_30d_{time.strftime('%Y%m%d-%H%M%S')}"
     for p, lab, kind in plan:
-        rel = p.relative_to(HOME)
+        try:
+            rel = Path("home") / p.relative_to(HOME)
+        except ValueError:
+            rel = Path("repo") / p.relative_to(BASE)   # 저장소가 홈 밖에 있어도(코덱스 검수)
         dst = bak / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(p, dst)

@@ -31,6 +31,14 @@ def _clean(text):
     return re.sub(r"[A-Za-z0-9_\-]{30,}", "[긴 문자열 가림]", text)   # 줄이 꺾여 열쇠 조각이 남아도 찍히지 않게
 
 
+def _strip_tail(t):
+    """pty 출력은 띄어쓰기가 사라져 뒤 안내 문장("Store this token securely")이 토큰 끝에 붙는다. 끝이 그 문장일 때만 뗀다(코덱스 검수: 토큰 안의 Store 를 자르지 않게)."""
+    for suf in ("Storethistokensecurely", "Store"):
+        if t.endswith(suf):
+            return t[: -len(suf)]
+    return t
+
+
 def _env():
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     env["BROWSER"] = str(R.BASE / "browser_noop.cmd")
@@ -174,7 +182,7 @@ def issue_pty(label):
     except Exception:
         pass
     text = ANSI.sub("", buf).replace("\r", "")
-    toks = [t.split("Store")[0] for t in OAT.findall(text.replace("\n", ""))]   # 줄바꿈을 지우면 뒤 문장 "Store this token" 의 Store 가 붙는다(2026-11-16 실측 401)
+    toks = [_strip_tail(t) for t in OAT.findall(text.replace("\n", ""))]   # 줄바꿈을 지우면 뒤 문장 "Store this token" 의 Store 가 붙는다(2026-11-16 실측 401)
     print("claude 출력(열쇠 가림, 끝부분):")
     print("\n".join(l.strip() for l in _clean(text).splitlines() if l.strip())[-1200:])
     if not toks:

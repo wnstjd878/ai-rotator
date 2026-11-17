@@ -289,7 +289,13 @@ def refresh_file(cred_path, min_left: float | None = None) -> bool:
         last_error = "자격 파일 못 읽음"
         return False
     if isinstance(obj, dict) and is_long_lived(obj):
-        return True  # 1년 토큰: 갱신할 것이 없다(아무것도 보내지 않는다)
+        # 1년 토큰은 갱신할 것이 없다(아무것도 보내지 않는다). 미리 점검(min_left)일 때만 성공으로 본다.
+        # 거절 뒤 강제 갱신(min_left 없음)에서 성공을 돌려주면 같은 토큰으로 다시 부르다 멈춘다 → 갱신 불가로 알려
+        # 다른 계정으로 넘어가게 한다(코덱스 검수 2026-11-17). 문구는 _refresh_why 가 revoked 로 읽는 말을 쓴다.
+        if min_left is not None:
+            return True
+        last_error = "재발급 열쇠 없음 또는 만료(1년 토큰이 거절됨, setup_token.py 로 다시 발급)"
+        return False
     if not isinstance(obj, dict) or not can_refresh(obj):
         last_error = "재발급 열쇠 없음 또는 만료"
         return False

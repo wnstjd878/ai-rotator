@@ -36,10 +36,18 @@ called = []
 orig = cr._post
 cr._post = lambda t: called.append(t) or None
 try:
-    ok = cr.refresh_file(p)
+    ok = cr.refresh_file(p, min_left=600)
+    forced = cr.refresh_file(p)
+    why = cr.last_error
 finally:
     cr._post = orig
-check("1년 토큰은 갱신 요청을 보내지 않고 성공", ok and not called)
+check("1년 토큰 미리 점검은 갱신 요청 없이 성공", ok and not called)
+check("1년 토큰 강제 갱신은 실패로 알려 계정을 넘기게 한다", forced is False and not called)
+import claude_pool as cp
+check("그 실패 사유는 revoked(저장본 죽음)로 읽힌다", cp._refresh_why(why) == "revoked")
+import setup_token as stk
+check("끝에 붙은 안내 문장만 뗀다", stk._strip_tail("sk-ant-oat01-abcStoreXYZStorethistokensecurely") == "sk-ant-oat01-abcStoreXYZ")
+check("토큰 안의 Store 는 자르지 않는다", stk._strip_tail("sk-ant-oat01-abcStoreXYZ") == "sk-ant-oat01-abcStoreXYZ")
 check("1년 토큰 파일은 그대로", json.loads(p.read_text(encoding="utf-8")) == longt)
 
 p.write_text(json.dumps(regular), encoding="utf-8")
