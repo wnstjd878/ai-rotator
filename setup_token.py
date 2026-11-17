@@ -170,7 +170,7 @@ def issue_pty(label):
     except Exception:
         pass
     text = ANSI.sub("", buf).replace("\r", "")
-    toks = [re.sub(r"Store$", "", t) for t in OAT.findall(text.replace("\n", ""))]   # 줄바꿈을 지우면 뒤 문장 "Store this token" 의 Store 가 붙는다(2026-11-16 실측 401)
+    toks = [t.split("Store")[0] for t in OAT.findall(text.replace("\n", ""))]   # 줄바꿈을 지우면 뒤 문장 "Store this token" 의 Store 가 붙는다(2026-11-16 실측 401)
     print("claude 출력(열쇠 가림, 끝부분):")
     print("\n".join(l.strip() for l in _clean(text).splitlines() if l.strip())[-1200:])
     if not toks:
