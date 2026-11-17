@@ -154,6 +154,10 @@ def main():
     for lab, p in stored:
         if lab in toks:
             plan.append((p, lab, "저장본"))
+    if "--add-missing" in sys.argv:   # 이 머신에 저장본이 없던 라벨도 만든다(1년 토큰은 어느 머신에서나 통한다, 2026-11-17 맥 B)
+        have = {lab for lab, p in stored if p.parent == CREDS}
+        for lab in sorted(set(toks) - have):
+            plan.append((CREDS / f"{lab}.json", lab, "새 저장본"))
     for name, f in lives:
         lab, why = owner_of_live(f, stored, state)
         if lab in toks:
@@ -167,6 +171,8 @@ def main():
         return 0
     bak = CREDS / f"_bak_30d_{time.strftime('%Y%m%d-%H%M%S')}"
     for p, lab, kind in plan:
+        if not p.exists():
+            continue
         try:
             rel = Path("home") / p.relative_to(HOME)
         except ValueError:
