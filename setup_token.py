@@ -261,8 +261,8 @@ def verify_owner(label, me):
         tmp.write_text(json.dumps(obj), encoding="utf-8")
         try:
             o = obj.get("claudeAiOauth") or {}
-            if cr._ms(o.get("expiresAt")) and cr._ms(o.get("expiresAt")) < time.time() + 60:
-                cr.refresh_file(tmp)   # 백업 사본만 갱신한다(쓰는 중인 파일이 아님)
+            if not cr._ms(o.get("expiresAt")) or cr._ms(o.get("expiresAt")) < time.time() + 60:
+                continue   # 갱신하지 않는다: 재발급 열쇠가 회전돼 원본 백업이 못 쓰게 된다(코덱스 검수 6차)
             mail = (sa.cred_email(tmp) or "").lower()
             if not mail:
                 continue
@@ -270,11 +270,13 @@ def verify_owner(label, me):
                 return False, f"30일 로그인 메일이 {mail} 로 라벨 메일과 다름"
             import usage_check as uc
             u = uc.get_usage(tmp)
-            rs = (u or {}).get("weekly_reset")
-            if rs and me[1] and abs(float(rs) - float(me[1])) < 120:
-                return True, f"{mail} 의 주간 풀림 시각과 같음"
+            rs, wp = (u or {}).get("weekly_reset"), (u or {}).get("weekly_pct")
+            same_reset = bool(rs and me[1] and abs(float(rs) - float(me[1])) < 120)
+            same_pct = wp is not None and me[0] is not None and abs(float(wp) - float(me[0]) * 100) <= 5
+            if same_reset and same_pct:
+                return True, f"{mail} 의 주간 풀림 시각·사용률과 같음"
             if rs and me[1]:
-                return False, "주간 풀림 시각이 30일 로그인과 다름(다른 계정일 수 있음)"
+                return False, "주간 풀림 시각·사용률이 30일 로그인과 다름(다른 계정일 수 있음)"
         except Exception:
             continue
         finally:
