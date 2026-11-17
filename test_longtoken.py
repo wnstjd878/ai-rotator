@@ -67,5 +67,13 @@ if os.name == "posix":
     check("저장 뒤 권한 0600", (q.stat().st_mode & 0o777) == 0o600)
 check("저장 내용", json.loads(q.read_text(encoding="utf-8")) == longt)
 
+import switch_account as sa
+z = Path(d) / "Z.json"
+z.write_text(json.dumps(longt), encoding="utf-8")
+sa._write_owner_only(z, regular)
+check("1년 토큰 저장본을 30일 열쇠로 덮지 않는다", json.loads(z.read_text(encoding="utf-8")) == longt)
+sa._write_owner_only(z, longt)
+check("1년 토큰끼리는 덮어쓴다", json.loads(z.read_text(encoding="utf-8")) == longt)
+
 print("전부 통과" if not FAIL else f"실패 {FAIL}건")
 sys.exit(1 if FAIL else 0)

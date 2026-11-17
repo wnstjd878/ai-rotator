@@ -287,6 +287,9 @@ def sync_creds(bucket: str, label: str | None) -> str:
         for other in stored_labels(bucket):
             if other != label and sa._obj_fingerprint(_load(store_path(bucket, other))) == sa._obj_fingerprint(lv):
                 return f"자리 자격이 '{label}' 이 아니라 '{other}' 저장본과 같아 되저장 안 함"
+    if sv is not None and lv is not None and sa._keeps_long(store, lv):
+        _put_live(bucket, sv)   # 저장본이 1년 토큰이면 그걸 자리로 밀어 넣는다(30일 열쇠로 되저장하지 않음, 코덱스 검수 2026-11-17)
+        return f"'{label}' 저장본이 1년 토큰이라 자리에 밀어 넣음"
     if sv is None or (lv is not None and sa._issued_at(lv) >= sa._issued_at(sv)):
         prev = store.parent / "prev"
         prev.mkdir(parents=True, exist_ok=True)

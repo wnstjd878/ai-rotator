@@ -225,6 +225,8 @@ def save_back(leaving) -> str:
         return _done("지금 자격을 못 읽어 되저장 안 함")
     if live_fp == _fingerprint(dest):
         return _done(f"'{leaving}' 자격에 변화 없음(되저장 불필요)")
+    if _keeps_long(dest, LIVE):
+        return _done(f"'{leaving}' 저장본이 1년 토큰이라 30일 열쇠로 덮지 않음")
 
     # 기록보다 실측이 우선. 사람이 /login 으로 계정을 바꿔 기록이 낡았을 수 있다.
     actual = live_label()
@@ -321,8 +323,22 @@ def _obj_fingerprint(obj):
     return hashlib.sha256(token.encode("utf-8")).hexdigest() if token else None
 
 
+def _keeps_long(dest, src) -> bool:
+    """dest 가 1년 토큰 저장본인데 src(파일 경로 또는 dict)가 아니면 True — 덮으면 1년 토큰이 사라진다(코덱스 검수 2026-11-17)."""
+    try:
+        import cred_refresh as _cr
+        d = json.loads(Path(dest).read_text(encoding="utf-8")) if Path(dest).exists() else None
+        s = src if isinstance(src, dict) else json.loads(Path(src).read_text(encoding="utf-8"))
+        return bool(d) and _cr.is_long_lived(d) and not _cr.is_long_lived(s)
+    except Exception:
+        return False
+
+
 def _write_owner_only(dest: Path, obj) -> None:
     """자격을 담는 파일은 만들 때부터 소유자 전용(0600)으로 쓴다."""
+    if _keeps_long(dest, obj):
+        print(f"[switch] {Path(dest).name}: 1년 토큰 저장본을 30일 열쇠로 덮지 않음", file=sys.stderr)
+        return
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.parent / ("." + dest.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

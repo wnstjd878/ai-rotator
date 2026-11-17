@@ -190,6 +190,15 @@ def issue_pty(label):
         return 1
     tok = toks[-1]
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    # 저장 전에 다른 라벨 토큰과 대조한다(코덱스 검수 2026-11-17: 승인 창이 다른 계정이면 그 계정 토큰이 이 라벨로 들어감)
+    me = usage_print(tok)
+    for g in OUT_DIR.glob("*.token"):
+        if g.stem != label and me[1] and usage_print(g.read_text(encoding="utf-8").strip()) == me:
+            bad = OUT_DIR / "_wrong"
+            bad.mkdir(exist_ok=True)
+            (bad / f"{label}_same_as_{g.stem}.token").write_text(tok, encoding="utf-8")
+            print(f"멈춤: 새 토큰이 '{g.stem}' 토큰과 사용률·풀림 시각이 같습니다. 승인 창이 '{g.stem}' 계정이었던 것 같습니다. 저장하지 않았습니다.")
+            return 1
     f = OUT_DIR / f"{label}.token"
     f.write_text(tok, encoding="utf-8")
     try:
