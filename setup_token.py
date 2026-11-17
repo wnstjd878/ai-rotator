@@ -270,6 +270,12 @@ def verify_owner(label, me):
                 return False, f"30일 로그인 메일이 {mail} 로 라벨 메일과 다름"
             import usage_check as uc
             u = uc.get_usage(tmp)
+            try:   # 확인용 임시 파일 이름(.verify-<라벨>)이 사용량 기록에 계정처럼 남지 않게 지운다(2026-11-17 한도 탭에 카드로 뜸)
+                cc = uc._cache_load()
+                if any(k.startswith(".verify-") for k in cc):
+                    uc._cache_save({k: v for k, v in cc.items() if not k.startswith(".verify-")})
+            except Exception:
+                pass
             rs, wp = (u or {}).get("weekly_reset"), (u or {}).get("weekly_pct")
             same_reset = bool(rs and me[1] and abs(float(rs) - float(me[1])) < 120)
             same_pct = wp is not None and me[0] is not None and abs(float(wp) - float(me[0]) * 100) <= 5
