@@ -199,6 +199,14 @@ def issue_pty(label):
             (bad / f"{label}_same_as_{g.stem}.token").write_text(tok, encoding="utf-8")
             print(f"멈춤: 새 토큰이 '{g.stem}' 토큰과 사용률·풀림 시각이 같습니다. 승인 창이 '{g.stem}' 계정이었던 것 같습니다. 저장하지 않았습니다.")
             return 1
+    ok, why = verify_owner(label, me)
+    if not ok and "--force-unverified" not in sys.argv:
+        bad = OUT_DIR / "_wrong"
+        bad.mkdir(exist_ok=True)
+        (bad / f"{label}_unverified.token").write_text(tok, encoding="utf-8")
+        print(f"멈춤: '{label}' 계정이 맞는지 확인하지 못했습니다({why}). 저장하지 않았습니다. 승인 창의 계정이 맞았다면 --force-unverified 를 붙여 다시 하세요.")
+        return 1
+    print(f"계정 확인: {why}")
     f = OUT_DIR / f"{label}.token"
     f.write_text(tok, encoding="utf-8")
     try:
@@ -223,6 +231,58 @@ def usage_print(tok):
     except urllib.error.HTTPError as e:
         h = e.headers
     return (h.get("anthropic-ratelimit-unified-7d-utilization"), h.get("anthropic-ratelimit-unified-7d-reset"))
+
+
+def verify_owner(label, me):
+    """새 토큰이 정말 그 라벨 계정인지: 그 라벨의 30일 로그인(서버가 메일을 알려 주는 열쇠)으로 메일과 주간 풀림 시각을 받아 새 토큰 것과 맞춘다.
+
+    1년 토큰은 메일 조회 권한이 없어 직접 확인할 수 없다(코덱스 검수 2026-11-17 5차). 풀림 시각은 계정마다 다르고 사용률과 달리 쓰는 중에도 안 바뀐다.
+    30일 로그인은 creds/<라벨>.json 이 아직 30일 꼴이면 그것, 아니면 가장 최근 creds/_bak_30d_*/ 백업. (맞음, 사유)를 돌려준다.
+    """
+    import glob
+    import cred_refresh as cr
+    import switch_account as sa
+    want = ""
+    try:
+        for a in json.loads((R.BASE / "accounts.json").read_text(encoding="utf-8")):
+            if isinstance(a, dict) and a.get("label") == label:
+                want = str(a.get("email") or "").lower()
+    except Exception:
+        pass
+    cands = [R.BASE / "creds" / f"{label}.json"] + sorted((Path(p) for p in glob.glob(str(R.BASE / "creds" / "_bak_30d_*" / "**" / "creds" / f"{label}.json"), recursive=True)), reverse=True)
+    for c in cands:
+        try:
+            obj = json.loads(c.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if cr.is_long_lived(obj):
+            continue
+        tmp = OUT_DIR / f".verify-{label}.json"
+        tmp.write_text(json.dumps(obj), encoding="utf-8")
+        try:
+            o = obj.get("claudeAiOauth") or {}
+            if cr._ms(o.get("expiresAt")) and cr._ms(o.get("expiresAt")) < time.time() + 60:
+                cr.refresh_file(tmp)   # 백업 사본만 갱신한다(쓰는 중인 파일이 아님)
+            mail = (sa.cred_email(tmp) or "").lower()
+            if not mail:
+                continue
+            if want and mail != want:
+                return False, f"30일 로그인 메일이 {mail} 로 라벨 메일과 다름"
+            import usage_check as uc
+            u = uc.get_usage(tmp)
+            rs = (u or {}).get("weekly_reset")
+            if rs and me[1] and abs(float(rs) - float(me[1])) < 120:
+                return True, f"{mail} 의 주간 풀림 시각과 같음"
+            if rs and me[1]:
+                return False, "주간 풀림 시각이 30일 로그인과 다름(다른 계정일 수 있음)"
+        except Exception:
+            continue
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return False, "확인에 쓸 30일 로그인이 없음"
 
 
 def same_account_check(label):
@@ -251,4 +311,5 @@ if __name__ == "__main__":
         sys.exit(same_account_check(sys.argv[2]))
     if len(sys.argv) >= 3 and sys.argv[1] == "--pty":
         sys.exit(issue_pty(sys.argv[2]))
-    sys.exit(issue(sys.argv[1] if len(sys.argv) > 1 else "E"))
+    # 옛 issue()(디버그 포트 크롬)는 claude.ai 가 "브라우저를 확인하지 못했습니다"로 막고 계정 확인도 없어 쓰지 않는다(2026-11-17)
+    sys.exit(issue_pty(sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "E"))
