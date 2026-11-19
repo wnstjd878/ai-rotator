@@ -183,7 +183,10 @@ def _cli_ua() -> str:
             import subprocess
             exe = shutil.which("claude") or shutil.which("claude.exe")
             if exe:
-                out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20).stdout
+                # 창 없이: 작업 스케줄러가 pythonw 로 3분마다 부를 때 이 플래그가 없으면
+                # claude.exe 가 새 콘솔을 받아 빈 터미널 창이 번쩍인다(2026-11-19 실측).
+                out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
                 m = re.search(r"(\d+\.\d+\.\d+)", out or "")
                 if m:
                     _CLI_VER = m.group(1)
