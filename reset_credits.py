@@ -13,7 +13,10 @@
 입력: accounts.json 라벨, chrome/<라벨> 프로필
 출력: reset_credits.json {at, accounts:{라벨:{ok, at, why, weekly, grants:[...], juniper:{...}}}}
       메일 주소·조직 번호·열쇠는 적지 않는다.
-의도적 미구현: 초기화권 사용(청구) 호출. 읽기만 한다. 쓰는 건 사람이 claude.ai 화면에서 누른다.
+초기화권 쓰기(2026-11-19 사장님 "초기화권 누르면 초기화되는 기능도 붙여봐"): python reset_credits.py --claim <라벨> <초기화권 번호>
+      claude.ai/api/organizations/<조직>/reset_rate_limits 에 {program:"cedar_ember", grant_id, request_id} (Claude Code 의
+      /rate-limit-options 와 같은 요청). AI 오피스 카드의 "쓰기" 버튼이 확인 창을 거친 뒤에만 부른다. 결과 JSON 한 줄을 찍고 그 계정을 다시 읽는다.
+      claude.ai 는 초기화권을 정해진 차례로만 받는다(next_grant_id, 아니면 not_next_grant).
       로그인이 풀린 프로필에 로그인 시도 안 함(그 계정은 why 에 적고 넘어간다).
 겹침: 그 라벨 전용 크롬이 이미 떠 있으면(relogin 중) 새로 띄우지 않고 그 창에 붙는다.
 마지막 점검: 2026-11-19
@@ -93,19 +96,47 @@ def _read_one(pg) -> dict:
     return {
         "ok": True, "tier": str(org.get("rate_limit_tier") or ""),
         "weekly": sd.get("utilization"), "weeklyReset": sd.get("resets_at") or "",
-        "grants": grants, "left": sum(g["left"] for g in grants),
+        "grants": grants, "left": sum(g["left"] for g in grants), "nextGrantId": ce.get("next_grant_id") or "",
+        "atLimit": bool(ce.get("at_limit")),
         "cooldownUntil": ce.get("cooldown_until") or "",
         "juniper": {"available": bool(jt.get("available")), "eligible": bool(jt.get("eligible")),
                     "nextAvailableAt": jt.get("next_available_at") or "", "perWeek": jt.get("resets_per_week")},
     }
 
 
-def read_label(label: str) -> dict:
+CLAIM_JS = """async([org,body])=>{const r=await fetch('/api/organizations/'+org+'/reset_rate_limits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let j=null;try{j=await r.json()}catch(e){};return [r.status,j]}"""
+
+
+def _org(pg):
+    orgs = pg.evaluate("async()=>{const r=await fetch('/api/organizations');return [r.status, r.status===200? await r.json(): null]}")
+    if orgs[0] != 200 or not isinstance(orgs[1], list):
+        return None
+    chat = [o for o in orgs[1] if "chat" in (o.get("capabilities") or [])]
+    return chat[0]["uuid"] if chat else None
+
+
+def _claim_one(pg, grant_id: str) -> dict:
+    import re
+    import uuid
+    if not re.fullmatch(r"[a-z0-9_-]{1,40}", grant_id or ""):
+        return {"ok": False, "why": "초기화권 번호가 올바르지 않습니다"}
+    _read_one(pg)   # 로그인·보안 확인 통과
+    org = _org(pg)
+    if not org:
+        return {"ok": False, "why": "claude.ai 조직을 못 찾았습니다"}
+    st, j = pg.evaluate(CLAIM_JS, [org, {"program": "cedar_ember", "grant_id": grant_id, "request_id": uuid.uuid4().hex}])
+    j = j if isinstance(j, dict) else {}
+    res = str(j.get("result") or "")
+    return {"ok": st == 200 and res == "reset", "status": st, "result": res, "reason": j.get("reason") or "",
+            "resetsLeft": j.get("resets_left"), "cleared": j.get("cleared") or [], "weeklyResetsAt": j.get("weekly_resets_at") or ""}
+
+
+def with_page(label: str, fn):
     from playwright.sync_api import sync_playwright
 
     own = None
     port = port_for(label)
-    if not _alive(port):   # 재로그인 창이 안 떠 있으면 수집용으로 화면 밖에 띄운다
+    if not _alive(port):
         prof = CHROME_DIR / label
         if not (prof / "Default").is_dir():
             return {"ok": False, "why": "이 계정 전용 크롬 프로필이 없습니다"}
@@ -126,7 +157,7 @@ def read_label(label: str) -> dict:
             ctx = b.contexts[0] if b.contexts else b.new_context()
             pg = ctx.new_page()
             try:
-                return _read_one(pg)
+                return fn(pg)
             finally:
                 try:
                     pg.close()
@@ -143,7 +174,17 @@ def read_label(label: str) -> dict:
                 own.kill()
 
 
+def read_label(label: str) -> dict:
+    return with_page(label, _read_one)
+
+
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--claim"]:
+        if len(argv) != 3 or argv[1] not in labels():
+            print(json.dumps({"ok": False, "why": "사용: --claim <라벨> <초기화권 번호>"}, ensure_ascii=False)); return 2
+        r = with_page(argv[1], lambda pg: _claim_one(pg, argv[2]))
+        print("CLAIM " + json.dumps(r, ensure_ascii=False), flush=True)
+        argv = [argv[1]]   # 그 계정만 다시 읽어 파일에 반영
     try:
         if LOCK.exists() and time.time() - LOCK.stat().st_mtime < 900:
             print("[reset_credits] 이미 도는 중"); return 0
