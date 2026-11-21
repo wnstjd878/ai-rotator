@@ -14,16 +14,16 @@ def pre(pct, hours, fable=False, usable=True, left=1, fpct=None):
     return {"grants": [g], "limits": lim, "nextGrantId": "g1"}
 
 cases = [
-    ("A 처럼 9시간 뒤 풀림", pre(100, 9), "저절로 풀려서"),
-    ("B 처럼 51%만 씀", pre(51, 140), "아직 51%만"),
+    ("A 처럼 9시간 뒤 풀림", pre(100, 9), "저절로 풀림"),
+    ("B 처럼 51%만 씀", pre(51, 140), "51% 사용"),
     ("꽉 찼고 3일 남음", pre(100, 72), ""),
-    ("사용량 모름", {"grants": [{"id": "g1", "label": "x", "left": 1, "usableNow": True}], "limits": {}}, "확인하지 못해"),
-    ("다 쓴 초기화권", pre(100, 72, left=0), "이미 다 쓴"),
-    ("차례 아님", pre(100, 72, usable=False), "쓸 수 없는"),
-    ("Fable 권인데 Fable 칸 없음", pre(100, 72, fable=True), "Fable 한도 사용량을 확인하지 못해"),
-    ("Fable 권, Fable 40%", pre(100, 72, fable=True, fpct=40), "Fable 한도를 아직 40%만"),
+    ("사용량 모름", {"grants": [{"id": "g1", "label": "x", "left": 1, "usableNow": True}], "limits": {}}, "사용량 확인 안 됨"),
+    ("다 쓴 초기화권", pre(100, 72, left=0), "이미 씀"),
+    ("차례 아님", pre(100, 72, usable=False), "못 쓴다고"),
+    ("Fable 권인데 Fable 칸 없음", pre(100, 72, fable=True), "Fable 한도 사용량 확인 안 됨"),
+    ("Fable 권, Fable 40%", pre(100, 72, fable=True, fpct=40), "Fable 한도 40% 사용"),
     ("Fable 권, Fable 100%", pre(10, 72, fable=True, fpct=100), ""),
-    ("없는 번호", pre(100, 72), "없습니다"),
+    ("없는 번호", pre(100, 72), "없는 초기화권"),
 ]
 fail = 0
 for name, p, want in cases:

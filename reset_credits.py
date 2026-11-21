@@ -186,7 +186,7 @@ def _read_one(pg, label: str) -> dict:
     jt = u.get("juniper_tide") or {}
     sd = u.get("seven_day") or {}
     grants = [_grant(g) for g in (ce.get("grants") or []) if isinstance(g, dict)]
-    return {
+    out = {
         "ok": True, "tier": str(org.get("rate_limit_tier") or ""),
         "weekly": sd.get("utilization"), "weeklyReset": sd.get("resets_at") or "",
         "grants": grants, "limits": _limits(u), "left": sum(g["left"] for g in grants), "nextGrantId": ce.get("next_grant_id") or "",
@@ -195,6 +195,9 @@ def _read_one(pg, label: str) -> dict:
         "juniper": {"available": bool(jt.get("available")), "eligible": bool(jt.get("eligible")),
                     "nextAvailableAt": jt.get("next_available_at") or "", "perWeek": jt.get("resets_per_week")},
     }
+    for g in grants:   # 화면이 "쓰기"를 회색으로 두고 이유를 미리 띄우게(2026-11-21). 쓰기 직전에 claim_blocker 를 다시 돌린다
+        g["block"] = claim_blocker(out, g["id"])
+    return out
 
 
 CLAIM_JS = """async([org,body])=>{const r=await fetch('/api/organizations/'+org+'/reset_rate_limits',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let j=null;try{j=await r.json()}catch(e){};return [r.status,j]}"""
@@ -221,7 +224,7 @@ def _claim_one(pg, label: str, grant_id: str) -> dict:
         return {"ok": False, "why": bad, "wrongAccount": True}
     stop = claim_blocker(pre, grant_id)
     if stop:
-        return {"ok": False, "why": stop, "blocked": True}
+        return {"ok": False, "why": "쓰지 않았습니다. " + stop, "blocked": True}
     org = _org(pg)
     if not org:
         return {"ok": False, "why": "claude.ai 조직을 못 찾았습니다"}
@@ -237,31 +240,31 @@ MIN_HOURS_LEFT = 12    # 한도가 이 시간 안에 저절로 풀리면 쓰지 
 
 
 def claim_blocker(pre: dict, grant_id: str, now: float | None = None) -> str:
-    """초기화권을 쓰면 안 되는 이유. 쓸 수 있으면 빈 문자열. 확인할 값이 없으면 쓰지 않는다(모르면 멈춤)."""
+    """초기화권을 쓰면 안 되는 이유(카드에 그대로 뜨는 짧은 꼴). 쓸 수 있으면 빈 문자열. 확인할 값이 없으면 쓰지 않는다(모르면 멈춤)."""
     from datetime import datetime, timezone
     g = next((x for x in pre.get("grants") or [] if x.get("id") == grant_id), None)
     if not g:
-        return "이 계정에 그 초기화권이 없습니다"
+        return "이 계정에 없는 초기화권"
     if g.get("left", 0) <= 0:
-        return "이미 다 쓴 초기화권입니다"
+        return "이미 씀"
     if not g.get("usableNow"):
-        return "지금은 쓸 수 없는 초기화권입니다" + (" (다른 초기화권 먼저)" if pre.get("nextGrantId") and pre.get("nextGrantId") != grant_id else "")
+        return "기한이 먼저 끝나는 초기화권부터" if pre.get("nextGrantId") and pre.get("nextGrantId") != grant_id else "claude.ai 가 아직 못 쓴다고 함"
     fable = "fable" in str(g.get("label") or "").lower()
     lim = (pre.get("limits") or {}).get("fable" if fable else "weekly")
     name = "Fable 한도" if fable else "주간 한도"
     if not lim or lim.get("pct") is None or not lim.get("resetsAt"):
-        return name + " 사용량을 확인하지 못해 쓰지 않았습니다"
+        return name + " 사용량 확인 안 됨"
     pct = float(lim["pct"])
     try:
         at = datetime.fromisoformat(str(lim["resetsAt"]).replace("Z", "+00:00"))
     except Exception:
-        return name + " 풀리는 시각을 확인하지 못해 쓰지 않았습니다"
+        return name + " 풀리는 시각 확인 안 됨"
     hours = (at.timestamp() - (now if now is not None else time.time())) / 3600
     when = at.astimezone().strftime("%m/%d %H:%M")
     if hours < MIN_HOURS_LEFT:
-        return f"{name}가 {when}에 저절로 풀려서 쓰지 않았습니다({hours:.0f}시간 남음)"
+        return f"{name}가 {when}에 저절로 풀림"
     if pct < MIN_USED_PCT:
-        return f"{name}를 아직 {pct:.0f}%만 써서 쓰지 않았습니다({MIN_USED_PCT}% 넘었을 때만 씁니다)"
+        return f"{name} {pct:.0f}% 사용 · {MIN_USED_PCT}%부터 씀"
     return ""
 
 
