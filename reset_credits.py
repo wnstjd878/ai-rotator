@@ -24,6 +24,8 @@
       B·C 를 부를 때 그 A 창에 붙어 B·C 버튼이 A 초기화권을 썼다. 그래서 (1) 새로 띄울 땐 빈 번호를 고르고
       (2) 끌 땐 자식까지 끄고 (3) 읽기·쓰기 전에 claude.ai 에 로그인된 메일이 accounts.json 의 그 라벨 메일과 같은지
       확인해 다르면 멈춘다. 이 확인을 빼지 말 것.
+쓰기 막기(2026-11-21 사장님 "이런 오류 절대 안나게"): claim_blocker 가 쓰기 직전에 본다. 그 한도를 90% 안 썼거나
+      12시간 안에 저절로 풀리거나, 사용량·풀리는 시각을 못 읽으면 쓰지 않는다. 앱에서 넘기는 길은 일부러 만들지 않았다.
 마지막 점검: 2026-11-21
 """
 
@@ -135,8 +137,25 @@ def _grant(g: dict) -> dict:
         "left": int(g.get("resets_left") or 0), "total": int(g.get("resets_total") or 0),
         "endsAt": g.get("ends_at") or "", "startsAt": g.get("starts_at") or "",
         "usableNow": bool(g.get("usable_now")), "paused": bool(g.get("paused")),
-        "why": g.get("unavailable_reason") or "",
+        "why": g.get("unavailable_reason") or "", "clears": clears,
     }
+
+
+def _limits(u: dict) -> dict:
+    """주간 전체·Fable 사용률과 풀리는 시각. limits 칸(weekly_all·weekly_scoped Fable)을 쓰고 없으면 seven_day."""
+    out = {}
+    for l in u.get("limits") or []:
+        if not isinstance(l, dict):
+            continue
+        name = (((l.get("scope") or {}).get("model") or {}).get("display_name") or "")
+        if l.get("kind") == "weekly_all":
+            out["weekly"] = {"pct": l.get("percent"), "resetsAt": l.get("resets_at") or ""}
+        elif l.get("kind") == "weekly_scoped" and "fable" in str(name).lower():
+            out["fable"] = {"pct": l.get("percent"), "resetsAt": l.get("resets_at") or ""}
+    sd = u.get("seven_day") or {}
+    if "weekly" not in out and sd:
+        out["weekly"] = {"pct": sd.get("utilization"), "resetsAt": sd.get("resets_at") or ""}
+    return out
 
 
 def _read_one(pg, label: str) -> dict:
@@ -170,7 +189,7 @@ def _read_one(pg, label: str) -> dict:
     return {
         "ok": True, "tier": str(org.get("rate_limit_tier") or ""),
         "weekly": sd.get("utilization"), "weeklyReset": sd.get("resets_at") or "",
-        "grants": grants, "left": sum(g["left"] for g in grants), "nextGrantId": ce.get("next_grant_id") or "",
+        "grants": grants, "limits": _limits(u), "left": sum(g["left"] for g in grants), "nextGrantId": ce.get("next_grant_id") or "",
         "atLimit": bool(ce.get("at_limit")),
         "cooldownUntil": ce.get("cooldown_until") or "",
         "juniper": {"available": bool(jt.get("available")), "eligible": bool(jt.get("eligible")),
@@ -200,6 +219,9 @@ def _claim_one(pg, label: str, grant_id: str) -> dict:
     bad = _wrong_account(pg, label)   # 쓰기 직전 한 번 더
     if bad:
         return {"ok": False, "why": bad, "wrongAccount": True}
+    stop = claim_blocker(pre, grant_id)
+    if stop:
+        return {"ok": False, "why": stop, "blocked": True}
     org = _org(pg)
     if not org:
         return {"ok": False, "why": "claude.ai 조직을 못 찾았습니다"}
@@ -208,6 +230,39 @@ def _claim_one(pg, label: str, grant_id: str) -> dict:
     res = str(j.get("result") or "")
     return {"ok": st == 200 and res == "reset", "status": st, "result": res, "reason": j.get("reason") or "",
             "resetsLeft": j.get("resets_left"), "cleared": j.get("cleared") or [], "weeklyResetsAt": j.get("weekly_resets_at") or ""}
+
+
+MIN_USED_PCT = 90      # 이만큼 안 썼으면 쓰지 않는다(덜 쓴 계정에 초기화권을 버리는 것 막기)
+MIN_HOURS_LEFT = 12    # 한도가 이 시간 안에 저절로 풀리면 쓰지 않는다(2026-11-21 사장님 "A는 오늘 21시에 초기화인데")
+
+
+def claim_blocker(pre: dict, grant_id: str, now: float | None = None) -> str:
+    """초기화권을 쓰면 안 되는 이유. 쓸 수 있으면 빈 문자열. 확인할 값이 없으면 쓰지 않는다(모르면 멈춤)."""
+    from datetime import datetime, timezone
+    g = next((x for x in pre.get("grants") or [] if x.get("id") == grant_id), None)
+    if not g:
+        return "이 계정에 그 초기화권이 없습니다"
+    if g.get("left", 0) <= 0:
+        return "이미 다 쓴 초기화권입니다"
+    if not g.get("usableNow"):
+        return "지금은 쓸 수 없는 초기화권입니다" + (" (다른 초기화권 먼저)" if pre.get("nextGrantId") and pre.get("nextGrantId") != grant_id else "")
+    fable = "fable" in str(g.get("label") or "").lower()
+    lim = (pre.get("limits") or {}).get("fable" if fable else "weekly")
+    name = "Fable 한도" if fable else "주간 한도"
+    if not lim or lim.get("pct") is None or not lim.get("resetsAt"):
+        return name + " 사용량을 확인하지 못해 쓰지 않았습니다"
+    pct = float(lim["pct"])
+    try:
+        at = datetime.fromisoformat(str(lim["resetsAt"]).replace("Z", "+00:00"))
+    except Exception:
+        return name + " 풀리는 시각을 확인하지 못해 쓰지 않았습니다"
+    hours = (at.timestamp() - (now if now is not None else time.time())) / 3600
+    when = at.astimezone().strftime("%m/%d %H:%M")
+    if hours < MIN_HOURS_LEFT:
+        return f"{name}가 {when}에 저절로 풀려서 쓰지 않았습니다({hours:.0f}시간 남음)"
+    if pct < MIN_USED_PCT:
+        return f"{name}를 아직 {pct:.0f}%만 써서 쓰지 않았습니다({MIN_USED_PCT}% 넘었을 때만 씁니다)"
+    return ""
 
 
 def with_page(label: str, fn):
