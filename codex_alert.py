@@ -33,6 +33,7 @@ st.use("codex")
 import codex_home  # noqa: E402
 import codex_usage  # noqa: E402
 import notify  # noqa: E402
+import alert_common  # noqa: E402
 
 st.SAVED_LABELS_FN = codex_home.logged_in_labels
 
@@ -132,12 +133,7 @@ def _load_alerted() -> dict:
 
 
 def _save_alerted(d: dict) -> None:
-    if len(d) > HISTORY_KEEP:
-        d = dict(list(d.items())[-HISTORY_KEEP:])
-    try:
-        ALERT_STATE.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+    alert_common.save_alerted(ALERT_STATE, d, HISTORY_KEEP)
 
 
 def _check(kind: str, pct, reset, label: str, alerted: dict):
@@ -176,12 +172,7 @@ def _others_weekly(label: str, seen: list | None = None) -> list:
 
 def _next_label(label: str, others: list, state: dict | None = None):
     """이 계정이 막히면 순환기가 다음에 고를 계정. 순서 규칙은 pool_state 한 곳에서 온다."""
-    alive = [l for l, rem in others if rem > 0]
-    if not alive:
-        return None
-    state = st.prune_blocked(st.load_state()) if state is None else state
-    order = st.priority_order(state, alive)
-    return order[0] if order else None
+    return alert_common.next_label(st, others, state)
 
 
 def build_message(label: str, hits: list, others: list) -> str:
@@ -198,20 +189,7 @@ def build_message(label: str, hits: list, others: list) -> str:
         elif others:  # 목록이 비면 사용량을 못 읽은 것 — 없다고 단정하지 않는다
             head += ", 전환할 계정 없음"
 
-    lines = [head, ""]
-    for kind, rem, reset in hits:
-        when = _fmt_reset_full(reset)
-        lines.append(f"{_KIND_NAME[kind]} {_pct(rem)} 남음" + (f" ({when})" if when else ""))
-
-    ok = [(l, r) for l, r in others if r > 0]
-    dead = [(l, r) for l, r in others if r <= 0]
-    if ok:
-        lines += ["", "전환 가능"]
-        lines += [f"계정 {l} {_pct(r)}" + (" (다음)" if l == nxt else "") for l, r in ok]
-    if dead:
-        lines += ["", "사용 불가"]
-        lines += [f"계정 {l} {_pct(r)}" for l, r in dead]
-    return "\n".join(lines)
+    return alert_common.message_body(head, hits, others, nxt, _KIND_NAME, _pct, _fmt_reset_full)
 
 
 def refresh_order() -> int:
